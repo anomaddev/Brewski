@@ -171,19 +171,148 @@ body {
     flex: 1;
     display: flex;
     flex-direction: column;
-    justify-content: center;
-    align-items: center;
-    padding: 40px;
-    margin: 20px auto;
-    width: calc(100% - 40px);
-    max-width: 500px;
-    background: white;
-    border-radius: 20px;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    padding: 20px;
+    margin: 0;
+    width: 100%;
+    max-width: 1400px;
+    background: transparent;
+    border-radius: 0;
+    box-shadow: none;
 }
 
 .container > * {
     width: 100%;
+}
+
+/* Dashboard Grid Layout */
+.dashboard-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 20px;
+    width: 100%;
+}
+
+/* Dashboard Cards */
+.dashboard-card {
+    background: white;
+    border-radius: 15px;
+    padding: 24px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    display: flex;
+    flex-direction: column;
+}
+
+.card-title {
+    font-size: 1.3em;
+    font-weight: 600;
+    color: #333;
+    margin-bottom: 20px;
+    padding-bottom: 12px;
+    border-bottom: 2px solid #f0f0f0;
+}
+
+/* Chart Card */
+.chart-card {
+    min-height: 400px;
+}
+
+.chart-container {
+    flex: 1;
+    position: relative;
+    height: 350px;
+    width: 100%;
+}
+
+/* Status Card */
+.status-card {
+    min-height: 400px;
+}
+
+.status-details {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    margin-bottom: 24px;
+}
+
+.status-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px;
+    background: #f8f9fa;
+    border-radius: 10px;
+    border-left: 4px solid #667eea;
+}
+
+.status-label {
+    font-size: 1em;
+    color: #666;
+    font-weight: 500;
+}
+
+.status-value {
+    font-size: 1.2em;
+    font-weight: 600;
+    color: #333;
+}
+
+.status-value.running {
+    color: #10b981;
+}
+
+.status-actions {
+    display: flex;
+    gap: 12px;
+    margin-top: auto;
+}
+
+.action-btn {
+    flex: 1;
+    padding: 14px 24px;
+    border: none;
+    border-radius: 10px;
+    font-size: 1em;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+    user-select: none;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.pause-btn {
+    background: #f59e0b;
+    color: white;
+}
+
+.pause-btn:hover {
+    background: #d97706;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+}
+
+.pause-btn:active {
+    transform: translateY(0);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.stop-btn {
+    background: #ef4444;
+    color: white;
+}
+
+.stop-btn:hover {
+    background: #dc2626;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+}
+
+.stop-btn:active {
+    transform: translateY(0);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 }
 
 h1 {
@@ -257,32 +386,6 @@ h1 {
 
 /* Better touch feedback for mobile */
 @media (hover: none) and (pointer: coarse) {
-    .keypad-btn:hover {
-        background: #667eea;
-        transform: none;
-    }
-    
-    .keypad-btn:active {
-        background: #5568d3;
-        transform: scale(0.95);
-    }
-    
-    .clear-btn:hover {
-        background: #ef4444;
-    }
-    
-    .clear-btn:active {
-        background: #dc2626;
-    }
-    
-    .submit-btn:hover {
-        background: #10b981;
-    }
-    
-    .submit-btn:active {
-        background: #059669;
-    }
-    
     .menu-btn:hover {
         background: transparent;
     }
@@ -301,6 +404,16 @@ h1 {
         background: rgba(102, 126, 234, 0.1);
         border-left-color: #667eea;
         color: #667eea;
+    }
+    
+    .pause-btn:hover,
+    .stop-btn:hover {
+        transform: none;
+    }
+    
+    .pause-btn:active,
+    .stop-btn:active {
+        transform: scale(0.98);
     }
 }
 
@@ -321,45 +434,81 @@ h1 {
 }
 
 /* Responsive design */
+@media (max-width: 768px) {
+    .dashboard-grid {
+        grid-template-columns: 1fr;
+        gap: 16px;
+    }
+    
+    .chart-card,
+    .status-card {
+        min-height: 350px;
+    }
+    
+    .chart-container {
+        height: 300px;
+    }
+    
+    .dashboard-card {
+        padding: 20px;
+    }
+    
+    .card-title {
+        font-size: 1.2em;
+        margin-bottom: 16px;
+    }
+}
+
 @media (max-width: 600px) {
     .container {
-        padding: 25px 15px;
-        border-radius: 15px;
-        margin: 15px auto;
-        width: calc(100% - 30px);
+        padding: 15px;
     }
     
-    h1 {
-        font-size: 1.5em;
-        margin-bottom: 25px;
-    }
-    
-    .temperature-display {
-        height: 150px;
-        min-height: 150px;
-        font-size: 3em;
-        margin-bottom: 25px;
-        border-radius: 12px;
-    }
-    
-    .keypad {
+    .dashboard-grid {
         gap: 12px;
     }
     
-    .keypad-btn {
-        padding: 20px;
-        font-size: 1.5em;
+    .chart-card,
+    .status-card {
+        min-height: 300px;
+    }
+    
+    .chart-container {
+        height: 250px;
+    }
+    
+    .dashboard-card {
+        padding: 16px;
         border-radius: 12px;
-        min-height: 60px;
+    }
+    
+    .card-title {
+        font-size: 1.1em;
+        margin-bottom: 12px;
+    }
+    
+    .status-item {
+        padding: 12px;
+        gap: 12px;
+    }
+    
+    .status-label {
+        font-size: 0.9em;
+    }
+    
+    .status-value {
+        font-size: 1.1em;
+    }
+    
+    .action-btn {
+        padding: 12px 20px;
+        font-size: 0.95em;
     }
 }
 
 @media (max-width: 400px) {
     .container {
-        padding: 20px 12px;
-        border-radius: 12px;
-        margin: 10px auto;
-        width: calc(100% - 20px);
+        padding: 12px;
     }
     
     .menu-title {
@@ -370,28 +519,25 @@ h1 {
         width: 260px;
     }
     
-    h1 {
-        font-size: 1.3em;
-        margin-bottom: 20px;
+    .chart-card,
+    .status-card {
+        min-height: 280px;
     }
     
-    .temperature-display {
-        height: 120px;
-        min-height: 120px;
-        font-size: 2.5em;
-        margin-bottom: 20px;
-        border-radius: 10px;
+    .chart-container {
+        height: 220px;
     }
     
-    .keypad {
-        gap: 10px;
+    .dashboard-card {
+        padding: 14px;
     }
     
-    .keypad-btn {
-        padding: 18px 12px;
-        font-size: 1.3em;
-        border-radius: 10px;
-        min-height: 55px;
+    .status-actions {
+        flex-direction: column;
+    }
+    
+    .action-btn {
+        width: 100%;
     }
 }
 
@@ -427,29 +573,16 @@ h1 {
 /* Landscape orientation on mobile */
 @media (max-height: 500px) and (orientation: landscape) {
     .container {
-        padding: 15px;
-    }
-    
-    h1 {
-        font-size: 1.2em;
-        margin-bottom: 15px;
-    }
-    
-    .temperature-display {
-        height: 100px;
-        min-height: 100px;
-        font-size: 2.5em;
-        margin-bottom: 15px;
-    }
-    
-    .keypad {
-        gap: 8px;
-    }
-    
-    .keypad-btn {
         padding: 12px;
-        font-size: 1.2em;
-        min-height: 50px;
+    }
+    
+    .chart-card,
+    .status-card {
+        min-height: 250px;
+    }
+    
+    .chart-container {
+        height: 200px;
     }
 }
 

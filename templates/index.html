@@ -3,8 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Temperature Controller</title>
+    <title>Brewski 1.0 - Dashboard</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
     <!-- Menu Bar -->
@@ -29,93 +30,142 @@
     </div>
     
     <div class="container">
-        <h1>Temperature Controller</h1>
-        
-        <!-- Temperature Display -->
-        <div class="temperature-display" id="temperature-display"></div>
-        
-        <!-- Custom Keypad -->
-        <div class="keypad">
-            <!-- Row 1: 1, 2, 3 -->
-            <button class="keypad-btn" onclick="handleKeypadClick(1)">1</button>
-            <button class="keypad-btn" onclick="handleKeypadClick(2)">2</button>
-            <button class="keypad-btn" onclick="handleKeypadClick(3)">3</button>
+        <div class="dashboard-grid">
+            <!-- Temperature Chart Section -->
+            <div class="dashboard-card chart-card">
+                <h2 class="card-title">Temperature Over Time</h2>
+                <div class="chart-container">
+                    <canvas id="temperatureChart"></canvas>
+                </div>
+            </div>
             
-            <!-- Row 2: 4, 5, 6 -->
-            <button class="keypad-btn" onclick="handleKeypadClick(4)">4</button>
-            <button class="keypad-btn" onclick="handleKeypadClick(5)">5</button>
-            <button class="keypad-btn" onclick="handleKeypadClick(6)">6</button>
-            
-            <!-- Row 3: 7, 8, 9 -->
-            <button class="keypad-btn" onclick="handleKeypadClick(7)">7</button>
-            <button class="keypad-btn" onclick="handleKeypadClick(8)">8</button>
-            <button class="keypad-btn" onclick="handleKeypadClick(9)">9</button>
-            
-            <!-- Row 4: Clear, 0, Submit -->
-            <button class="keypad-btn clear-btn" onclick="handleClear()">Clear</button>
-            <button class="keypad-btn" onclick="handleKeypadClick(0)">0</button>
-            <button class="keypad-btn submit-btn" onclick="handleSubmit()">Submit</button>
+            <!-- System Status Section -->
+            <div class="dashboard-card status-card">
+                <h2 class="card-title">System Status</h2>
+                <div class="status-details">
+                    <div class="status-item">
+                        <span class="status-label">System Status:</span>
+                        <span class="status-value running">Running</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">Target Temp:</span>
+                        <span class="status-value">165°F</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">Current Temp:</span>
+                        <span class="status-value">134°F</span>
+                    </div>
+                </div>
+                <div class="status-actions">
+                    <button class="action-btn pause-btn" onclick="handlePause()">Pause</button>
+                    <button class="action-btn stop-btn" onclick="handleStop()">Stop</button>
+                </div>
+            </div>
         </div>
     </div>
     
     <script>
-        let currentInput = '';
-        
-        function handleKeypadClick(number) {
-            currentInput += number.toString();
-            updateDisplay();
-        }
-        
-        function handleClear() {
-            currentInput = '';
-            updateDisplay();
-        }
-        
-        function updateDisplay() {
-            const display = document.getElementById('temperature-display');
-            if (currentInput === '') {
-                display.textContent = '';
-            } else {
-                display.textContent = currentInput + '°F';
-            }
-        }
-        
-        function handleSubmit() {
-            if (currentInput === '') {
-                alert('Please enter a temperature value');
-                return;
+        // Generate polynomial temperature data (2 hours, 40F to 165F)
+        function generateTemperatureData() {
+            const dataPoints = 120; // 120 minutes = 2 hours
+            const startTemp = 40;
+            const endTemp = 165;
+            const tempRange = endTemp - startTemp;
+            const labels = [];
+            const temperatures = [];
+            
+            // Create polynomial curve (quadratic for smooth heating curve)
+            for (let i = 0; i <= dataPoints; i++) {
+                const t = i / dataPoints; // Normalized time (0 to 1)
+                // Polynomial: t^2 creates a smooth curve that accelerates then levels
+                const temp = startTemp + tempRange * (t * t);
+                labels.push(formatTime(i));
+                temperatures.push(Math.round(temp * 10) / 10);
             }
             
-            const temperature = parseInt(currentInput, 10);
+            return { labels, temperatures };
+        }
+        
+        function formatTime(minutes) {
+            const hours = Math.floor(minutes / 60);
+            const mins = minutes % 60;
+            return `${hours}:${mins.toString().padStart(2, '0')}`;
+        }
+        
+        // Initialize temperature chart
+        function initTemperatureChart() {
+            const { labels, temperatures } = generateTemperatureData();
+            const ctx = document.getElementById('temperatureChart').getContext('2d');
             
-            // Client-side validation: check if within 40-200 range
-            if (temperature < 40 || temperature > 200) {
-                alert(`Temperature ${temperature}°F is outside acceptable range (40-200°F)`);
-                return;
-            }
-            
-            // Send to backend
-            fetch('/submit_temperature', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
+            new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Temperature (°F)',
+                        data: temperatures,
+                        borderColor: '#667eea',
+                        backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                        borderWidth: 2,
+                        fill: true,
+                        tension: 0.4, // Smooth curve
+                        pointRadius: 0, // Hide points for cleaner look
+                        pointHoverRadius: 4
+                    }]
                 },
-                body: JSON.stringify({ temperature: temperature })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    console.log('Temperature submitted successfully:', temperature);
-                    // Optionally clear input after successful submit
-                    // handleClear();
-                } else {
-                    alert('Error: ' + data.message);
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: true,
+                            position: 'top'
+                        },
+                        tooltip: {
+                            mode: 'index',
+                            intersect: false
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: false,
+                            min: 30,
+                            max: 180,
+                            title: {
+                                display: true,
+                                text: 'Temperature (°F)'
+                            },
+                            grid: {
+                                color: 'rgba(0, 0, 0, 0.05)'
+                            }
+                        },
+                        x: {
+                            title: {
+                                display: true,
+                                text: 'Time (Hours:Minutes)'
+                            },
+                            grid: {
+                                display: false
+                            }
+                        }
+                    },
+                    interaction: {
+                        mode: 'nearest',
+                        axis: 'x',
+                        intersect: false
+                    }
                 }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                alert('Error submitting temperature. Please try again.');
             });
+        }
+        
+        function handlePause() {
+            console.log('Pause button clicked');
+            // TODO: Implement pause functionality
+        }
+        
+        function handleStop() {
+            console.log('Stop button clicked');
+            // TODO: Implement stop functionality
         }
         
         function toggleSidebar() {
@@ -129,6 +179,11 @@
             toggleSidebar();
             // TODO: Implement navigation logic
         }
+        
+        // Initialize chart when page loads
+        document.addEventListener('DOMContentLoaded', function() {
+            initTemperatureChart();
+        });
     </script>
 </body>
 </html>

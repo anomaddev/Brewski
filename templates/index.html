@@ -69,6 +69,7 @@
                 <div class="dashboard-card current-temps-card">
                     <div class="card-title-with-timer">
                         <h2 class="card-title">Current Temps</h2>
+                        <button class="view-all-btn" onclick="handleSetTarget()">Set Target</button>
                     </div>
                     <div class="status-details">
                         <div class="status-item">
@@ -125,6 +126,37 @@
         </div>
     </div>
     
+    <!-- Temperature Keypad Modal -->
+    <div class="modal-overlay" id="temperature-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Set Target Temperature</h2>
+                <button class="modal-close" onclick="closeTemperatureModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="temperature-display" id="modal-temperature-display"></div>
+                <div class="keypad">
+                    <button class="keypad-btn" onclick="appendDigit(1)">1</button>
+                    <button class="keypad-btn" onclick="appendDigit(2)">2</button>
+                    <button class="keypad-btn" onclick="appendDigit(3)">3</button>
+                    <button class="keypad-btn" onclick="appendDigit(4)">4</button>
+                    <button class="keypad-btn" onclick="appendDigit(5)">5</button>
+                    <button class="keypad-btn" onclick="appendDigit(6)">6</button>
+                    <button class="keypad-btn" onclick="appendDigit(7)">7</button>
+                    <button class="keypad-btn" onclick="appendDigit(8)">8</button>
+                    <button class="keypad-btn" onclick="appendDigit(9)">9</button>
+                    <button class="keypad-btn clear-btn" onclick="clearTemperature()">Clear</button>
+                    <button class="keypad-btn" onclick="appendDigit(0)">0</button>
+                    <button class="keypad-btn" onclick="backspaceTemperature()">⌫</button>
+                </div>
+                <div class="modal-actions">
+                    <button class="action-btn cancel-btn" onclick="closeTemperatureModal()">Cancel</button>
+                    <button class="action-btn submit-btn" onclick="submitTemperature()">Submit</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
     <script>
         // Generate polynomial temperature data (2 hours, 40F to 165F)
         function generateTemperatureData() {
@@ -161,12 +193,31 @@
             return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
         }
         
+        // Chart instance (stored globally to allow updates)
+        let temperatureChart = null;
+        
+        // Get target temperature from dashboard
+        function getTargetTemperature() {
+            const targetTempElement = document.querySelector('.current-temps-card .status-item:first-child .status-value');
+            if (targetTempElement) {
+                const tempText = targetTempElement.textContent;
+                // Extract number from "165°F" format
+                const match = tempText.match(/(\d+(?:\.\d+)?)/);
+                return match ? parseFloat(match[1]) : 165;
+            }
+            return 165; // Default fallback
+        }
+        
         // Initialize temperature chart
         function initTemperatureChart() {
             const { labels, temperatures } = generateTemperatureData();
+            const targetTemp = getTargetTemperature();
             const ctx = document.getElementById('temperatureChart').getContext('2d');
             
-            new Chart(ctx, {
+            // Create target temperature line data (horizontal line at target temp)
+            const targetLineData = labels.map(() => targetTemp);
+            
+            temperatureChart = new Chart(ctx, {
                 type: 'line',
                 data: {
                     labels: labels,
@@ -180,6 +231,17 @@
                         tension: 0.4, // Smooth curve
                         pointRadius: 0, // Hide points for cleaner look
                         pointHoverRadius: 4
+                    }, {
+                        label: 'Target Temperature',
+                        data: targetLineData,
+                        borderColor: '#10b981',
+                        backgroundColor: 'transparent',
+                        borderWidth: 2,
+                        borderDash: [5, 5], // Dashed line
+                        fill: false,
+                        pointRadius: 0,
+                        pointHoverRadius: 0,
+                        tension: 0 // Straight line
                     }]
                 },
                 options: {
@@ -236,6 +298,122 @@
             console.log('Stop button clicked');
             // TODO: Implement stop functionality
         }
+        
+        // Temperature modal state
+        let currentTemperature = '';
+        
+        function handleSetTarget() {
+            currentTemperature = '';
+            updateTemperatureDisplay();
+            openTemperatureModal();
+        }
+        
+        function openTemperatureModal() {
+            const modal = document.getElementById('temperature-modal');
+            modal.classList.add('active');
+            // Prevent body scroll when modal is open
+            document.body.style.overflow = 'hidden';
+        }
+        
+        function closeTemperatureModal() {
+            const modal = document.getElementById('temperature-modal');
+            modal.classList.remove('active');
+            // Restore body scroll
+            document.body.style.overflow = '';
+            // Reset temperature
+            currentTemperature = '';
+            updateTemperatureDisplay();
+        }
+        
+        function appendDigit(digit) {
+            // Limit to 3 digits (max 200°F)
+            if (currentTemperature.length < 3) {
+                currentTemperature += digit.toString();
+                updateTemperatureDisplay();
+            }
+        }
+        
+        function clearTemperature() {
+            currentTemperature = '';
+            updateTemperatureDisplay();
+        }
+        
+        function backspaceTemperature() {
+            if (currentTemperature.length > 0) {
+                currentTemperature = currentTemperature.slice(0, -1);
+                updateTemperatureDisplay();
+            }
+        }
+        
+        function updateTemperatureDisplay() {
+            const display = document.getElementById('modal-temperature-display');
+            if (currentTemperature === '') {
+                display.textContent = '';
+            } else {
+                display.textContent = currentTemperature + '°F';
+            }
+        }
+        
+        function submitTemperature() {
+            if (currentTemperature === '') {
+                alert('Please enter a temperature');
+                return;
+            }
+            
+            const temp = parseFloat(currentTemperature);
+            
+            // Validate range (40-200°F)
+            if (isNaN(temp) || temp < 40 || temp > 200) {
+                alert('Temperature must be between 40°F and 200°F');
+                return;
+            }
+            
+            // Submit to server
+            fetch('/submit_temperature', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ temperature: temp })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    // Update the target temp display on the dashboard
+                    const targetTempElement = document.querySelector('.current-temps-card .status-item:first-child .status-value');
+                    if (targetTempElement) {
+                        targetTempElement.textContent = temp + '°F';
+                    }
+                    // Update the target temperature line on the chart
+                    updateChartTargetLine(temp);
+                    closeTemperatureModal();
+                } else {
+                    alert(data.message || 'Error submitting temperature');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Error submitting temperature. Please try again.');
+            });
+        }
+        
+        // Update chart target temperature line
+        function updateChartTargetLine(targetTemp) {
+            if (temperatureChart) {
+                const { labels } = generateTemperatureData();
+                const targetLineData = labels.map(() => targetTemp);
+                temperatureChart.data.datasets[1].data = targetLineData;
+                temperatureChart.update();
+            }
+        }
+        
+        // Close modal when clicking outside
+        document.addEventListener('click', function(event) {
+            const modal = document.getElementById('temperature-modal');
+            if (event.target === modal) {
+                closeTemperatureModal();
+            }
+        });
         
         function toggleSidebar() {
             const sidebar = document.getElementById('sidebar');

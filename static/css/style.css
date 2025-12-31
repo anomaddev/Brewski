@@ -675,6 +675,168 @@ h1 {
     background: #059669;
 }
 
+/* Modal Styles */
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s ease;
+}
+
+.modal-overlay.active {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.modal-content {
+    background: white;
+    border-radius: 20px;
+    width: 90%;
+    max-width: 500px;
+    max-height: 90vh;
+    height: auto;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    transform: scale(0.9);
+    transition: transform 0.3s ease;
+}
+
+.modal-overlay.active .modal-content {
+    transform: scale(1);
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px 24px;
+    border-bottom: 1px solid #e5e7eb;
+    flex-shrink: 0;
+}
+
+.modal-header h2 {
+    font-size: 1.5em;
+    font-weight: 600;
+    color: #333;
+    margin: 0;
+}
+
+.modal-close {
+    background: transparent;
+    border: none;
+    font-size: 2em;
+    color: #666;
+    cursor: pointer;
+    padding: 0;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    transition: all 0.2s ease;
+    line-height: 1;
+}
+
+.modal-close:hover {
+    background: rgba(0, 0, 0, 0.05);
+    color: #333;
+}
+
+.modal-close:active {
+    background: rgba(0, 0, 0, 0.1);
+}
+
+.modal-body {
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.modal-body .temperature-display {
+    height: 120px;
+    min-height: 120px;
+    font-size: 3em;
+    margin-bottom: 20px;
+    flex-shrink: 0;
+}
+
+.modal-body .keypad {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    align-content: start;
+}
+
+.modal-body .keypad-btn {
+    padding: 16px;
+    font-size: 1.4em;
+    min-height: 60px;
+}
+
+.modal-actions {
+    display: flex;
+    gap: 12px;
+    margin-top: 20px;
+    justify-content: flex-end;
+    flex-shrink: 0;
+}
+
+.modal-actions .action-btn {
+    flex: 1;
+    max-width: 150px;
+    padding: 12px 24px;
+    font-size: 1em;
+    font-weight: 600;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.cancel-btn {
+    background: #e5e7eb;
+    color: #333;
+}
+
+.cancel-btn:hover {
+    background: #d1d5db;
+}
+
+.cancel-btn:active {
+    transform: scale(0.98);
+}
+
+.modal-actions .submit-btn {
+    background: #10b981;
+    color: white;
+}
+
+.modal-actions .submit-btn:hover {
+    background: #059669;
+}
+
+.modal-actions .submit-btn:active {
+    transform: scale(0.98);
+}
+
 /* Responsive design */
 @media (max-width: 768px) {
     .container {
@@ -807,6 +969,62 @@ h1 {
         padding: 3px 10px;
     }
     
+    /* Hide End Time, Heater 1, and Heater 2 columns on mobile only */
+    .history-table th:nth-child(2),
+    .history-table td:nth-child(2),
+    .history-table th:nth-child(5),
+    .history-table td:nth-child(5),
+    .history-table th:nth-child(6),
+    .history-table td:nth-child(6) {
+        display: none;
+    }
+    
+    /* Modal responsive styles */
+    .modal-content {
+        width: 95%;
+        max-height: 95vh;
+        border-radius: 16px;
+    }
+    
+    .modal-header {
+        padding: 16px 20px;
+    }
+    
+    .modal-header h2 {
+        font-size: 1.3em;
+    }
+    
+    .modal-body {
+        padding: 16px;
+    }
+    
+    .modal-body .temperature-display {
+        height: 100px;
+        min-height: 100px;
+        font-size: 2.5em;
+        margin-bottom: 16px;
+    }
+    
+    .modal-body .keypad {
+        gap: 10px;
+    }
+    
+    .modal-body .keypad-btn {
+        padding: 12px;
+        font-size: 1.2em;
+        min-height: 50px;
+    }
+    
+    .modal-actions {
+        margin-top: 16px;
+        flex-direction: column;
+    }
+    
+    .modal-actions .action-btn {
+        max-width: 100%;
+        width: 100%;
+    }
+    
     .status-item {
         padding: 12px;
         gap: 12px;
@@ -885,6 +1103,16 @@ h1 {
     .history-table td {
         padding: 8px 6px;
     }
+    
+    /* Ensure columns stay hidden on very small screens */
+    .history-table th:nth-child(2),
+    .history-table td:nth-child(2),
+    .history-table th:nth-child(5),
+    .history-table td:nth-child(5),
+    .history-table th:nth-child(6),
+    .history-table td:nth-child(6) {
+        display: none;
+    }
 }
 
 /* Very small screens */
@@ -914,6 +1142,50 @@ h1 {
         font-size: 1.2em;
         min-height: 50px;
     }
+    
+    /* Modal on very small screens */
+    .modal-content {
+        width: 98%;
+        max-height: 98vh;
+    }
+    
+    .modal-header {
+        padding: 12px 16px;
+    }
+    
+    .modal-header h2 {
+        font-size: 1.1em;
+    }
+    
+    .modal-body {
+        padding: 12px;
+    }
+    
+    .modal-body .temperature-display {
+        height: 80px;
+        min-height: 80px;
+        font-size: 2em;
+        margin-bottom: 12px;
+    }
+    
+    .modal-body .keypad {
+        gap: 8px;
+    }
+    
+    .modal-body .keypad-btn {
+        padding: 10px 8px;
+        font-size: 1.1em;
+        min-height: 45px;
+    }
+    
+    .modal-actions {
+        margin-top: 12px;
+    }
+    
+    .modal-actions .action-btn {
+        padding: 10px 20px;
+        font-size: 0.9em;
+    }
 }
 
 /* Landscape orientation on mobile */
@@ -933,6 +1205,28 @@ h1 {
     
     .chart-container {
         height: 200px;
+    }
+    
+    /* Modal in landscape orientation */
+    .modal-content {
+        max-height: 95vh;
+    }
+    
+    .modal-body .temperature-display {
+        height: 80px;
+        min-height: 80px;
+        font-size: 2em;
+        margin-bottom: 12px;
+    }
+    
+    .modal-body .keypad-btn {
+        padding: 10px;
+        font-size: 1.1em;
+        min-height: 45px;
+    }
+    
+    .modal-actions {
+        margin-top: 12px;
     }
 }
 

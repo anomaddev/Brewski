@@ -64,7 +64,8 @@
                     <table class="history-table">
                         <thead>
                             <tr>
-                                <th>Date</th>
+                                <th>Start Time</th>
+                                <th>End Time</th>
                                 <th>Duration</th>
                                 <th>Target</th>
                                 <th>Heater 1</th>
@@ -100,7 +101,8 @@
                 
                 const durationMinutes = 35 + Math.floor(Math.random() * 30); // 35-65 minutes
                 const durationSeconds = Math.floor(Math.random() * 60);
-                const duration = `${durationMinutes}:${durationSeconds.toString().padStart(2, '0')}`;
+                const durationTotalSeconds = durationMinutes * 60 + durationSeconds;
+                const duration = formatDurationHMS(durationTotalSeconds);
                 
                 const targets = [160, 165, 170, 162, 168, 175, 163, 167];
                 const target = targets[Math.floor(Math.random() * targets.length)];
@@ -120,6 +122,7 @@
                     date: date,
                     duration: duration,
                     durationMinutes: durationMinutes,
+                    durationTotalSeconds: durationTotalSeconds,
                     target: target,
                     heater1Minutes: heater1Minutes,
                     heater2Minutes: heater2Minutes,
@@ -152,7 +155,15 @@
             };
         }
         
-        // Format duration in minutes to HH:MM
+        // Format duration in seconds to HH:MM:SS
+        function formatDurationHMS(totalSeconds) {
+            const hrs = Math.floor(totalSeconds / 3600);
+            const mins = Math.floor((totalSeconds % 3600) / 60);
+            const secs = totalSeconds % 60;
+            return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+        }
+        
+        // Format duration in minutes to HH:MM (for heater times and average)
         function formatDuration(minutes) {
             const hrs = Math.floor(minutes / 60);
             const mins = Math.floor(minutes % 60);
@@ -173,12 +184,26 @@
             
             // Render table
             tbody.innerHTML = runs.map(run => {
-                const dateStr = run.date.toLocaleDateString('en-US', { 
+                // Format start time
+                const startDateStr = run.date.toLocaleDateString('en-US', { 
                     month: 'short', 
                     day: 'numeric',
                     year: 'numeric'
                 });
-                const timeStr = run.date.toLocaleTimeString('en-US', { 
+                const startTimeStr = run.date.toLocaleTimeString('en-US', { 
+                    hour: 'numeric', 
+                    minute: '2-digit',
+                    hour12: true
+                });
+                
+                // Calculate end time by adding duration
+                const endDate = new Date(run.date.getTime() + run.durationTotalSeconds * 1000);
+                const endDateStr = endDate.toLocaleDateString('en-US', { 
+                    month: 'short', 
+                    day: 'numeric',
+                    year: 'numeric'
+                });
+                const endTimeStr = endDate.toLocaleTimeString('en-US', { 
                     hour: 'numeric', 
                     minute: '2-digit',
                     hour12: true
@@ -190,7 +215,8 @@
                 
                 return `
                     <tr>
-                        <td>${dateStr}<br><span class="time-text">${timeStr}</span></td>
+                        <td>${startDateStr}<br><span class="time-text">${startTimeStr}</span></td>
+                        <td>${endDateStr}<br><span class="time-text">${endTimeStr}</span></td>
                         <td>${run.duration}</td>
                         <td>${run.target}°F</td>
                         <td>${heater1Time}</td>

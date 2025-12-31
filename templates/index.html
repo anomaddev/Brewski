@@ -152,6 +152,14 @@
             return `${hours}:${mins.toString().padStart(2, '0')}`;
         }
         
+        // Format duration in seconds to HH:MM:SS
+        function formatDurationHMS(totalSeconds) {
+            const hrs = Math.floor(totalSeconds / 3600);
+            const mins = Math.floor((totalSeconds % 3600) / 60);
+            const secs = totalSeconds % 60;
+            return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+        }
+        
         // Initialize temperature chart
         function initTemperatureChart() {
             const { labels, temperatures } = generateTemperatureData();
@@ -276,13 +284,18 @@
                 date.setHours(Math.floor(Math.random() * 24));
                 date.setMinutes(Math.floor(Math.random() * 60));
                 
-                const durations = ['45:23', '52:10', '38:45', '61:30', '47:15', '55:20', '42:05', '59:12', '48:33', '51:08'];
+                // Generate random durations in seconds (35-65 minutes range)
+                const durationMinutes = 35 + Math.floor(Math.random() * 30);
+                const durationSeconds = Math.floor(Math.random() * 60);
+                const durationTotalSeconds = durationMinutes * 60 + durationSeconds;
+                const duration = formatDurationHMS(durationTotalSeconds);
+                
                 const targets = [165, 170, 160, 175, 165, 168, 162, 172, 165, 167];
                 const statuses = ['Completed', 'Completed', 'Completed', 'Completed', 'Completed', 'Completed', 'Stopped', 'Completed', 'Completed', 'Completed'];
                 
                 runs.push({
                     date: date,
-                    duration: durations[i - 1],
+                    duration: duration,
                     target: targets[i - 1],
                     status: statuses[i - 1]
                 });

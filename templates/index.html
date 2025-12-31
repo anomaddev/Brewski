@@ -7,6 +7,27 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
+    <!-- Menu Bar -->
+    <div class="menu-bar">
+        <button class="menu-btn" id="menu-btn" onclick="toggleSidebar()">
+            <span class="menu-icon">☰</span>
+        </button>
+        <div class="menu-title">Brewski 1.0</div>
+    </div>
+    
+    <!-- Sidebar Menu -->
+    <div class="sidebar" id="sidebar">
+        <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+        <div class="sidebar-content">
+            <button class="sidebar-close" onclick="toggleSidebar()">×</button>
+            <nav class="sidebar-nav">
+                <a href="#" class="sidebar-item" onclick="navigateTo('dashboard'); return false;">Dashboard</a>
+                <a href="#" class="sidebar-item" onclick="navigateTo('history'); return false;">History</a>
+                <a href="#" class="sidebar-item" onclick="navigateTo('settings'); return false;">Settings</a>
+            </nav>
+        </div>
+    </div>
+    
     <div class="container">
         <h1>Temperature Controller</h1>
         
@@ -95,6 +116,18 @@
                 console.error('Error:', error);
                 alert('Error submitting temperature. Please try again.');
             });
+        }
+        
+        function toggleSidebar() {
+            const sidebar = document.getElementById('sidebar');
+            sidebar.classList.toggle('active');
+        }
+        
+        function navigateTo(page) {
+            console.log('Navigate to:', page);
+            // Close sidebar after navigation
+            toggleSidebar();
+            // TODO: Implement navigation logic
         }
     </script>
 </body>

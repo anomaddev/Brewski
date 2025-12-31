@@ -212,9 +212,24 @@ body {
     font-size: 1.3em;
     font-weight: 600;
     color: #333;
+    margin: 0;
+}
+
+.card-title-with-timer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
     margin-bottom: 20px;
     padding-bottom: 12px;
     border-bottom: 2px solid #f0f0f0;
+}
+
+.timer-display {
+    font-size: 1.1em;
+    font-weight: 600;
+    color: #667eea;
+    font-variant-numeric: tabular-nums;
+    font-family: 'Courier New', monospace;
 }
 
 /* Chart Card */

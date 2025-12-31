@@ -43,7 +43,10 @@
             <div class="dashboard-column">
                 <!-- System Status Section -->
                 <div class="dashboard-card system-status-card">
-                    <h2 class="card-title">System Status</h2>
+                    <div class="card-title-with-timer">
+                        <h2 class="card-title">System Status</h2>
+                        <div class="timer-display" id="system-timer">45:00</div>
+                    </div>
                     <div class="status-details">
                         <div class="status-item">
                             <span class="status-label">System Status:</span>
@@ -208,9 +211,31 @@
             // TODO: Implement navigation logic
         }
         
+        // Initialize system timer (counting up from 45 minutes)
+        function initSystemTimer() {
+            let totalSeconds = 45 * 60; // Start at 45 minutes
+            
+            function updateTimer() {
+                const minutes = Math.floor(totalSeconds / 60);
+                const seconds = totalSeconds % 60;
+                const timerDisplay = document.getElementById('system-timer');
+                if (timerDisplay) {
+                    timerDisplay.textContent = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+                }
+                totalSeconds++;
+            }
+            
+            // Update immediately
+            updateTimer();
+            
+            // Update every second
+            setInterval(updateTimer, 1000);
+        }
+        
         // Initialize chart when page loads
         document.addEventListener('DOMContentLoaded', function() {
             initTemperatureChart();
+            initSystemTimer();
         });
     </script>
 </body>

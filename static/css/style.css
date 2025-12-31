@@ -198,6 +198,12 @@ body {
     gap: 20px;
 }
 
+/* Mobile: Stack sections in specific order */
+.mobile-order-1 { order: 1; }
+.mobile-order-2 { order: 2; }
+.mobile-order-3 { order: 3; }
+.mobile-order-4 { order: 4; }
+
 /* Dashboard Cards */
 .dashboard-card {
     background: white;
@@ -251,6 +257,75 @@ body {
 /* Current Temps Card */
 .current-temps-card {
     min-height: auto;
+}
+
+/* Previous Runs Card */
+.previous-runs-card {
+    min-height: auto;
+}
+
+.runs-table-container {
+    overflow-x: auto;
+}
+
+.runs-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.95em;
+}
+
+.runs-table thead {
+    background: #f8f9fa;
+}
+
+.runs-table th {
+    padding: 12px;
+    text-align: left;
+    font-weight: 600;
+    color: #666;
+    border-bottom: 2px solid #e0e0e0;
+    font-size: 0.9em;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.runs-table td {
+    padding: 12px;
+    border-bottom: 1px solid #f0f0f0;
+    color: #333;
+}
+
+.runs-table tbody tr:hover {
+    background: #f8f9fa;
+}
+
+.runs-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.time-text {
+    font-size: 0.85em;
+    color: #999;
+    display: block;
+    margin-top: 4px;
+}
+
+.status-badge {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 0.85em;
+    font-weight: 600;
+}
+
+.status-completed {
+    background: #d1fae5;
+    color: #065f46;
+}
+
+.status-stopped {
+    background: #fee2e2;
+    color: #991b1b;
 }
 
 .status-details {
@@ -489,20 +564,32 @@ h1 {
     }
     
     .dashboard-grid {
-        grid-template-columns: 1fr;
+        display: flex;
+        flex-direction: column;
         gap: 16px;
     }
     
     .dashboard-column {
-        gap: 16px;
+        display: contents;
+    }
+    
+    /* Mobile order: System Status (1), Chart (2), Current Temps (3), Previous Runs (4) */
+    .system-status-card {
+        order: 1;
     }
     
     .chart-card {
+        order: 2;
         min-height: 350px;
     }
     
     .current-temps-card {
+        order: 3;
         min-height: auto;
+    }
+    
+    .previous-runs-card {
+        order: 4;
     }
     
     .chart-container {
@@ -517,6 +604,15 @@ h1 {
         font-size: 1.2em;
         margin-bottom: 16px;
     }
+    
+    .runs-table {
+        font-size: 0.9em;
+    }
+    
+    .runs-table th,
+    .runs-table td {
+        padding: 10px 8px;
+    }
 }
 
 @media (max-width: 600px) {
@@ -529,16 +625,8 @@ h1 {
         gap: 12px;
     }
     
-    .dashboard-column {
-        gap: 12px;
-    }
-    
     .chart-card {
         min-height: 300px;
-    }
-    
-    .current-temps-card {
-        min-height: auto;
     }
     
     .chart-container {
@@ -553,6 +641,24 @@ h1 {
     .card-title {
         font-size: 1.1em;
         margin-bottom: 12px;
+    }
+    
+    .runs-table {
+        font-size: 0.85em;
+    }
+    
+    .runs-table th,
+    .runs-table td {
+        padding: 8px 6px;
+    }
+    
+    .time-text {
+        font-size: 0.8em;
+    }
+    
+    .status-badge {
+        font-size: 0.8em;
+        padding: 3px 10px;
     }
     
     .status-item {

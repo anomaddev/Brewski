@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Temperature Controller</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>Temperature Controller</h1>
+        
+        <!-- Temperature Display -->
+        <div class="temperature-display" id="temperature-display"></div>
+        
+        <!-- Custom Keypad -->
+        <div class="keypad">
+            <!-- Row 1: 1, 2, 3 -->
+            <button class="keypad-btn" onclick="handleKeypadClick(1)">1</button>
+            <button class="keypad-btn" onclick="handleKeypadClick(2)">2</button>
+            <button class="keypad-btn" onclick="handleKeypadClick(3)">3</button>
+            
+            <!-- Row 2: 4, 5, 6 -->
+            <button class="keypad-btn" onclick="handleKeypadClick(4)">4</button>
+            <button class="keypad-btn" onclick="handleKeypadClick(5)">5</button>
+            <button class="keypad-btn" onclick="handleKeypadClick(6)">6</button>
+            
+            <!-- Row 3: 7, 8, 9 -->
+            <button class="keypad-btn" onclick="handleKeypadClick(7)">7</button>
+            <button class="keypad-btn" onclick="handleKeypadClick(8)">8</button>
+            <button class="keypad-btn" onclick="handleKeypadClick(9)">9</button>
+            
+            <!-- Row 4: Clear, 0, Submit -->
+            <button class="keypad-btn clear-btn" onclick="handleClear()">Clear</button>
+            <button class="keypad-btn" onclick="handleKeypadClick(0)">0</button>
+            <button class="keypad-btn submit-btn" onclick="handleSubmit()">Submit</button>
+        </div>
+    </div>
+    
+    <script>
+        let currentInput = '';
+        
+        function handleKeypadClick(number) {
+            currentInput += number.toString();
+            updateDisplay();
+        }
+        
+        function handleClear() {
+            currentInput = '';
+            updateDisplay();
+        }
+        
+        function updateDisplay() {
+            const display = document.getElementById('temperature-display');
+            if (currentInput === '') {
+                display.textContent = '';
+            } else {
+                display.textContent = currentInput + '°F';
+            }
+        }
+        
+        function handleSubmit() {
+            if (currentInput === '') {
+                alert('Please enter a temperature value');
+                return;
+            }
+            
+            const temperature = parseInt(currentInput, 10);
+            
+            // Client-side validation: check if within 40-200 range
+            if (temperature < 40 || temperature > 200) {
+                alert(`Temperature ${temperature}°F is outside acceptable range (40-200°F)`);
+                return;
+            }
+            
+            // Send to backend
+            fetch('/submit_temperature', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ temperature: temperature })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    console.log('Temperature submitted successfully:', temperature);
+                    // Optionally clear input after successful submit
+                    // handleClear();
+                } else {
+                    alert('Error: ' + data.message);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Error submitting temperature. Please try again.');
+            });
+        }
+    </script>
+</body>
+</html>
+

@@ -192,6 +192,12 @@ body {
     width: 100%;
 }
 
+.dashboard-column {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
 /* Dashboard Cards */
 .dashboard-card {
     background: white;
@@ -223,8 +229,13 @@ body {
     width: 100%;
 }
 
-/* Status Card */
-.status-card {
+/* System Status Card (under chart) */
+.system-status-card {
+    min-height: auto;
+}
+
+/* Current Temps Card */
+.current-temps-card {
     min-height: 400px;
 }
 
@@ -464,9 +475,16 @@ h1 {
         gap: 16px;
     }
     
-    .chart-card,
-    .status-card {
+    .dashboard-column {
+        gap: 16px;
+    }
+    
+    .chart-card {
         min-height: 350px;
+    }
+    
+    .current-temps-card {
+        min-height: auto;
     }
     
     .chart-container {
@@ -493,9 +511,16 @@ h1 {
         gap: 12px;
     }
     
-    .chart-card,
-    .status-card {
+    .dashboard-column {
+        gap: 12px;
+    }
+    
+    .chart-card {
         min-height: 300px;
+    }
+    
+    .current-temps-card {
+        min-height: auto;
     }
     
     .chart-container {
@@ -545,9 +570,12 @@ h1 {
         width: 260px;
     }
     
-    .chart-card,
-    .status-card {
+    .chart-card {
         min-height: 280px;
+    }
+    
+    .current-temps-card {
+        min-height: auto;
     }
     
     .chart-container {
@@ -603,9 +631,12 @@ h1 {
         padding: 12px;
     }
     
-    .chart-card,
-    .status-card {
+    .chart-card {
         min-height: 250px;
+    }
+    
+    .current-temps-card {
+        min-height: auto;
     }
     
     .chart-container {

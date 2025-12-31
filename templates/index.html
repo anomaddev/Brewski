@@ -31,22 +31,50 @@
     
     <div class="container">
         <div class="dashboard-grid">
-            <!-- Temperature Chart Section -->
-            <div class="dashboard-card chart-card">
-                <h2 class="card-title">Temperature Over Time</h2>
-                <div class="chart-container">
-                    <canvas id="temperatureChart"></canvas>
+            <!-- Left Column: Chart and System Status -->
+            <div class="dashboard-column">
+                <!-- Temperature Chart Section -->
+                <div class="dashboard-card chart-card">
+                    <h2 class="card-title">Temperature Over Time</h2>
+                    <div class="chart-container">
+                        <canvas id="temperatureChart"></canvas>
+                    </div>
+                </div>
+                
+                <!-- System Status Section -->
+                <div class="dashboard-card system-status-card">
+                    <h2 class="card-title">System Status</h2>
+                    <div class="status-details">
+                        <div class="status-item">
+                            <span class="status-label">System Status:</span>
+                            <span class="status-value running">Running</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Heater 1:</span>
+                            <span class="status-value">
+                                <span class="status-indicator indicator-on"></span>
+                                On
+                            </span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Heater 2:</span>
+                            <span class="status-value">
+                                <span class="status-indicator indicator-on"></span>
+                                On
+                            </span>
+                        </div>
+                    </div>
+                    <div class="status-actions">
+                        <button class="action-btn pause-btn" onclick="handlePause()">Pause</button>
+                        <button class="action-btn stop-btn" onclick="handleStop()">Stop</button>
+                    </div>
                 </div>
             </div>
             
-            <!-- System Status Section -->
-            <div class="dashboard-card status-card">
-                <h2 class="card-title">System Status</h2>
+            <!-- Right Column: Current Temps -->
+            <div class="dashboard-card current-temps-card">
+                <h2 class="card-title">Current Temps</h2>
                 <div class="status-details">
-                    <div class="status-item">
-                        <span class="status-label">System Status:</span>
-                        <span class="status-value running">Running</span>
-                    </div>
                     <div class="status-item">
                         <span class="status-label">Target Temp:</span>
                         <span class="status-value">165°F</span>
@@ -59,24 +87,6 @@
                         <span class="status-label">Internal Temp:</span>
                         <span class="status-value">86°F</span>
                     </div>
-                    <div class="status-item">
-                        <span class="status-label">Heater 1:</span>
-                        <span class="status-value">
-                            <span class="status-indicator indicator-on"></span>
-                            On
-                        </span>
-                    </div>
-                    <div class="status-item">
-                        <span class="status-label">Heater 2:</span>
-                        <span class="status-value">
-                            <span class="status-indicator indicator-on"></span>
-                            On
-                        </span>
-                    </div>
-                </div>
-                <div class="status-actions">
-                    <button class="action-btn pause-btn" onclick="handlePause()">Pause</button>
-                    <button class="action-btn stop-btn" onclick="handleStop()">Stop</button>
                 </div>
             </div>
         </div>

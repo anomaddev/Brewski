@@ -219,32 +219,35 @@ body {
 
 /* Chart Card */
 .chart-card {
-    min-height: 400px;
+    height: fit-content;
 }
 
 .chart-container {
-    flex: 1;
     position: relative;
     height: 350px;
     width: 100%;
 }
 
-/* System Status Card (under chart) */
+/* System Status Card */
 .system-status-card {
     min-height: auto;
 }
 
 /* Current Temps Card */
 .current-temps-card {
-    min-height: 400px;
+    min-height: auto;
 }
 
 .status-details {
-    flex: 1;
     display: flex;
     flex-direction: column;
     gap: 24px;
     margin-bottom: 24px;
+}
+
+.system-status-card .status-details,
+.current-temps-card .status-details {
+    flex: 0;
 }
 
 .status-item {

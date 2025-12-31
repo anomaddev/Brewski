@@ -31,16 +31,16 @@
     
     <div class="container">
         <div class="dashboard-grid">
-            <!-- Left Column: Chart and System Status -->
-            <div class="dashboard-column">
-                <!-- Temperature Chart Section -->
-                <div class="dashboard-card chart-card">
-                    <h2 class="card-title">Temperature Over Time</h2>
-                    <div class="chart-container">
-                        <canvas id="temperatureChart"></canvas>
-                    </div>
+            <!-- Left Column: Chart -->
+            <div class="dashboard-card chart-card">
+                <h2 class="card-title">Temperature Over Time</h2>
+                <div class="chart-container">
+                    <canvas id="temperatureChart"></canvas>
                 </div>
-                
+            </div>
+            
+            <!-- Right Column: System Status and Current Temps -->
+            <div class="dashboard-column">
                 <!-- System Status Section -->
                 <div class="dashboard-card system-status-card">
                     <h2 class="card-title">System Status</h2>
@@ -69,23 +69,23 @@
                         <button class="action-btn stop-btn" onclick="handleStop()">Stop</button>
                     </div>
                 </div>
-            </div>
-            
-            <!-- Right Column: Current Temps -->
-            <div class="dashboard-card current-temps-card">
-                <h2 class="card-title">Current Temps</h2>
-                <div class="status-details">
-                    <div class="status-item">
-                        <span class="status-label">Target Temp:</span>
-                        <span class="status-value">165°F</span>
-                    </div>
-                    <div class="status-item">
-                        <span class="status-label">Current Temp:</span>
-                        <span class="status-value">134°F</span>
-                    </div>
-                    <div class="status-item">
-                        <span class="status-label">Internal Temp:</span>
-                        <span class="status-value">86°F</span>
+                
+                <!-- Current Temps Section -->
+                <div class="dashboard-card current-temps-card">
+                    <h2 class="card-title">Current Temps</h2>
+                    <div class="status-details">
+                        <div class="status-item">
+                            <span class="status-label">Target Temp:</span>
+                            <span class="status-value">165°F</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Current Temp:</span>
+                            <span class="status-value">134°F</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Internal Temp:</span>
+                            <span class="status-value">86°F</span>
+                        </div>
                     </div>
                 </div>
             </div>

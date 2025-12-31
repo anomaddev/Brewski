@@ -6,6 +6,10 @@ app = Flask(__name__)
 def index():
     return render_template('index.html')
 
+@app.route('/history')
+def history():
+    return render_template('history.html')
+
 @app.route('/submit_temperature', methods=['POST'])
 def submit_temperature():
     data = request.get_json()

@@ -328,6 +328,91 @@ body {
     color: #991b1b;
 }
 
+/* History Page Styles */
+.history-page {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    width: 100%;
+}
+
+.overview-card {
+    min-height: auto;
+}
+
+.overview-stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 20px;
+}
+
+.overview-stat {
+    text-align: center;
+    padding: 20px;
+    background: #f8f9fa;
+    border-radius: 10px;
+    border-left: 4px solid #667eea;
+}
+
+.stat-label {
+    font-size: 0.9em;
+    color: #666;
+    font-weight: 500;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.stat-value {
+    font-size: 2em;
+    font-weight: 700;
+    color: #333;
+    font-variant-numeric: tabular-nums;
+}
+
+.history-card {
+    min-height: auto;
+}
+
+.history-table-container {
+    overflow-x: auto;
+}
+
+.history-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.95em;
+}
+
+.history-table thead {
+    background: #f8f9fa;
+}
+
+.history-table th {
+    padding: 12px;
+    text-align: left;
+    font-weight: 600;
+    color: #666;
+    border-bottom: 2px solid #e0e0e0;
+    font-size: 0.9em;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.history-table td {
+    padding: 12px;
+    border-bottom: 1px solid #f0f0f0;
+    color: #333;
+}
+
+.history-table tbody tr:hover {
+    background: #f8f9fa;
+}
+
+.history-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
 .status-details {
     display: flex;
     flex-direction: column;
@@ -613,6 +698,33 @@ h1 {
     .runs-table td {
         padding: 10px 8px;
     }
+    
+    .overview-stats {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 16px;
+    }
+    
+    .stat-value {
+        font-size: 1.6em;
+    }
+    
+    .history-table {
+        font-size: 0.9em;
+    }
+    
+    .history-table th,
+    .history-table td {
+        padding: 10px 8px;
+    }
+    
+    .overview-stats {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 16px;
+    }
+    
+    .stat-value {
+        font-size: 1.6em;
+    }
 }
 
 @media (max-width: 600px) {
@@ -716,6 +828,28 @@ h1 {
     
     .action-btn {
         width: 100%;
+    }
+    
+    .overview-stats {
+        grid-template-columns: 1fr;
+        gap: 12px;
+    }
+    
+    .stat-value {
+        font-size: 1.4em;
+    }
+    
+    .overview-stat {
+        padding: 16px;
+    }
+    
+    .history-table {
+        font-size: 0.85em;
+    }
+    
+    .history-table th,
+    .history-table td {
+        padding: 8px 6px;
     }
 }
 

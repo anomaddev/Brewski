@@ -22,8 +22,8 @@
         <div class="sidebar-content">
             <button class="sidebar-close" onclick="toggleSidebar()">×</button>
             <nav class="sidebar-nav">
-                <a href="#" class="sidebar-item" onclick="navigateTo('dashboard'); return false;">Dashboard</a>
-                <a href="#" class="sidebar-item" onclick="navigateTo('history'); return false;">History</a>
+                <a href="/" class="sidebar-item">Dashboard</a>
+                <a href="/history" class="sidebar-item">History</a>
                 <a href="#" class="sidebar-item" onclick="navigateTo('settings'); return false;">Settings</a>
             </nav>
         </div>
@@ -235,9 +235,12 @@
         
         function navigateTo(page) {
             console.log('Navigate to:', page);
-            // Close sidebar after navigation
             toggleSidebar();
-            // TODO: Implement navigation logic
+            if (page === 'dashboard') {
+                window.location.href = '/';
+            } else if (page === 'history') {
+                window.location.href = '/history';
+            }
         }
         
         // Initialize system timer (counting up from 45 minutes)

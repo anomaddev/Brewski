@@ -172,8 +172,8 @@ body {
     display: flex;
     flex-direction: column;
     padding: 20px;
-    margin: 0;
-    width: 100%;
+    margin: 0 auto;
+    width: calc(100% - 40px);
     max-width: 1400px;
     background: transparent;
     border-radius: 0;
@@ -435,6 +435,11 @@ h1 {
 
 /* Responsive design */
 @media (max-width: 768px) {
+    .container {
+        width: calc(100% - 30px);
+        padding: 15px;
+    }
+    
     .dashboard-grid {
         grid-template-columns: 1fr;
         gap: 16px;
@@ -461,7 +466,8 @@ h1 {
 
 @media (max-width: 600px) {
     .container {
-        padding: 15px;
+        width: calc(100% - 24px);
+        padding: 12px;
     }
     
     .dashboard-grid {
@@ -508,7 +514,8 @@ h1 {
 
 @media (max-width: 400px) {
     .container {
-        padding: 12px;
+        width: calc(100% - 20px);
+        padding: 10px;
     }
     
     .menu-title {
@@ -573,6 +580,7 @@ h1 {
 /* Landscape orientation on mobile */
 @media (max-height: 500px) and (orientation: landscape) {
     .container {
+        width: calc(100% - 24px);
         padding: 12px;
     }
     

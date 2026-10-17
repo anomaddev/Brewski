@@ -1,0 +1,64 @@
+import { escapeHtml } from './format.js'
+import { closeSidebar, mountShell } from './layout.js'
+import { mountDashboard } from './pages/dashboard.js'
+import { mountHistory } from './pages/history.js'
+import { mountRun } from './pages/run.js'
+import { mountSettings } from './pages/settings.js'
+
+let cleanup = () => {}
+
+function matchRoute(path) {
+  if (path === '/') return { id: 'dashboard', title: 'Dashboard', mount: mountDashboard, params: {} }
+  if (path === '/history') return { id: 'history', title: 'History', mount: mountHistory, params: {} }
+  const run = path.match(/^\/history\/(\d+)$/)
+  if (run) return { id: 'history', title: 'Run', mount: mountRun, params: { id: run[1] } }
+  if (path === '/settings') return { id: 'settings', title: 'Settings', mount: mountSettings, params: {} }
+  return null
+}
+
+async function render() {
+  const previous = cleanup
+  cleanup = () => {}
+  previous()
+  closeSidebar()
+  const route = matchRoute(window.location.pathname)
+  document.title = route ? `Brewski — ${route.title}` : 'Brewski'
+  const page = mountShell(route ? route.id : '')
+  if (!route) {
+    page.innerHTML = `
+      <div class="dashboard-card">
+        <h2 class="card-title">Page not found</h2>
+        <p class="help"><a href="/">Back to the dashboard</a></p>
+      </div>`
+    return
+  }
+  try {
+    cleanup = (await route.mount(page, route.params)) || (() => {})
+  } catch (error) {
+    page.innerHTML = `
+      <div class="dashboard-card">
+        <h2 class="card-title">Something went wrong</h2>
+        <p class="form-error">${escapeHtml(error.message)}</p>
+      </div>`
+  }
+}
+
+export function startRouter() {
+  window.addEventListener('popstate', () => {
+    render()
+  })
+  document.body.addEventListener('click', (event) => {
+    const link = event.target.closest('a[href]')
+    if (!link || link.target === '_blank' || event.metaKey || event.ctrlKey || event.shiftKey) return
+    const url = new URL(link.href, window.location.origin)
+    if (url.origin !== window.location.origin) return
+    event.preventDefault()
+    if (url.pathname === window.location.pathname) {
+      closeSidebar()
+      return
+    }
+    window.history.pushState(null, '', url.pathname)
+    render()
+  })
+  render()
+}

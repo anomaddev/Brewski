@@ -8,14 +8,95 @@ Chart.defaults.color = TICK
 Chart.defaults.borderColor = GRID
 Chart.defaults.font.family = "Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif"
 
-export function createTempChart(canvas) {
-  return new Chart(canvas, {
+const NARROW = '(max-width: 800px)'
+const START_LINE = '#34d399'
+const STOP_LINE = '#f87171'
+
+const runMarkersPlugin = {
+  id: 'runMarkers',
+  afterDatasetsDraw(chart) {
+    const markers = chart.$markers
+    const area = chart.chartArea
+    if (!markers?.length || !area) return
+    const xScale = chart.scales.x
+    const ctx = chart.ctx
+    ctx.save()
+    ctx.beginPath()
+    ctx.rect(area.left, area.top, area.right - area.left, area.bottom - area.top)
+    ctx.clip()
+    for (const marker of markers) {
+      const x = xScale.getPixelForValue(marker.at)
+      if (!Number.isFinite(x) || x < area.left || x > area.right) return
+      const start = marker.kind === 'start'
+      ctx.beginPath()
+      ctx.strokeStyle = start ? START_LINE : STOP_LINE
+      ctx.lineWidth = 1.5
+      ctx.setLineDash([4, 3])
+      ctx.moveTo(x, area.top)
+      ctx.lineTo(x, area.bottom)
+      ctx.stroke()
+      ctx.setLineDash([])
+      ctx.fillStyle = start ? START_LINE : STOP_LINE
+      ctx.font = "11px Inter, ui-sans-serif, system-ui, sans-serif"
+      ctx.textBaseline = 'top'
+      const label = start ? 'Start' : 'Stop'
+      const width = ctx.measureText(label).width
+      const placeLeft = start
+      ctx.textAlign = placeLeft ? 'right' : 'left'
+      let textX = placeLeft ? x - 6 : x + 6
+      if (placeLeft && textX - width < area.left + 2) {
+        ctx.textAlign = 'left'
+        textX = Math.min(x + 6, area.right - width - 2)
+      }
+      if (!placeLeft && textX + width > area.right - 2) {
+        ctx.textAlign = 'right'
+        textX = Math.max(x - 6, area.left + width + 2)
+      }
+      ctx.fillText(label, textX, area.top + 4)
+    }
+    ctx.restore()
+  },
+}
+
+Chart.register(runMarkersPlugin)
+
+function clockLabel(at) {
+  return new Date(at).toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+}
+
+function applyChartLayout(chart) {
+  const narrow = window.matchMedia(NARROW).matches
+  const { options } = chart
+  options.layout.padding = narrow
+    ? { top: 4, right: 2, bottom: 0, left: 0 }
+    : { top: 8, right: 12, bottom: 4, left: 4 }
+  options.plugins.legend.labels.boxWidth = narrow ? 8 : 10
+  options.plugins.legend.labels.boxHeight = narrow ? 8 : 10
+  options.plugins.legend.labels.padding = narrow ? 8 : 12
+  options.plugins.legend.labels.font = { size: narrow ? 11 : 12 }
+  options.scales.y.title.display = !narrow
+  options.scales.y.ticks.maxTicksLimit = narrow ? 5 : 8
+  options.scales.x.title.display = !narrow
+  options.scales.x.ticks.maxTicksLimit = narrow ? 4 : 8
+  options.scales.x.ticks.maxRotation = 0
+  options.scales.x.ticks.minRotation = 0
+  options.interaction.mode = narrow ? 'index' : 'nearest'
+  chart.update('none')
+}
+
+export function createTempChart(canvas, { timed = false } = {}) {
+  const chart = new Chart(canvas, {
     type: 'line',
     data: { labels: [], datasets: [] },
     options: {
       responsive: true,
       maintainAspectRatio: false,
       animation: false,
+      layout: { padding: { top: 8, right: 12, bottom: 4, left: 4 } },
       plugins: {
         legend: {
           display: true,
@@ -31,6 +112,14 @@ export function createTempChart(canvas) {
           borderColor: 'rgba(255, 255, 255, 0.08)',
           borderWidth: 1,
           padding: 10,
+          callbacks: timed
+            ? {
+                title(items) {
+                  const value = items[0]?.parsed?.x
+                  return Number.isFinite(value) ? clockLabel(value) : ''
+                },
+              }
+            : {},
         },
       },
       scales: {
@@ -40,22 +129,57 @@ export function createTempChart(canvas) {
           grid: { color: GRID },
           border: { display: false },
         },
-        x: {
-          title: { display: true, text: 'Time', color: TICK },
-          ticks: { color: TICK, maxTicksLimit: 8 },
-          grid: { display: false },
-          border: { display: false },
-        },
+        x: timed
+          ? {
+              type: 'linear',
+              title: { display: true, text: 'Time', color: TICK },
+              ticks: {
+                color: TICK,
+                maxTicksLimit: 8,
+                maxRotation: 0,
+                minRotation: 0,
+                callback(value) {
+                  return new Date(value).toLocaleTimeString('en-US', {
+                    hour: 'numeric',
+                    minute: '2-digit',
+                  })
+                },
+              },
+              grid: { display: false },
+              border: { display: false },
+            }
+          : {
+              title: { display: true, text: 'Time', color: TICK },
+              ticks: { color: TICK, maxTicksLimit: 8, maxRotation: 0, minRotation: 0 },
+              grid: { display: false },
+              border: { display: false },
+            },
       },
       interaction: { mode: 'nearest', axis: 'x', intersect: false },
     },
   })
+  const media = window.matchMedia(NARROW)
+  const onChange = () => applyChartLayout(chart)
+  media.addEventListener('change', onChange)
+  const destroy = chart.destroy.bind(chart)
+  chart.destroy = () => {
+    media.removeEventListener('change', onChange)
+    destroy()
+  }
+  chart.$timed = timed
+  chart.$markers = []
+  applyChartLayout(chart)
+  return chart
 }
 
-export function setChartPoints(chart, points, sensorNames) {
+export function setChartPoints(chart, points, sensorNames, markers = []) {
+  chart.$markers = markers
+  const timed = Boolean(chart.$timed)
   const datasets = sensorNames.map((name, index) => ({
     label: `${name} (°F)`,
-    data: points.map((point) => point.temps[index] ?? null),
+    data: points.map((point) =>
+      timed ? { x: point.at, y: point.temps[index] ?? null } : (point.temps[index] ?? null),
+    ),
     borderColor: SENSOR_COLORS[index % SENSOR_COLORS.length],
     backgroundColor: index === 0 ? 'rgba(125, 211, 252, 0.16)' : 'rgba(251, 191, 36, 0.08)',
     borderWidth: 2,
@@ -63,21 +187,22 @@ export function setChartPoints(chart, points, sensorNames) {
     tension: 0.25,
     pointRadius: 0,
     pointHoverRadius: 4,
-    spanGaps: true,
+    spanGaps: timed ? 30000 : true,
   }))
   if (points.length) {
     datasets.push({
       label: 'Target (°F)',
-      data: points.map((point) => point.target),
+      data: points.map((point) => (timed ? { x: point.at, y: point.target } : point.target)),
       borderColor: '#64748b',
       borderDash: [6, 4],
       borderWidth: 2,
       pointRadius: 0,
       fill: false,
       tension: 0,
+      spanGaps: timed ? 30000 : true,
     })
   }
-  chart.data.labels = points.map((point) => point.label)
+  chart.data.labels = timed ? [] : points.map((point) => point.label)
   chart.data.datasets = datasets
   chart.update()
 }

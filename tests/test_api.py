@@ -70,7 +70,10 @@ def test_pause_does_not_log_paused_time(client, controller):
 
 def test_shape_is_locked_during_a_run_but_target_can_change(client, controller):
     client.post("/api/runs/start")
-    locked = client.put("/api/settings", json={"heater_count": 1})
+    current = client.get("/api/settings").get_json()
+    heaters = current["heaters"]
+    heaters[1]["enabled"] = False
+    locked = client.put("/api/settings", json={"heaters": heaters})
     assert locked.status_code == 409
 
     changed = client.put("/api/settings", json={"target_temp_f": 180})
@@ -85,9 +88,16 @@ def test_shape_is_locked_during_a_run_but_target_can_change(client, controller):
 
 
 def test_one_heater_and_one_sensor(client, controller):
-    saved = client.put("/api/settings", json={"heater_count": 1, "sensor_count": 1})
+    current = client.get("/api/settings").get_json()
+    heaters = current["heaters"]
+    sensors = current["sensors"]
+    heaters[1]["enabled"] = False
+    sensors[1]["enabled"] = False
+    saved = client.put("/api/settings", json={"heaters": heaters, "sensors": sensors})
     assert saved.status_code == 200
     assert saved.get_json()["heater_names"] == ["Heater 1", "Heater 2"]
+    assert saved.get_json()["heaters"][1]["enabled"] is False
+    assert saved.get_json()["heaters"][1]["gpio"] == 27
 
     status = client.get("/api/status").get_json()
     assert status["heater_count"] == 1
@@ -107,7 +117,7 @@ def test_one_heater_and_one_sensor(client, controller):
 def test_invalid_settings_and_transitions(client):
     assert client.put("/api/settings", json={"heater_count": 3}).status_code == 400
     assert client.put("/api/settings", json={"target_temp_f": 10}).status_code == 400
-    assert client.put("/api/settings", json={"sensor_names": ["Only"]}).status_code == 400
+    assert client.put("/api/settings", json={"sensors": [{"name": "Only"}]}).status_code == 400
     assert client.put(
         "/api/settings", data="{", content_type="application/json"
     ).status_code == 400

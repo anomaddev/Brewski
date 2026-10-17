@@ -1,6 +1,6 @@
 import { api } from '../api.js'
 import { openPath } from '../router.js'
-import { escapeHtml, formatDuration, formatTemp, formatWhen, statusClass, statusLabel } from '../format.js'
+import { escapeHtml, formatCooldown, formatDuration, formatTarget, formatWhen, statusClass, statusLabel } from '../format.js'
 import { setSourceBadge } from '../layout.js'
 
 export function mountHistory(root) {
@@ -36,8 +36,7 @@ export function mountHistory(root) {
     if (stopped) return
     const [settings, history, status] = await Promise.all([api.settings(), api.runs(), api.status()])
     setSourceBadge(status.source)
-    const showSecond = settings.heater_count === 2 || history.stats.heater_on_seconds[1] > 0
-    const names = settings.heater_names
+    const heaters = visibleHeaters(settings, history.stats)
     document.getElementById('overview-stats').innerHTML = `
       <div class="overview-stat">
         <div class="stat-label">Total Runs</div>
@@ -48,45 +47,56 @@ export function mountHistory(root) {
         <div class="stat-value">${formatDuration(history.stats.average_duration_seconds)}</div>
       </div>
       <div class="overview-stat">
-        <div class="stat-label">${escapeHtml(names[0])} on</div>
-        <div class="stat-value">${formatDuration(history.stats.heater_on_seconds[0])}</div>
+        <div class="stat-label">Average cooldown</div>
+        <div class="stat-value">${history.stats.average_cooldown_seconds == null ? '—' : formatDuration(history.stats.average_cooldown_seconds)}</div>
       </div>
-      ${
-        showSecond
-          ? `<div class="overview-stat">
-              <div class="stat-label">${escapeHtml(names[1])} on</div>
-              <div class="stat-value">${formatDuration(history.stats.heater_on_seconds[1])}</div>
-            </div>`
-          : ''
-      }
+      ${heaters
+        .map(
+          (heater) => `
+            <div class="overview-stat">
+              <div class="stat-label">${escapeHtml(heater.name)} on</div>
+              <div class="stat-value">${formatDuration(heater.seconds)}</div>
+            </div>`,
+        )
+        .join('')}
     `
     document.getElementById('history-head').innerHTML = `
       <th>Start</th>
       <th>End</th>
       <th>Duration</th>
+      <th>Cooldown</th>
       <th>Target</th>
-      <th>${escapeHtml(names[0])}</th>
-      ${showSecond ? `<th>${escapeHtml(names[1])}</th>` : ''}
+      ${heaters.map((heater) => `<th>${escapeHtml(heater.name)}</th>`).join('')}
       <th>Status</th>
     `
     const body = document.getElementById('history-body')
+    const columnCount = 6 + heaters.length
     if (!history.runs.length) {
-      body.innerHTML = `<tr><td colspan="${showSecond ? 7 : 6}" class="empty-cell">No runs yet.</td></tr>`
+      body.innerHTML = `<tr><td colspan="${columnCount}" class="empty-cell">No runs yet.</td></tr>`
       return
     }
     body.innerHTML = history.runs
       .map((run) => {
         const start = formatWhen(run.started_at)
         const end = formatWhen(run.ended_at)
+        const cells = [
+          ['Start', `<a href="/history/${run.id}">${escapeHtml(start.date)}<br><span class="time-text">${escapeHtml(start.time)}</span></a>`],
+          ['End', `<span>${escapeHtml(end.date)}<br><span class="time-text">${escapeHtml(end.time)}</span></span>`],
+          ['Duration', formatDuration(run.elapsed_seconds)],
+          ['Cooldown', formatCooldown(run.cooldown_status, run.cooldown_seconds)],
+          ['Target', formatTarget(run.target_temp_f)],
+          ...heaters.map((heater) => [
+            heater.name,
+            formatDuration(run.heater_on_seconds[heater.index] || 0),
+          ]),
+        ]
+        cells.push([
+          'Status',
+          `<span class="status-badge ${statusClass(run.status)}">${statusLabel(run.status)}</span>`,
+        ])
         return `
           <tr data-href="/history/${run.id}">
-            <td><a href="/history/${run.id}">${escapeHtml(start.date)}<br><span class="time-text">${escapeHtml(start.time)}</span></a></td>
-            <td>${escapeHtml(end.date)}<br><span class="time-text">${escapeHtml(end.time)}</span></td>
-            <td>${formatDuration(run.elapsed_seconds)}</td>
-            <td>${formatTemp(run.target_temp_f)}</td>
-            <td>${formatDuration(run.heater_on_seconds[0])}</td>
-            ${showSecond ? `<td>${formatDuration(run.heater_on_seconds[1] || 0)}</td>` : ''}
-            <td><span class="status-badge ${statusClass(run.status)}">${statusLabel(run.status)}</span></td>
+            ${cells.map(([label, value]) => `<td data-label="${escapeHtml(label)}">${value}</td>`).join('')}
           </tr>`
       })
       .join('')
@@ -113,4 +123,13 @@ export function mountHistory(root) {
     stopped = true
     clearInterval(timer)
   }
+}
+
+function visibleHeaters(settings, stats) {
+  return (settings.heaters || []).map((heater, index) => ({
+    name: heater.name,
+    index,
+    seconds: stats.heater_on_seconds[index] || 0,
+    show: heater.enabled || (stats.heater_on_seconds[index] || 0) > 0,
+  })).filter((heater) => heater.show)
 }

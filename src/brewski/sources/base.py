@@ -2,6 +2,10 @@
 
 A future Raspberry Pi source can implement this without the dashboard, the
 run log, or the control loop changing. Nothing in this package imports GPIO.
+
+Pin numbers are not passed in here. Each heater and probe stores its own BCM
+GPIO pin on the controller settings, so the wiring can differ per still.
+Index 0 is heater 1 and probe 1. A disabled heater is passed as ``False``.
 """
 
 from __future__ import annotations

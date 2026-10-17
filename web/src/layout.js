@@ -44,9 +44,20 @@ export function mountShell(active) {
     </div>
   `
   const sidebar = document.getElementById('sidebar')
-  document.getElementById('menu-btn').addEventListener('click', () => sidebar.classList.add('active'))
-  document.getElementById('sidebar-close').addEventListener('click', () => sidebar.classList.remove('active'))
-  document.getElementById('sidebar-overlay').addEventListener('click', () => sidebar.classList.remove('active'))
+  const menuBtn = document.getElementById('menu-btn')
+  const closeBtn = document.getElementById('sidebar-close')
+  menuBtn.setAttribute('aria-expanded', 'false')
+  menuBtn.setAttribute('aria-controls', 'sidebar')
+  const setOpen = (open) => {
+    sidebar.classList.toggle('active', open)
+    menuBtn.setAttribute('aria-expanded', open ? 'true' : 'false')
+  }
+  menuBtn.addEventListener('click', () => setOpen(true))
+  closeBtn.addEventListener('click', () => setOpen(false))
+  document.getElementById('sidebar-overlay').addEventListener('click', () => setOpen(false))
+  sidebar.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') setOpen(false)
+  })
   return document.getElementById('page')
 }
 
@@ -59,4 +70,5 @@ export function setSourceBadge(source) {
 
 export function closeSidebar() {
   document.getElementById('sidebar')?.classList.remove('active')
+  document.getElementById('menu-btn')?.setAttribute('aria-expanded', 'false')
 }

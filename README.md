@@ -8,21 +8,22 @@ There is no Raspberry Pi wiring in this version. Sensors and heaters come from a
 
 A run is one session of the still.
 
-- **Idle.** The probes still report temperature. Heaters are off. Nothing is written to the log.
-- **Start.** Brewski copies the current setup onto the run: target temperature, how many heaters and sensors are enabled, and their names. The clock starts at zero.
-- **Running.** About once a second the controller reads the probes. **Sensor 1 is the only probe that controls the heaters.** Heaters turn on when that probe is 2°F below the target and turn off when it reaches the target. Between those two points they stay as they are, so they do not chatter. Every 5 seconds a sample is saved: each probe temperature, each heater on or off, and the target at that moment.
+- **Idle.** The probes still report temperature. Heaters are off. Nothing new is written to the log unless the previous run is still cooling down.
+- **Start.** Brewski copies the current setup onto the run: target temperature, which heaters and probes are enabled, their names, and their GPIO pins. The clock starts at zero. Starting during a cooldown leaves that cooldown unfinished, and it is left out of the average.
+- **Running.** About once a second the controller reads the probes. **The first enabled probe is the only one that controls the heaters.** Enabled heaters turn on when that probe is 2°F below the target and turn off when it reaches the target. Between those two points they stay as they are, so they do not chatter. Disabled heaters stay off. Every 5 seconds a sample is saved: each probe temperature, each heater on or off, and the target at that moment.
 - **Pause.** Heaters are forced off and the run clock stops. Live temperatures are still shown. Paused time is not added to the log.
 - **Stop.** Heaters turn off, the run is closed as **Stopped**, and the setup snapshot plus the sample log stay in the history.
+- **Cooldown.** A cooldown is the stretch from the target temperature to the lower stop. Timing starts the first time the control probe reaches the target, including the rest of the run. After Stop, heaters stay off, and the lower stop is when that probe stays inside a 2°F band for 5 minutes. Those readings stay on the dashboard chart, and the time is saved. The dashboard and the history page show the average of every finished cooldown. A run that never reaches its target has no cooldown.
 
-Heater count and sensor count are each either 1 or 2. Changing that setup, or the names, is locked while a run is open. The target temperature can still be changed; later samples record the new target, and the run keeps the target it started with.
+Each heater and each probe can be enabled or disabled on its own. Changing names, which devices are enabled, or their GPIO pins is locked while a run is open. The target temperature can still be changed; later samples record the new target, and the run keeps the target it started with.
 
-The second sensor, when enabled, is logged and charted only. It does not decide when the heaters fire.
+Any enabled probe after the control probe is logged and charted only. It does not decide when the heaters fire.
 
 ## Dummy source
 
 `DummySource` stands in for the pot and the heaters. Two heaters together lift the boiler from about 70°F toward a 165°F target in a few minutes. That is faster than a real still, on purpose, so the chart moves while the UI is being designed. With the heaters off, the boiler cools back toward room temperature. Sensor 2 lags sensor 1 and sits about 8°F cooler.
 
-The status payload includes `"source": "dummy"`. The dashboard shows that as a badge. A future Raspberry Pi source should use the same two methods:
+The status payload includes `"source": "dummy"`. The dashboard shows that as a badge. Each heater and probe stores a BCM GPIO pin so a later Raspberry Pi source can be wired differently on each still. This version does not import GPIO, and the dummy source ignores the pin numbers. A future Raspberry Pi source should use the same two methods:
 
 - `read_temperatures(count)` returns `count` temperatures in °F, sensor 1 first.
 - `set_heaters(states)` turns each heater on or off, heater 1 first.
@@ -86,7 +87,7 @@ If `web/dist` was missing at install time, the API still runs and the UI routes 
 
 SQLite, one file. There is no separate database server.
 
-**Settings** (one row): heater count, sensor count, two heater names, two sensor names, and the target in °F. Counts of 1 still keep the second name so it can be turned back on later. The allowed target range is 40–212°F.
+**Settings** (one row): the target in °F, and for each of the two heaters and two probes a name, an enabled switch, and a BCM GPIO pin. Disabling a device keeps its name and pin. Heater pins must be unique and cannot match a probe pin. Probes may share a pin, which is how a 1-wire bus is wired. Defaults are BCM 17 and 27 for the heaters and BCM 4 for both probes. The allowed target range is 40–250°F.
 
 **Runs:** start time, end time, status (`running`, `paused`, or `stopped`), elapsed seconds (the pause does not add time), and a snapshot of the settings from the moment Start was pressed.
 

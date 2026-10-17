@@ -1,5 +1,8 @@
 import { api } from '../api.js'
+import { aboveBoiling } from '../format.js'
 import { setSourceBadge } from '../layout.js'
+
+const SLOTS = [0, 1]
 
 export function mountSettings(root) {
   root.innerHTML = `
@@ -8,31 +11,31 @@ export function mountSettings(root) {
         <h2 class="card-title">Settings</h2>
       </div>
       <p class="lock-banner" id="lock-banner" hidden>
-        Heater and sensor setup is locked while a run is open. The target temperature can still be changed.
+        Heater and probe setup is locked while a run is open. The target temperature can still be changed.
       </p>
       <fieldset>
-        <legend>Heaters</legend>
-        <div class="choice-row">
-          <label><input type="radio" name="heater_count" value="1" /> One heater</label>
-          <label><input type="radio" name="heater_count" value="2" /> Two heaters</label>
-        </div>
-        <label class="field">Heater 1 name <input name="heater_name_1" maxlength="40" required /></label>
-        <label class="field" id="heater-2-field">Heater 2 name <input name="heater_name_2" maxlength="40" required /></label>
+        <legend>Default Target</legend>
+        <label class="field target-field-setting">Temperature (°F)
+          <input name="target_temp_f" id="settings-target" type="number" min="40" max="250" step="1" inputmode="numeric" required />
+          <p class="boil-warning" id="target-warning" hidden>Above water's boiling point (212°F).</p>
+        </label>
+        <p class="help">Heaters turn on 2°F below this and off when the control probe reaches it.</p>
       </fieldset>
-      <fieldset>
-        <legend>Temperature sensors</legend>
-        <div class="choice-row">
-          <label><input type="radio" name="sensor_count" value="1" /> One sensor</label>
-          <label><input type="radio" name="sensor_count" value="2" /> Two sensors</label>
-        </div>
-        <label class="field">Sensor 1 name <input name="sensor_name_1" maxlength="40" required /></label>
-        <label class="field" id="sensor-2-field">Sensor 2 name <input name="sensor_name_2" maxlength="40" required /></label>
-        <p class="help">Sensor 1 is the probe the controller follows. Sensor 2 is recorded and shown, and it does not decide when the heaters fire.</p>
-      </fieldset>
-      <label class="field">Default target (°F)
-        <input name="target_temp_f" id="settings-target" type="number" min="40" max="212" step="0.1" required />
-      </label>
-      <p class="help">These names and counts are copied onto each run when it starts. Readings on this controller come from the dummy source until real sensors are connected.</p>
+      <div class="device-columns">
+        <section class="device-column">
+          <h3 class="column-title">Heaters</h3>
+          <p class="help">One must stay enabled. Each heater needs its own BCM pin.</p>
+          ${deviceSection('heater', 'Heater')}
+          <p class="form-error device-guard" id="heater-guard" data-message="One heater must stay enabled."></p>
+        </section>
+        <section class="device-column">
+          <h3 class="column-title">Temperature probes</h3>
+          <p class="help">One must stay enabled. The first enabled probe controls the heaters. Probes can share a pin.</p>
+          ${deviceSection('sensor', 'Probe')}
+          <p class="form-error device-guard" id="sensor-guard" data-message="One temperature probe must stay enabled."></p>
+        </section>
+      </div>
+      <p class="help">Names, pins, and which devices are enabled are copied onto each run when it starts. Pins are saved for a Raspberry Pi controller. The dummy source ignores them until that controller is connected. Defaults are BCM 17 and 27 for the heaters, and BCM 4 for both probes.</p>
       <p class="form-error" id="settings-error" hidden></p>
       <p class="saved" id="settings-saved" hidden>Saved</p>
       <div class="status-actions">
@@ -47,32 +50,37 @@ export function mountSettings(root) {
   let locked = false
   let stopped = false
 
-  function selectedCount(name) {
-    return Number(form.querySelector(`input[name="${name}"]:checked`)?.value || 1)
-  }
-
-  function applyCountState() {
-    const heater2 = selectedCount('heater_count') === 1
-    const sensor2 = selectedCount('sensor_count') === 1
-    form.elements.heater_name_2.disabled = locked || heater2
-    form.elements.sensor_name_2.disabled = locked || sensor2
-    document.getElementById('heater-2-field').classList.toggle('is-unused', heater2)
-    document.getElementById('sensor-2-field').classList.toggle('is-unused', sensor2)
+  function applyDeviceState() {
+    for (const kind of ['heater', 'sensor']) {
+      for (const index of SLOTS) {
+        const input = form.elements[`${kind}_enabled_${index}`]
+        const section = document.querySelector(`[data-device="${kind}-${index}"]`)
+        section.classList.toggle('is-off', !input.checked)
+        section.querySelector('.switch-text').textContent = input.checked ? 'Enabled' : 'Disabled'
+      }
+    }
   }
 
   function applyLock(isLocked) {
     locked = isLocked
     document.getElementById('lock-banner').hidden = !isLocked
-    for (const input of form.querySelectorAll('input[name="heater_count"], input[name="sensor_count"]')) {
+    for (const input of form.querySelectorAll('input:not([name="target_temp_f"])')) {
       input.disabled = isLocked
     }
-    form.elements.heater_name_1.disabled = isLocked
-    form.elements.sensor_name_1.disabled = isLocked
-    applyCountState()
   }
 
   form.addEventListener('change', (event) => {
-    if (event.target.name === 'heater_count' || event.target.name === 'sensor_count') applyCountState()
+    const kind = (event.target.name || '').match(/^(heater|sensor)_enabled_/)?.[1]
+    if (!kind) return
+    const guard = document.getElementById(`${kind}-guard`)
+    if (!event.target.checked && enabledCount(kind) === 0) {
+      event.target.checked = true
+      guard.textContent = guard.dataset.message
+      savedEl.hidden = true
+    } else {
+      guard.textContent = ''
+    }
+    applyDeviceState()
   })
 
   form.addEventListener('submit', async (event) => {
@@ -80,11 +88,9 @@ export function mountSettings(root) {
     savedEl.hidden = true
     errorEl.hidden = true
     const body = {
-      heater_count: selectedCount('heater_count'),
-      sensor_count: selectedCount('sensor_count'),
-      heater_names: [form.elements.heater_name_1.value, form.elements.heater_name_2.value],
-      sensor_names: [form.elements.sensor_name_1.value, form.elements.sensor_name_2.value],
-      target_temp_f: Number(form.elements.target_temp_f.value),
+      target_temp_f: Math.round(Number(form.elements.target_temp_f.value)),
+      heaters: readDevices('heater'),
+      sensors: readDevices('sensor'),
     }
     try {
       const saved = await api.saveSettings(body)
@@ -96,17 +102,39 @@ export function mountSettings(root) {
     }
   })
 
+  function enabledCount(kind) {
+    return SLOTS.filter((index) => form.elements[`${kind}_enabled_${index}`].checked).length
+  }
+
+  function readDevices(kind) {
+    return SLOTS.map((index) => ({
+      name: form.elements[`${kind}_name_${index}`].value,
+      enabled: form.elements[`${kind}_enabled_${index}`].checked,
+      gpio: Number(form.elements[`${kind}_gpio_${index}`].value),
+    }))
+  }
+
+  function syncTargetWarning() {
+    document.getElementById('target-warning').hidden = !aboveBoiling(form.elements.target_temp_f.value)
+  }
+
+  form.elements.target_temp_f.addEventListener('input', syncTargetWarning)
+
   function fill(settings) {
-    form.querySelector(`input[name="heater_count"][value="${settings.heater_count}"]`).checked = true
-    form.querySelector(`input[name="sensor_count"][value="${settings.sensor_count}"]`).checked = true
-    form.elements.heater_name_1.value = settings.heater_names[0]
-    form.elements.heater_name_2.value = settings.heater_names[1]
-    form.elements.sensor_name_1.value = settings.sensor_names[0]
-    form.elements.sensor_name_2.value = settings.sensor_names[1]
+    settings.heaters.forEach((heater, index) => writeDevice('heater', index, heater))
+    settings.sensors.forEach((sensor, index) => writeDevice('sensor', index, sensor))
     if (document.activeElement !== form.elements.target_temp_f) {
-      form.elements.target_temp_f.value = String(settings.target_temp_f)
+      form.elements.target_temp_f.value = String(Math.round(Number(settings.target_temp_f)))
     }
-    applyCountState()
+    syncTargetWarning()
+    applyDeviceState()
+    applyLock(locked)
+  }
+
+  function writeDevice(kind, index, channel) {
+    form.elements[`${kind}_name_${index}`].value = channel.name
+    form.elements[`${kind}_gpio_${index}`].value = channel.gpio == null ? '' : String(channel.gpio)
+    form.elements[`${kind}_enabled_${index}`].checked = Boolean(channel.enabled)
   }
 
   async function refreshLock() {
@@ -134,4 +162,29 @@ export function mountSettings(root) {
     stopped = true
     clearInterval(timer)
   }
+}
+
+function deviceSection(kind, label) {
+  return SLOTS.map((index) => {
+    const title = `${label} ${index + 1}`
+    return `
+      <section class="device" data-device="${kind}-${index}">
+        <div class="device-head">
+          <p class="device-title">${title}</p>
+          <label class="switch">
+            <input type="checkbox" role="switch" name="${kind}_enabled_${index}" aria-label="${title}" />
+            <span class="switch-track" aria-hidden="true"></span>
+            <span class="switch-text">Enabled</span>
+          </label>
+        </div>
+        <div class="device-fields">
+          <label class="field">Name
+            <input name="${kind}_name_${index}" maxlength="40" required />
+          </label>
+          <label class="field gpio-field">BCM GPIO
+            <input name="${kind}_gpio_${index}" type="number" min="2" max="27" step="1" inputmode="numeric" required />
+          </label>
+        </div>
+      </section>`
+  }).join('')
 }

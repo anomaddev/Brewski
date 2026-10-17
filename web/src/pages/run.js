@@ -1,6 +1,6 @@
 import { api } from '../api.js'
 import { createTempChart, setChartPoints } from '../chart.js'
-import { escapeHtml, formatDuration, formatTemp, formatWhen, statusClass, statusLabel } from '../format.js'
+import { activeSlots, escapeHtml, formatCooldown, formatDuration, formatTarget, formatTemp, formatWhen, statusClass, statusLabel } from '../format.js'
 import { setSourceBadge } from '../layout.js'
 
 export function mountRun(root, params) {
@@ -49,39 +49,44 @@ export function mountRun(root, params) {
     badge.className = `status-badge ${statusClass(run.status)}`
     const start = formatWhen(run.started_at)
     const end = formatWhen(run.ended_at)
-    const heaterList = run.heater_names.slice(0, run.heater_count).map(escapeHtml).join(', ')
-    const sensorList = run.sensor_names.slice(0, run.sensor_count).map(escapeHtml).join(', ')
+    const heaterSlots = activeSlots(run, 'heaters')
+    const sensorSlots = activeSlots(run, 'sensors')
+    const heaterList = heaterSlots.map(deviceLabel).join(', ')
+    const sensorList = sensorSlots.map(deviceLabel).join(', ')
     document.getElementById('run-settings').innerHTML = `
       <div class="detail-item"><span>Started</span><strong>${escapeHtml(start.date)} ${escapeHtml(start.time)}</strong></div>
       <div class="detail-item"><span>Ended</span><strong>${run.ended_at ? `${escapeHtml(end.date)} ${escapeHtml(end.time)}` : '—'}</strong></div>
       <div class="detail-item"><span>Duration</span><strong>${formatDuration(run.elapsed_seconds)}</strong></div>
-      <div class="detail-item"><span>Target at start</span><strong>${formatTemp(run.target_temp_f)}</strong></div>
+      <div class="detail-item"><span>Cooldown</span><strong>${formatCooldown(run.cooldown_status, run.cooldown_seconds)}</strong></div>
+      <div class="detail-item"><span>Target at start</span><strong>${formatTarget(run.target_temp_f)}</strong></div>
       <div class="detail-item"><span>Heaters</span><strong>${heaterList}</strong></div>
       <div class="detail-item"><span>Sensors</span><strong>${sensorList}</strong></div>
     `
 
-    const sensors = run.sensor_names.slice(0, run.sensor_count)
-    const heaters = run.heater_names.slice(0, run.heater_count)
     document.getElementById('sample-head').innerHTML = `
       <th>Elapsed</th>
       <th>Target</th>
-      ${sensors.map((name) => `<th>${escapeHtml(name)}</th>`).join('')}
-      ${heaters.map((name) => `<th>${escapeHtml(name)}</th>`).join('')}
+      ${sensorSlots.map((slot) => `<th>${escapeHtml(slot.name)}</th>`).join('')}
+      ${heaterSlots.map((slot) => `<th>${escapeHtml(slot.name)}</th>`).join('')}
     `
+    const readings = run.samples.filter((sample) => sample.phase !== 'cooldown')
     const body = document.getElementById('sample-body')
-    if (!run.samples.length) {
-      body.innerHTML = `<tr><td colspan="${2 + sensors.length + heaters.length}" class="empty-cell">No samples recorded.</td></tr>`
+    if (!readings.length) {
+      body.innerHTML = `<tr><td colspan="${2 + sensorSlots.length + heaterSlots.length}" class="empty-cell">No samples recorded.</td></tr>`
     } else {
-      body.innerHTML = run.samples
+      const cell = (label, value) => `<td data-label="${escapeHtml(label)}">${value}</td>`
+      body.innerHTML = readings
         .map((sample) => {
-          const temps = sensors.map((_, index) => `<td>${formatTemp(sample.temps_f[index])}</td>`).join('')
-          const states = heaters
-            .map((_, index) => `<td>${sample.heaters_on[index] ? 'On' : 'Off'}</td>`)
+          const temps = sensorSlots
+            .map((slot) => cell(slot.name, formatTemp(sample.temps_f[slot.index])))
+            .join('')
+          const states = heaterSlots
+            .map((slot) => cell(slot.name, sample.heaters_on[slot.index] ? 'On' : 'Off'))
             .join('')
           return `
             <tr>
-              <td>${formatDuration(sample.elapsed_seconds)}</td>
-              <td>${formatTemp(sample.target_temp_f)}</td>
+              ${cell('Elapsed', formatDuration(sample.elapsed_seconds))}
+              ${cell('Target', formatTarget(sample.target_temp_f))}
               ${temps}
               ${states}
             </tr>`
@@ -90,12 +95,12 @@ export function mountRun(root, params) {
     }
     setChartPoints(
       chart,
-      run.samples.map((sample) => ({
+      readings.map((sample) => ({
         label: formatDuration(sample.elapsed_seconds),
-        temps: sample.temps_f,
+        temps: sensorSlots.map((slot) => sample.temps_f[slot.index]),
         target: sample.target_temp_f,
       })),
-      sensors,
+      sensorSlots.map((slot) => slot.name),
     )
   }
 
@@ -104,7 +109,8 @@ export function mountRun(root, params) {
     const [run, status] = await Promise.all([api.run(params.id), api.status()])
     setSourceBadge(status.source)
     render(run)
-    if (run.status !== 'running' && run.status !== 'paused') clearInterval(timer)
+    const open = run.status === 'running' || run.status === 'paused' || run.cooldown_status === 'open'
+    if (!open) clearInterval(timer)
   }
 
   const timer = setInterval(() => {
@@ -123,4 +129,9 @@ export function mountRun(root, params) {
     clearInterval(timer)
     chart.destroy()
   }
+}
+
+function deviceLabel(slot) {
+  const name = escapeHtml(slot.name)
+  return slot.gpio == null ? name : `${name} · GPIO ${slot.gpio}`
 }

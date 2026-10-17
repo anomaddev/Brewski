@@ -16,6 +16,12 @@ function matchRoute(path) {
   return null
 }
 
+export function openPath(path) {
+  if (path === window.location.pathname) return
+  window.history.pushState(null, '', path)
+  render()
+}
+
 async function render() {
   const previous = cleanup
   cleanup = () => {}

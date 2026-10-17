@@ -1,4 +1,5 @@
 import { api } from '../api.js'
+import { openPath } from '../router.js'
 import { createTempChart, setChartPoints } from '../chart.js'
 import {
   escapeHtml,
@@ -231,7 +232,7 @@ export function mountDashboard(root) {
       .map((run) => {
         const when = formatWhen(run.started_at)
         return `
-          <tr>
+          <tr data-href="/history/${run.id}">
             <td><a href="/history/${run.id}">${escapeHtml(when.date)}<br><span class="time-text">${escapeHtml(when.time)}</span></a></td>
             <td>${formatDuration(run.elapsed_seconds)}</td>
             <td>${formatTemp(run.target_temp_f)}</td>
@@ -240,6 +241,12 @@ export function mountDashboard(root) {
       })
       .join('')
   }
+
+  document.getElementById('previous-runs').addEventListener('click', (event) => {
+    if (event.target.closest('a')) return
+    const row = event.target.closest('tr[data-href]')
+    if (row) openPath(row.dataset.href)
+  })
 
   async function refresh() {
     if (stopped) return

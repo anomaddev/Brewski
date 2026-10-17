@@ -247,6 +247,7 @@ input:focus { outline: 2px solid rgba(142, 162, 255, 0.7); outline-offset: 1px; 
 .history-table a { color: var(--text); text-decoration: none; font-weight: 680; }
 .runs-table tbody tr:hover,
 .history-table tbody tr:hover { background: rgba(255, 255, 255, 0.03); }
+tr[data-href] { cursor: pointer; }
 .time-text { display: block; margin-top: 3px; color: var(--muted); font-size: 0.8rem; font-weight: 500; }
 .empty-cell { color: var(--muted); padding: 18px 10px; }
 

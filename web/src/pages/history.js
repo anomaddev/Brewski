@@ -1,4 +1,5 @@
 import { api } from '../api.js'
+import { openPath } from '../router.js'
 import { escapeHtml, formatDuration, formatTemp, formatWhen, statusClass, statusLabel } from '../format.js'
 import { setSourceBadge } from '../layout.js'
 
@@ -78,7 +79,7 @@ export function mountHistory(root) {
         const start = formatWhen(run.started_at)
         const end = formatWhen(run.ended_at)
         return `
-          <tr>
+          <tr data-href="/history/${run.id}">
             <td><a href="/history/${run.id}">${escapeHtml(start.date)}<br><span class="time-text">${escapeHtml(start.time)}</span></a></td>
             <td>${escapeHtml(end.date)}<br><span class="time-text">${escapeHtml(end.time)}</span></td>
             <td>${formatDuration(run.elapsed_seconds)}</td>
@@ -90,6 +91,12 @@ export function mountHistory(root) {
       })
       .join('')
   }
+
+  document.getElementById('history-body').addEventListener('click', (event) => {
+    if (event.target.closest('a')) return
+    const row = event.target.closest('tr[data-href]')
+    if (row) openPath(row.dataset.href)
+  })
 
   const timer = setInterval(() => {
     refresh().catch((error) => {

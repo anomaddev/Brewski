@@ -13,66 +13,61 @@ import { setSourceBadge } from '../layout.js'
 
 export function mountDashboard(root) {
   root.innerHTML = `
-    <div class="dashboard-grid">
-      <div class="dashboard-column">
-        <section class="dashboard-card system-status-card">
-          <div class="card-title-with-timer">
-            <h2 class="card-title">System Status</h2>
-            <div class="timer-display" id="elapsed">00:00:00</div>
+    <div class="board">
+      <header class="board-head">
+        <div>
+          <p class="eyebrow">Live still</p>
+          <h1 class="board-title">Dashboard</h1>
+        </div>
+        <div class="board-meta">
+          <span class="status-badge status-idle" id="system-mode">Idle</span>
+          <div class="timer-display" id="elapsed">00:00:00</div>
+        </div>
+      </header>
+      <section class="probe-grid" id="temp-rows" aria-label="Temperatures"></section>
+      <div class="control-row">
+        <section class="dashboard-card target-card">
+          <label class="eyebrow" for="target-input">Target</label>
+          <div class="target-field">
+            <input id="target-input" type="number" min="40" max="212" step="0.1" inputmode="decimal" />
+            <span>°F</span>
           </div>
-          <div class="status-details">
-            <div class="status-item">
-              <span class="status-label">System Status</span>
-              <span class="status-value status-idle" id="system-mode">Idle</span>
-            </div>
-            <div id="heater-rows"></div>
-          </div>
+          <p class="help">The first sensor is the control probe. Heaters turn on 2°F below this target and off when it is reached.</p>
+        </section>
+        <section class="dashboard-card heater-card">
+          <h2 class="card-title">Heaters</h2>
+          <div class="heater-grid" id="heater-rows"></div>
           <p class="form-error" id="action-error" hidden></p>
           <div class="status-actions" id="actions"></div>
         </section>
-        <section class="dashboard-card current-temps-card">
-          <div class="card-title-with-timer">
-            <h2 class="card-title">Temperatures</h2>
-          </div>
-          <div class="status-details">
-            <div class="status-item target-item">
-              <label class="status-label" for="target-input">Target</label>
-              <input id="target-input" type="number" min="40" max="212" step="0.1" inputmode="decimal" />
-            </div>
-            <div id="temp-rows"></div>
-          </div>
-          <p class="help">The controller follows the first sensor. Heaters turn on 2°F below the target and off when it is reached.</p>
-        </section>
       </div>
-      <div class="dashboard-column">
-        <section class="dashboard-card chart-card">
-          <div class="card-title-with-timer">
-            <h2 class="card-title">Temperature Over Time</h2>
-          </div>
-          <div class="chart-container">
-            <canvas id="temp-chart"></canvas>
-          </div>
-        </section>
-        <section class="dashboard-card previous-runs-card">
-          <div class="card-title-with-timer">
-            <h2 class="card-title">Previous Runs</h2>
-            <a class="view-all-btn" href="/history">View all</a>
-          </div>
-          <div class="runs-table-container">
-            <table class="runs-table">
-              <thead>
-                <tr>
-                  <th>Date</th>
-                  <th>Duration</th>
-                  <th>Target</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody id="previous-runs"></tbody>
-            </table>
-          </div>
-        </section>
-      </div>
+      <section class="dashboard-card chart-card">
+        <div class="card-title-with-timer">
+          <h2 class="card-title">Temperature over time</h2>
+        </div>
+        <div class="chart-container">
+          <canvas id="temp-chart"></canvas>
+        </div>
+      </section>
+      <section class="dashboard-card previous-runs-card">
+        <div class="card-title-with-timer">
+          <h2 class="card-title">Previous runs</h2>
+          <a class="view-all-btn" href="/history">View all</a>
+        </div>
+        <div class="runs-table-container">
+          <table class="runs-table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Duration</th>
+                <th>Target</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="previous-runs"></tbody>
+          </table>
+        </div>
+      </section>
     </div>
   `
 
@@ -188,17 +183,18 @@ export function mountDashboard(root) {
       host.innerHTML = status.heater_names
         .map(
           (name, index) => `
-            <div class="status-item">
-              <span class="status-label">${escapeHtml(name)}</span>
-              <span class="status-value" data-heater="${index}"></span>
-            </div>`,
+            <article class="heater" data-heater-card="${index}">
+              <span class="heater-name">${escapeHtml(name)}</span>
+              <span class="heater-state" data-heater="${index}">Off</span>
+            </article>`,
         )
         .join('')
     }
     status.heater_names.forEach((_, index) => {
       const on = Boolean(status.heaters_on[index])
-      const el = host.querySelector(`[data-heater="${index}"]`)
-      el.innerHTML = `<span class="status-indicator ${on ? 'indicator-on' : 'indicator-off'}"></span>${on ? 'On' : 'Off'}`
+      const card = host.querySelector(`[data-heater-card="${index}"]`)
+      card.classList.toggle('is-on', on)
+      host.querySelector(`[data-heater="${index}"]`).textContent = on ? 'On' : 'Off'
     })
   }
 
@@ -210,15 +206,18 @@ export function mountDashboard(root) {
       host.innerHTML = status.sensor_names
         .map(
           (name, index) => `
-            <div class="status-item">
-              <span class="status-label">${escapeHtml(name)}</span>
-              <span class="status-value" data-temp="${index}">—</span>
-            </div>`,
+            <article class="probe ${index === 0 ? 'probe-primary' : ''}">
+              <span class="probe-kicker">${escapeHtml(name)}${index === 0 ? ' · control' : ''}</span>
+              <p class="probe-readout" data-temp="${index}"><span class="probe-num">—</span></p>
+            </article>`,
         )
         .join('')
     }
     status.sensor_names.forEach((_, index) => {
-      host.querySelector(`[data-temp="${index}"]`).textContent = formatTemp(status.temps_f[index])
+      const value = status.temps_f[index]
+      const text = value == null || Number.isNaN(Number(value)) ? '—' : Number(value).toFixed(1)
+      host.querySelector(`[data-temp="${index}"]`).innerHTML =
+        `<span class="probe-num">${text}</span><span class="probe-unit">°F</span>`
     })
   }
 
@@ -255,7 +254,7 @@ export function mountDashboard(root) {
     document.getElementById('elapsed').textContent = formatDuration(status.elapsed_seconds)
     const mode = document.getElementById('system-mode')
     mode.textContent = statusLabel(status.mode)
-    mode.className = `status-value ${statusClass(status.mode)}`
+    mode.className = `status-badge ${statusClass(status.mode)}`
     renderHeaters(status)
     renderTemps(status)
     const target = document.getElementById('target-input')

@@ -160,6 +160,99 @@ button { cursor: pointer; }
 }
 .view-all-btn:hover { background: rgba(142, 162, 255, 0.12); }
 
+.board { display: flex; flex-direction: column; gap: 16px; }
+.board-head, .board-meta { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.board-title { font-size: clamp(1.8rem, 3vw, 2.4rem); letter-spacing: -0.045em; font-weight: 650; }
+.eyebrow {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.board-meta { gap: 10px; }
+.probe-grid { display: grid; grid-template-columns: 1fr; gap: 14px; }
+.probe-grid:has(.probe:nth-child(2)) { grid-template-columns: 1.45fr 1fr; }
+.probe {
+  position: relative;
+  overflow: hidden;
+  min-height: 168px;
+  padding: 22px 24px 18px;
+  border-radius: 22px;
+  border: 1px solid var(--line);
+  background:
+    radial-gradient(420px 180px at 100% 0%, rgba(142, 162, 255, 0.16), transparent 60%),
+    var(--elev);
+  box-shadow: var(--shadow);
+}
+.probe-primary {
+  background:
+    radial-gradient(520px 220px at 0% 100%, rgba(125, 211, 252, 0.16), transparent 55%),
+    radial-gradient(420px 180px at 100% 0%, rgba(142, 162, 255, 0.2), transparent 60%),
+    var(--elev);
+}
+.probe-kicker { color: var(--muted); font-size: 0.82rem; font-weight: 650; }
+.probe-readout { display: flex; align-items: flex-end; gap: 8px; margin-top: 18px; }
+.probe-num {
+  font-size: clamp(3.4rem, 7vw, 5.4rem);
+  line-height: 0.9;
+  letter-spacing: -0.06em;
+  font-weight: 560;
+  font-variant-numeric: tabular-nums;
+}
+.probe-unit { margin-bottom: 0.45rem; color: var(--muted); font-size: 1.1rem; font-weight: 650; }
+.control-row { display: grid; grid-template-columns: 0.85fr 1.15fr; gap: 14px; }
+.target-field { display: flex; align-items: baseline; gap: 8px; margin: 10px 0 8px; }
+.target-field span { color: var(--muted); font-size: 1.4rem; font-weight: 650; }
+.target-card #target-input {
+  width: 8.5rem;
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-size: 3.2rem;
+  line-height: 1;
+  text-align: left;
+  letter-spacing: -0.05em;
+}
+.target-card #target-input:focus { outline: none; }
+.heater-grid { display: grid; grid-template-columns: 1fr; gap: 10px; margin-top: 14px; }
+.heater-grid:has(.heater:nth-child(2)) { grid-template-columns: 1fr 1fr; }
+.heater {
+  padding: 16px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: var(--sunken);
+}
+.heater-name { display: block; color: var(--muted); font-size: 0.85rem; font-weight: 650; }
+.heater-state { display: block; margin-top: 10px; font-size: 1.35rem; font-weight: 680; letter-spacing: -0.03em; color: #94a3b8; }
+.heater.is-on {
+  border-color: rgba(52, 211, 153, 0.45);
+  background:
+    radial-gradient(180px 80px at 100% 0%, rgba(52, 211, 153, 0.18), transparent 70%),
+    #10231c;
+  box-shadow: 0 0 28px rgba(52, 211, 153, 0.12);
+}
+.heater.is-on .heater-state { color: var(--good); }
+.choice-row {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  margin-bottom: 14px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: var(--sunken);
+}
+.choice-row label {
+  position: relative;
+  padding: 8px 14px;
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+.choice-row input { position: absolute; opacity: 0; pointer-events: none; }
+.choice-row label:has(input:checked) { background: rgba(142, 162, 255, 0.22); color: white; }
+.choice-row label:has(input:disabled) { opacity: 0.55; }
+
 .chart-container { position: relative; height: 340px; }
 
 .status-details,
@@ -360,11 +453,9 @@ tr[data-href] { cursor: pointer; }
   .rail.active { transform: translateX(0); }
   .sidebar-close { display: grid; }
   .container { width: min(1180px, calc(100% - 28px)); padding-top: 18px; }
-  .dashboard-column { display: contents; }
-  .system-status-card { order: 1; }
-  .chart-card { order: 2; }
-  .current-temps-card { order: 3; }
-  .previous-runs-card { order: 4; }
+  .probe-grid, .control-row, .heater-grid { grid-template-columns: 1fr; }
+  .probe { min-height: 132px; }
+  .probe-num { font-size: 3.2rem; }
   .chart-container { height: 240px; }
   .status-actions, .overview-stats, .detail-grid { flex-direction: column; }
   .overview-stats, .detail-grid { grid-template-columns: 1fr; }

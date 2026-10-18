@@ -20,10 +20,12 @@ export const api = {
   status: () => request('/api/status'),
   settings: () => request('/api/settings'),
   saveSettings: (body) => request('/api/settings', { method: 'PUT', body: JSON.stringify(body) }),
+  resetData: () => request('/api/settings/reset', { method: 'POST' }),
   runs: () => request('/api/runs'),
   run: (id) => request(`/api/runs/${id}`),
   start: (body) => request('/api/runs/start', { method: 'POST', body: JSON.stringify(body || {}) }),
   pause: () => request('/api/runs/pause', { method: 'POST' }),
   resume: () => request('/api/runs/resume', { method: 'POST' }),
   stop: () => request('/api/runs/stop', { method: 'POST' }),
+  replaceHeater: (slot) => request(`/api/heaters/${slot}/replace`, { method: 'POST' }),
 }

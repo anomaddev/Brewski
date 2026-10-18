@@ -4,6 +4,8 @@ import { mountDashboard } from './pages/dashboard.js'
 import { mountHistory } from './pages/history.js'
 import { mountRun } from './pages/run.js'
 import { mountSettings } from './pages/settings.js'
+import { mountSetup } from './setup.js'
+import { mountStatusStrip } from './status-strip.js'
 
 let cleanup = () => {}
 
@@ -30,23 +32,42 @@ async function render() {
   const route = matchRoute(window.location.pathname)
   document.title = route ? `Brewski — ${route.title}` : 'Brewski'
   const page = mountShell(route ? route.id : '')
+  const stripCleanup = mountPageStatus(route)
+  const setupCleanup = mountSetup()
+  const release = () => {
+    stripCleanup()
+    setupCleanup()
+  }
   if (!route) {
     page.innerHTML = `
       <div class="dashboard-card">
         <h2 class="card-title">Page not found</h2>
         <p class="help"><a href="/">Back to the dashboard</a></p>
       </div>`
+    cleanup = release
     return
   }
   try {
-    cleanup = (await route.mount(page, route.params)) || (() => {})
+    const pageCleanup = (await route.mount(page, route.params)) || (() => {})
+    cleanup = () => {
+      pageCleanup()
+      release()
+    }
   } catch (error) {
     page.innerHTML = `
       <div class="dashboard-card">
         <h2 class="card-title">Something went wrong</h2>
         <p class="form-error">${escapeHtml(error.message)}</p>
       </div>`
+    cleanup = release
   }
+}
+
+function mountPageStatus(route) {
+  if (route?.id === 'dashboard') return () => {}
+  const host = document.getElementById('status-strip-host')
+  if (!host) return () => {}
+  return mountStatusStrip(host)
 }
 
 export function startRouter() {

@@ -132,6 +132,8 @@ export function createTempChart(canvas, { timed = false } = {}) {
         x: timed
           ? {
               type: 'linear',
+              offset: false,
+              bounds: 'data',
               title: { display: true, text: 'Time', color: TICK },
               ticks: {
                 color: TICK,
@@ -204,5 +206,21 @@ export function setChartPoints(chart, points, sensorNames, markers = []) {
   }
   chart.data.labels = timed ? [] : points.map((point) => point.label)
   chart.data.datasets = datasets
+  if (timed) {
+    const scale = chart.options.scales.x
+    if (points.length) {
+      let start = points[0].at
+      let end = start
+      for (const point of points) {
+        if (point.at < start) start = point.at
+        if (point.at > end) end = point.at
+      }
+      scale.min = start
+      scale.max = end > start ? end : start + 1000
+    } else {
+      scale.min = undefined
+      scale.max = undefined
+    }
+  }
   chart.update()
 }

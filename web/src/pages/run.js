@@ -43,7 +43,8 @@ export function mountRun(root, params) {
 
   function render(run) {
     document.title = `Brewski — Run ${run.id}`
-    document.getElementById('run-title').textContent = `Run ${run.id}`
+    document.getElementById('run-title').textContent =
+      run.kind === 'calibration' ? `Calibration ${run.id}` : `Run ${run.id}`
     const badge = document.getElementById('run-status')
     badge.textContent = statusLabel(run.status)
     badge.className = `status-badge ${statusClass(run.status)}`
@@ -51,14 +52,19 @@ export function mountRun(root, params) {
     const end = formatWhen(run.ended_at)
     const heaterSlots = activeSlots(run, 'heaters')
     const sensorSlots = activeSlots(run, 'sensors')
-    const heaterList = heaterSlots.map(deviceLabel).join(', ')
-    const sensorList = sensorSlots.map(deviceLabel).join(', ')
+    const heaterList = heaterSlots.map((slot) => deviceLabel(slot, 'heaters')).join(', ')
+    const sensorList = sensorSlots.map((slot) => deviceLabel(slot, 'sensors')).join(', ')
     document.getElementById('run-settings').innerHTML = `
       <div class="detail-item"><span>Started</span><strong>${escapeHtml(start.date)} ${escapeHtml(start.time)}</strong></div>
       <div class="detail-item"><span>Ended</span><strong>${run.ended_at ? `${escapeHtml(end.date)} ${escapeHtml(end.time)}` : '—'}</strong></div>
       <div class="detail-item"><span>Duration</span><strong>${formatDuration(run.elapsed_seconds)}</strong></div>
       <div class="detail-item"><span>Cooldown</span><strong>${formatCooldown(run.cooldown_status, run.cooldown_seconds)}</strong></div>
       <div class="detail-item"><span>Target at start</span><strong>${formatTarget(run.target_temp_f)}</strong></div>
+      ${run.kind === 'calibration' ? `
+      <div class="detail-item"><span>Still size</span><strong>${run.charge_gallons == null ? '—' : `${run.charge_gallons} gal`}</strong></div>
+      <div class="detail-item"><span>Coast</span><strong>${run.coast_f == null ? '—' : `${Number(run.coast_f).toFixed(1)}°F over ${Math.round(Number(run.coast_seconds) || 0)}s`}</strong></div>
+      <div class="detail-item"><span>Reached target</span><strong>${run.calibration_settled ? 'Yes' : 'No'}</strong></div>
+      ` : ''}
       <div class="detail-item"><span>Heaters</span><strong>${heaterList}</strong></div>
       <div class="detail-item"><span>Sensors</span><strong>${sensorList}</strong></div>
     `
@@ -131,7 +137,13 @@ export function mountRun(root, params) {
   }
 }
 
-function deviceLabel(slot) {
+function deviceLabel(slot, kind) {
   const name = escapeHtml(slot.name)
-  return slot.gpio == null ? name : `${name} · GPIO ${slot.gpio}`
+  if (slot.gpio == null) return name
+  if (kind === 'sensors' && slot.rtd) {
+    const rtd = slot.rtd === 'pt1000' ? 'PT1000' : 'PT100'
+    const wires = slot.wires ? ` · ${slot.wires}-wire` : ''
+    return `${name} · CS ${slot.gpio} · ${rtd}${wires}`
+  }
+  return `${name} · GPIO ${slot.gpio}`
 }

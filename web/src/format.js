@@ -15,6 +15,12 @@ export function formatDuration(totalSeconds) {
   return [hours, minutes, secs].map((part) => String(part).padStart(2, '0')).join(':')
 }
 
+export function formatHours(totalSeconds) {
+  const hours = Math.max(0, Number(totalSeconds) || 0) / 3600
+  if (hours >= 100) return `${hours.toFixed(1)} h`
+  return `${hours.toFixed(2)} h`
+}
+
 export function formatTemp(value) {
   if (value == null || Number.isNaN(Number(value))) return '—'
   return `${Number(value).toFixed(1)}°F`
@@ -63,6 +69,8 @@ export function activeSlots(record, kind) {
         name: channel.name,
         index,
         gpio: channel.gpio,
+        wires: channel.wires,
+        rtd: channel.rtd,
         enabled: channel.enabled !== false,
       }))
       .filter((slot) => slot.enabled)

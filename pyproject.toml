@@ -38,3 +38,6 @@ include = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "fresh: controller has no saved calibration",
+]

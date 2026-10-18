@@ -1,6 +1,6 @@
 import { api } from '../api.js'
 import { openPath } from '../router.js'
-import { escapeHtml, formatCooldown, formatDuration, formatTarget, formatWhen, statusClass, statusLabel } from '../format.js'
+import { escapeHtml, formatCooldown, formatDuration, formatHours, formatTarget, formatWhen, statusClass, statusLabel } from '../format.js'
 import { setSourceBadge } from '../layout.js'
 
 export function mountHistory(root) {
@@ -43,6 +43,10 @@ export function mountHistory(root) {
         <div class="stat-value">${history.stats.total_runs}</div>
       </div>
       <div class="overview-stat">
+        <div class="stat-label">Calibrations</div>
+        <div class="stat-value">${history.stats.calibration_runs || 0}</div>
+      </div>
+      <div class="overview-stat">
         <div class="stat-label">Average Duration</div>
         <div class="stat-value">${formatDuration(history.stats.average_duration_seconds)}</div>
       </div>
@@ -53,9 +57,9 @@ export function mountHistory(root) {
       ${heaters
         .map(
           (heater) => `
-            <div class="overview-stat">
-              <div class="stat-label">${escapeHtml(heater.name)} on</div>
-              <div class="stat-value">${formatDuration(heater.seconds)}</div>
+            <div class="overview-stat" title="${escapeHtml(heater.name)} has been powered for ${escapeHtml(formatDuration(heater.lifeSeconds))}, including calibration.">
+              <div class="stat-label">${escapeHtml(heater.name)} hours</div>
+              <div class="stat-value">${formatHours(heater.lifeSeconds)}</div>
             </div>`,
         )
         .join('')}
@@ -66,7 +70,7 @@ export function mountHistory(root) {
       <th>Duration</th>
       <th>Cooldown</th>
       <th>Target</th>
-      ${heaters.map((heater) => `<th>${escapeHtml(heater.name)}</th>`).join('')}
+      ${heaters.map((heater) => `<th title="Time on during this run">${escapeHtml(heater.name)}</th>`).join('')}
       <th>Status</th>
     `
     const body = document.getElementById('history-body')
@@ -90,9 +94,13 @@ export function mountHistory(root) {
             formatDuration(run.heater_on_seconds[heater.index] || 0),
           ]),
         ]
+        const calibration =
+          run.kind === 'calibration'
+            ? '<span class="status-badge status-calibration">Calibration</span> '
+            : ''
         cells.push([
           'Status',
-          `<span class="status-badge ${statusClass(run.status)}">${statusLabel(run.status)}</span>`,
+          `${calibration}<span class="status-badge ${statusClass(run.status)}">${statusLabel(run.status)}</span>`,
         ])
         return `
           <tr data-href="/history/${run.id}">
@@ -126,10 +134,13 @@ export function mountHistory(root) {
 }
 
 function visibleHeaters(settings, stats) {
+  const onSeconds = stats.heater_on_seconds || []
+  const lifeSeconds = stats.heater_life_seconds || []
   return (settings.heaters || []).map((heater, index) => ({
     name: heater.name,
     index,
-    seconds: stats.heater_on_seconds[index] || 0,
-    show: heater.enabled || (stats.heater_on_seconds[index] || 0) > 0,
+    seconds: onSeconds[index] || 0,
+    lifeSeconds: lifeSeconds[index] || 0,
+    show: heater.enabled || (onSeconds[index] || 0) > 0 || (lifeSeconds[index] || 0) > 0,
   })).filter((heater) => heater.show)
 }

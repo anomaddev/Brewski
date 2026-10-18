@@ -3,7 +3,7 @@ import pytest
 from brewski.api import create_app
 from brewski.controller import Controller
 from brewski.sources.dummy import DummySource
-from brewski.store import Store
+from brewski.store import Store, merge_settings
 
 
 @pytest.fixture
@@ -18,6 +18,12 @@ def source():
 
 @pytest.fixture
 def controller(store, source):
+    store.save_settings(
+        merge_settings(
+            store.get_settings(),
+            {"learned_coast_f": 3, "learned_coast_seconds": 8, "setup_complete": True},
+        )
+    )
     return Controller(store, source)
 
 

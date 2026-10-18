@@ -35,6 +35,10 @@ def create_app(controller: Controller) -> Flask:
     def put_settings():
         return jsonify(controller.update_settings(_json_object()))
 
+    @app.post("/api/settings/reset")
+    def reset_settings():
+        return jsonify(controller.reset())
+
     @app.get("/api/runs")
     def runs():
         return jsonify(controller.runs())
@@ -58,6 +62,10 @@ def create_app(controller: Controller) -> Flask:
     @app.post("/api/runs/stop")
     def stop_run():
         return jsonify(controller.stop())
+
+    @app.post("/api/heaters/<int:slot>/replace")
+    def replace_heater(slot: int):
+        return jsonify(controller.replace_heater(slot))
 
     @app.get("/", defaults={"path": ""})
     @app.get("/<path:path>")

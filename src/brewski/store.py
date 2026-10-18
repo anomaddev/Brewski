@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,9 +15,37 @@ SLOT_COUNT = 2
 # BCM numbers on the 40-pin header. GPIO 0 and 1 are the board ID EEPROM.
 GPIO_MIN = 2
 GPIO_MAX = 27
-# Common relay pins, and the usual 1-wire pin for both probes.
-DEFAULT_HEATER_GPIOS = (17, 27)
-DEFAULT_SENSOR_GPIOS = (4, 4)
+# How long a heater stays on, and then off, before the controller may switch
+# it again. A zero-crossing SSR only changes state as the mains voltage
+# passes through zero, and cycling faster than about half a second chatters
+# the element. One second sits in the useful 0.5–2 second range.
+HEATER_MIN_ON_DEFAULT_SECONDS = 1.0
+HEATER_MIN_OFF_DEFAULT_SECONDS = 1.0
+HEATER_DWELL_FLOOR_SECONDS = 0.5
+HEATER_DWELL_CEILING_SECONDS = 60.0
+# Degrees before the setpoint at which the element is turned off. The sheath
+# stays hot after the SSR opens and keeps heating the liquid, and the probe
+# lags the bulk, so waiting for the setpoint overshoots. 3°F (about 1.7°C)
+# is a starting point for a typical small still; 0 waits for the setpoint.
+EARLY_CUTOFF_DEFAULT_F = 3.0
+EARLY_CUTOFF_MIN_F = 0.0
+EARLY_CUTOFF_MAX_F = 20.0
+# Gallons of liquid in the pot for a calibration. The coast scales with this.
+CHARGE_MIN_GALLONS = 0.25
+CHARGE_MAX_GALLONS = 100.0
+# BCM defaults from the still wiring. Heaters drive the AC SSRs. Each probe is
+# one MAX31865: they share SPI, and each one takes its own chip select. Probe 2
+# is present and disabled until that second board is wired. The remaining pins
+# are the panel and the I2C bus. Every one of these must stay unique.
+DEFAULT_HEATER_GPIOS = (12, 16)
+DEFAULT_SENSOR_GPIOS = (17, 8)
+DEFAULT_SENSOR_ENABLED = (True, False)
+I2C_DEVICE_IDS = ("hts221", "lcd")
+DEFAULT_WIRES = 3
+DEFAULT_RTD = "pt100"
+DEFAULT_REF_OHMS = {"pt100": 430.0, "pt1000": 4300.0}
+REF_OHMS_MIN = 100.0
+REF_OHMS_MAX = 10000.0
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -27,8 +55,16 @@ CREATE TABLE IF NOT EXISTS settings (
     heater_names TEXT NOT NULL,
     sensor_names TEXT NOT NULL,
     target_temp_f REAL NOT NULL,
+    heater_min_on_seconds REAL NOT NULL DEFAULT 1,
+    heater_min_off_seconds REAL NOT NULL DEFAULT 1,
+    early_cutoff_f REAL NOT NULL DEFAULT 3,
+    learned_coast_f REAL,
+    learned_coast_seconds REAL,
+    charge_gallons REAL,
     heaters TEXT,
-    sensors TEXT
+    sensors TEXT,
+    setup_complete INTEGER NOT NULL DEFAULT 0,
+    gpio TEXT
 );
 
 CREATE TABLE IF NOT EXISTS runs (
@@ -44,6 +80,11 @@ CREATE TABLE IF NOT EXISTS runs (
     elapsed_seconds REAL NOT NULL DEFAULT 0,
     heaters TEXT,
     sensors TEXT,
+    kind TEXT NOT NULL DEFAULT 'run',
+    charge_gallons REAL,
+    coast_f REAL,
+    coast_seconds REAL,
+    calibration_settled INTEGER NOT NULL DEFAULT 0,
     cooldown_status TEXT,
     cooldown_seconds REAL,
     cooldown_baseline_f REAL,
@@ -63,6 +104,11 @@ CREATE TABLE IF NOT EXISTS samples (
 );
 
 CREATE INDEX IF NOT EXISTS samples_run_id ON samples(run_id, elapsed_seconds);
+
+CREATE TABLE IF NOT EXISTS heater_meters (
+    slot INTEGER PRIMARY KEY,
+    on_seconds REAL NOT NULL DEFAULT 0
+);
 """
 
 
@@ -71,15 +117,112 @@ class SettingsError(ValueError):
 
 
 @dataclass(frozen=True)
+class I2cDevice:
+    """One board on the shared I2C bus. Addresses are chosen when a Pi source exists."""
+
+    id: str
+    name: str
+    enabled: bool
+
+    def to_dict(self) -> dict:
+        return {"id": self.id, "name": self.name, "enabled": self.enabled}
+
+
+@dataclass(frozen=True)
+class GpioConfig:
+    """BCM pins for the buses and the front panel.
+
+    Heaters and probes keep their own pins. This block is everything else that
+    has to stay off those pins: SPI, I2C, the encoder, the start and stop
+    buttons, and the LED relays.
+    """
+
+    spi_clk: int
+    spi_sdo: int
+    spi_sdi: int
+    i2c_sda: int
+    i2c_scl: int
+    encoder_a: int
+    encoder_b: int
+    led_start: int
+    led_stop: int
+    button_start: int
+    button_stop: int
+    i2c_devices: tuple[I2cDevice, ...]
+
+    def to_dict(self) -> dict:
+        return {
+            "spi": {"clk": self.spi_clk, "sdo": self.spi_sdo, "sdi": self.spi_sdi},
+            "i2c": {"sda": self.i2c_sda, "scl": self.i2c_scl},
+            "i2c_devices": [device.to_dict() for device in self.i2c_devices],
+            "encoder": {"a": self.encoder_a, "b": self.encoder_b},
+            "leds": {"start": self.led_start, "stop": self.led_stop},
+            "buttons": {"start": self.button_start, "stop": self.button_stop},
+        }
+
+    def pins(self) -> list[tuple[str, int]]:
+        """Labeled BCM pins, in a stable order, for collision checks."""
+
+        return [
+            ("SPI CLK", self.spi_clk),
+            ("SPI SDO", self.spi_sdo),
+            ("SPI SDI", self.spi_sdi),
+            ("I2C SDA", self.i2c_sda),
+            ("I2C SCL", self.i2c_scl),
+            ("encoder A", self.encoder_a),
+            ("encoder B", self.encoder_b),
+            ("start LED relay", self.led_start),
+            ("stop LED relay", self.led_stop),
+            ("start button", self.button_start),
+            ("stop button", self.button_stop),
+        ]
+
+    def spi_pins(self) -> frozenset[int]:
+        return frozenset({self.spi_clk, self.spi_sdo, self.spi_sdi})
+
+
+def default_gpio() -> GpioConfig:
+    return GpioConfig(
+        spi_clk=11,
+        spi_sdo=9,
+        spi_sdi=10,
+        i2c_sda=2,
+        i2c_scl=3,
+        encoder_a=27,
+        encoder_b=22,
+        led_start=23,
+        led_stop=24,
+        button_start=5,
+        button_stop=6,
+        i2c_devices=(
+            I2cDevice("hts221", "HTS221", True),
+            I2cDevice("lcd", "LCD", True),
+        ),
+    )
+
+
+@dataclass(frozen=True)
 class Channel:
-    """One heater or probe on this controller."""
+    """One heater or probe on this controller.
+
+    A probe's ``gpio`` is the chip select of its MAX31865. ``wires``, ``rtd``,
+    and ``ref_ohms`` describe that converter and are left unset on heaters.
+    """
 
     name: str
     enabled: bool
     gpio: int | None
+    wires: int | None = None
+    rtd: str | None = None
+    ref_ohms: float | None = None
 
     def to_dict(self) -> dict:
-        return {"name": self.name, "enabled": self.enabled, "gpio": self.gpio}
+        data = {"name": self.name, "enabled": self.enabled, "gpio": self.gpio}
+        if self.rtd is not None:
+            data["wires"] = self.wires
+            data["rtd"] = self.rtd
+            data["ref_ohms"] = self.ref_ohms
+        return data
 
 
 @dataclass
@@ -87,6 +230,14 @@ class Settings:
     heaters: list[Channel]
     sensors: list[Channel]
     target_temp_f: int
+    heater_min_on_seconds: float = HEATER_MIN_ON_DEFAULT_SECONDS
+    heater_min_off_seconds: float = HEATER_MIN_OFF_DEFAULT_SECONDS
+    early_cutoff_f: float = EARLY_CUTOFF_DEFAULT_F
+    learned_coast_f: float | None = None
+    learned_coast_seconds: float | None = None
+    charge_gallons: float | None = None
+    setup_complete: bool = False
+    gpio: GpioConfig | None = None
 
     @property
     def heater_count(self) -> int:
@@ -115,6 +266,14 @@ class Settings:
     def to_dict(self) -> dict:
         return {
             "target_temp_f": self.target_temp_f,
+            "heater_min_on_seconds": self.heater_min_on_seconds,
+            "heater_min_off_seconds": self.heater_min_off_seconds,
+            "early_cutoff_f": self.early_cutoff_f,
+            "learned_coast_f": self.learned_coast_f,
+            "learned_coast_seconds": self.learned_coast_seconds,
+            "charge_gallons": self.charge_gallons,
+            "setup_complete": self.setup_complete,
+            "gpio": (self.gpio or default_gpio()).to_dict(),
             "heaters": [channel.to_dict() for channel in self.heaters],
             "sensors": [channel.to_dict() for channel in self.sensors],
             "heater_count": self.heater_count,
@@ -131,10 +290,14 @@ def default_settings() -> Settings:
             Channel("Heater 2", True, DEFAULT_HEATER_GPIOS[1]),
         ],
         sensors=[
-            Channel("Boiler", True, DEFAULT_SENSOR_GPIOS[0]),
-            Channel("Column", True, DEFAULT_SENSOR_GPIOS[1]),
+            _probe("Boiler", DEFAULT_SENSOR_ENABLED[0], DEFAULT_SENSOR_GPIOS[0]),
+            _probe("Column", DEFAULT_SENSOR_ENABLED[1], DEFAULT_SENSOR_GPIOS[1]),
         ],
+        gpio=default_gpio(),
         target_temp_f=165,
+        heater_min_on_seconds=HEATER_MIN_ON_DEFAULT_SECONDS,
+        heater_min_off_seconds=HEATER_MIN_OFF_DEFAULT_SECONDS,
+        early_cutoff_f=EARLY_CUTOFF_DEFAULT_F,
     )
 
 
@@ -145,7 +308,19 @@ def utc_now() -> str:
 def merge_settings(current: Settings, patch: dict) -> Settings:
     if not isinstance(patch, dict):
         raise SettingsError("Settings must be an object")
-    allowed = {"heaters", "sensors", "target_temp_f"}
+    allowed = {
+        "heaters",
+        "sensors",
+        "target_temp_f",
+        "heater_min_on_seconds",
+        "heater_min_off_seconds",
+        "early_cutoff_f",
+        "learned_coast_f",
+        "learned_coast_seconds",
+        "charge_gallons",
+        "setup_complete",
+        "gpio",
+    }
     unknown = sorted(set(patch) - allowed)
     if unknown:
         raise SettingsError(f"Unknown settings: {', '.join(unknown)}")
@@ -157,18 +332,43 @@ def merge_settings(current: Settings, patch: dict) -> Settings:
 def parse_settings(data: dict) -> Settings:
     heaters = _channels(data.get("heaters"), "heaters")
     sensors = _channels(data.get("sensors"), "sensors")
-    _check_pins(heaters, sensors)
+    gpio = _gpio_config(data.get("gpio"))
+    _check_pins(heaters, sensors, gpio)
     return Settings(
         heaters=heaters,
         sensors=sensors,
         target_temp_f=_target(data.get("target_temp_f")),
+        heater_min_on_seconds=_dwell_seconds(
+            data.get("heater_min_on_seconds"),
+            "heater_min_on_seconds",
+            HEATER_MIN_ON_DEFAULT_SECONDS,
+        ),
+        heater_min_off_seconds=_dwell_seconds(
+            data.get("heater_min_off_seconds"),
+            "heater_min_off_seconds",
+            HEATER_MIN_OFF_DEFAULT_SECONDS,
+        ),
+        early_cutoff_f=_early_cutoff(data.get("early_cutoff_f")),
+        learned_coast_f=_optional_setting(
+            data.get("learned_coast_f"), "learned_coast_f", EARLY_CUTOFF_MIN_F, EARLY_CUTOFF_MAX_F
+        ),
+        learned_coast_seconds=_optional_setting(
+            data.get("learned_coast_seconds"), "learned_coast_seconds", 0.0, 3600.0
+        ),
+        charge_gallons=_optional_charge(data.get("charge_gallons")),
+        setup_complete=_flag(data.get("setup_complete")),
+        gpio=gpio,
     )
 
 
 def shape_changed(before: Settings, after: Settings) -> bool:
-    """True when names, enable flags, or GPIO pins changed."""
+    """True when heater, probe, or other GPIO wiring changed."""
 
-    return before.heaters != after.heaters or before.sensors != after.sensors
+    return (
+        before.heaters != after.heaters
+        or before.sensors != after.sensors
+        or before.gpio != after.gpio
+    )
 
 
 class Store:
@@ -181,8 +381,11 @@ class Store:
             path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         with self._connect() as connection:
+            had_meters = _table_exists(connection, "heater_meters")
             connection.executescript(SCHEMA)
             _migrate(connection)
+            if not had_meters:
+                _seed_heater_meters(connection)
             row = connection.execute("SELECT id FROM settings WHERE id = 1").fetchone()
             if row is None:
                 self._insert_settings(connection, default_settings())
@@ -194,26 +397,93 @@ class Store:
             return default_settings()
         return _settings_from_row(row)
 
+    def reset(self) -> None:
+        """Erase runs and samples, and restore the factory settings.
+
+        Element hours stay. They belong to the heating element, not to the
+        run log, so clearing history does not make an old element look new.
+        """
+
+        with self._connect() as connection:
+            connection.execute("DELETE FROM samples")
+            connection.execute("DELETE FROM runs")
+            connection.execute("DELETE FROM settings")
+            self._insert_settings(connection, default_settings())
+
+    def heater_life_seconds(self) -> list[float]:
+        """Seconds each heater output has been on, by slot."""
+
+        with self._connect() as connection:
+            rows = connection.execute("SELECT slot, on_seconds FROM heater_meters").fetchall()
+        by_slot = {int(row["slot"]): float(row["on_seconds"]) for row in rows}
+        return [by_slot.get(index, 0.0) for index in range(SLOT_COUNT)]
+
+    def add_heater_life(self, seconds: list[float]) -> None:
+        """Add powered time to each heater. Negative deltas are ignored."""
+
+        deltas = [
+            max(0.0, float(seconds[index])) if index < len(seconds) else 0.0
+            for index in range(SLOT_COUNT)
+        ]
+        if not any(deltas):
+            return
+        with self._connect() as connection:
+            for index, delta in enumerate(deltas):
+                if delta <= 0:
+                    continue
+                connection.execute(
+                    """
+                    INSERT INTO heater_meters (slot, on_seconds) VALUES (?, ?)
+                    ON CONFLICT(slot) DO UPDATE SET on_seconds = on_seconds + excluded.on_seconds
+                    """,
+                    (index, delta),
+                )
+
+    def reset_heater_life(self, slot: int) -> None:
+        """Zero one heater after its element is replaced."""
+
+        slot = int(slot)
+        if slot < 0 or slot >= SLOT_COUNT:
+            raise SettingsError(f"Heater slot must be 0–{SLOT_COUNT - 1}")
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO heater_meters (slot, on_seconds) VALUES (?, 0)
+                ON CONFLICT(slot) DO UPDATE SET on_seconds = 0
+                """,
+                (slot,),
+            )
+
     def save_settings(self, settings: Settings) -> None:
         with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE settings
                 SET heater_count = ?, sensor_count = ?, heater_names = ?,
-                    sensor_names = ?, target_temp_f = ?, heaters = ?, sensors = ?
+                    sensor_names = ?, target_temp_f = ?, heater_min_on_seconds = ?,
+                    heater_min_off_seconds = ?, early_cutoff_f = ?,
+                    learned_coast_f = ?, learned_coast_seconds = ?, charge_gallons = ?,
+                    heaters = ?, sensors = ?, setup_complete = ?, gpio = ?
                 WHERE id = 1
                 """,
                 _settings_values(settings),
             )
 
-    def create_run(self, settings: Settings) -> dict:
+    def create_run(
+        self,
+        settings: Settings,
+        *,
+        kind: str = "run",
+        charge_gallons: float | None = None,
+    ) -> dict:
         with self._connect() as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO runs (
                     started_at, status, target_temp_f, heater_count, sensor_count,
-                    heater_names, sensor_names, elapsed_seconds, heaters, sensors
-                ) VALUES (?, 'running', ?, ?, ?, ?, ?, 0, ?, ?)
+                    heater_names, sensor_names, elapsed_seconds, heaters, sensors,
+                    kind, charge_gallons
+                ) VALUES (?, 'running', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
                 """,
                 (
                     utc_now(),
@@ -224,6 +494,8 @@ class Store:
                     json.dumps(settings.sensor_names),
                     json.dumps([channel.to_dict() for channel in settings.heaters]),
                     json.dumps([channel.to_dict() for channel in settings.sensors]),
+                    kind,
+                    charge_gallons,
                 ),
             )
             run_id = int(cursor.lastrowid)
@@ -243,6 +515,9 @@ class Store:
             "cooldown_baseline_f",
             "cooldown_sensor_index",
             "cooldown_ended_at",
+            "coast_f",
+            "coast_seconds",
+            "calibration_settled",
         )
         keys = [key for key in allowed if key in fields]
         if not keys:
@@ -352,28 +627,31 @@ class Store:
             run["heater_on_seconds"] = heater_on_seconds(samples, run["elapsed_seconds"])
             runs.append(run)
 
-        finished = [run for run in runs if run["status"] == "stopped"]
+        production = [run for run in runs if run["kind"] != "calibration"]
+        finished = [run for run in production if run["status"] == "stopped"]
         average = 0.0
         if finished:
             average = sum(run["elapsed_seconds"] for run in finished) / len(finished)
         completed_cooldowns = [
             float(run["cooldown_seconds"])
-            for run in runs
+            for run in production
             if run["cooldown_status"] == "complete" and run["cooldown_seconds"] is not None
         ]
         average_cooldown = None
         if completed_cooldowns:
             average_cooldown = sum(completed_cooldowns) / len(completed_cooldowns)
         heater_totals = [0.0, 0.0]
-        for run in runs:
+        for run in production:
             heater_totals[0] += run["heater_on_seconds"][0]
             heater_totals[1] += run["heater_on_seconds"][1]
         return {
             "stats": {
-                "total_runs": len(runs),
+                "total_runs": len(production),
+                "calibration_runs": len(runs) - len(production),
                 "average_duration_seconds": average,
                 "average_cooldown_seconds": average_cooldown,
                 "heater_on_seconds": heater_totals,
+                "heater_life_seconds": self.heater_life_seconds(),
             },
             "runs": runs,
         }
@@ -402,8 +680,10 @@ class Store:
             """
             INSERT INTO settings (
                 id, heater_count, sensor_count, heater_names, sensor_names,
-                target_temp_f, heaters, sensors
-            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+                target_temp_f, heater_min_on_seconds, heater_min_off_seconds,
+                early_cutoff_f, learned_coast_f, learned_coast_seconds,
+                charge_gallons, heaters, sensors, setup_complete, gpio
+            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             _settings_values(settings),
         )
@@ -454,6 +734,13 @@ def _run_dict(row: sqlite3.Row) -> dict:
         "sensor_names": json.loads(row["sensor_names"]),
         "heaters": [channel.to_dict() for channel in _channels_from_row(row, "heaters", "heater")],
         "sensors": [channel.to_dict() for channel in _channels_from_row(row, "sensors", "sensor")],
+        "kind": row["kind"] if "kind" in row.keys() and row["kind"] else "run",
+        "charge_gallons": _optional_float(row, "charge_gallons"),
+        "coast_f": _optional_float(row, "coast_f"),
+        "coast_seconds": _optional_float(row, "coast_seconds"),
+        "calibration_settled": bool(row["calibration_settled"])
+        if "calibration_settled" in row.keys() and row["calibration_settled"]
+        else False,
     }
 
 
@@ -480,8 +767,66 @@ def _migrate(connection: sqlite3.Connection) -> None:
     _add_column(connection, "runs", "cooldown_baseline_f", "REAL")
     _add_column(connection, "runs", "cooldown_sensor_index", "INTEGER")
     _add_column(connection, "runs", "cooldown_ended_at")
+    _add_column(connection, "settings", "heater_min_on_seconds", "REAL")
+    _add_column(connection, "settings", "heater_min_off_seconds", "REAL")
+    _add_column(connection, "settings", "early_cutoff_f", "REAL")
+    _add_column(connection, "settings", "learned_coast_f", "REAL")
+    _add_column(connection, "settings", "learned_coast_seconds", "REAL")
+    _add_column(connection, "settings", "charge_gallons", "REAL")
+    _add_column(connection, "runs", "kind", "TEXT")
+    _add_column(connection, "runs", "charge_gallons", "REAL")
+    _add_column(connection, "runs", "coast_f", "REAL")
+    _add_column(connection, "runs", "coast_seconds", "REAL")
+    _add_column(connection, "runs", "calibration_settled", "INTEGER")
     if _table_exists(connection, "samples"):
         _add_column(connection, "samples", "phase")
+    settings_columns = {row[1] for row in connection.execute("PRAGMA table_info(settings)")}
+    adding_setup = "setup_complete" not in settings_columns
+    _add_column(connection, "settings", "setup_complete", "INTEGER NOT NULL DEFAULT 0")
+    _add_column(connection, "settings", "gpio")
+    if not adding_setup or not _table_exists(connection, "runs"):
+        return
+    has_runs = connection.execute("SELECT 1 FROM runs LIMIT 1").fetchone()
+    has_coast = connection.execute(
+        "SELECT 1 FROM settings WHERE learned_coast_f IS NOT NULL LIMIT 1"
+    ).fetchone()
+    if has_runs or has_coast:
+        connection.execute("UPDATE settings SET setup_complete = 1")
+
+
+def _seed_heater_meters(connection: sqlite3.Connection) -> None:
+    """Fill element hours from the sample log the first time the meter exists.
+
+    Later time is added by the controller as the output is actually on.
+    Seeding again would count those same runs twice, so an existing row wins.
+    Cooldown samples are skipped: the heaters are off while the pot cools.
+    Calibration is included, because the element was powered.
+    """
+
+    existing = connection.execute("SELECT 1 FROM heater_meters LIMIT 1").fetchone()
+    if existing is not None:
+        return
+    totals = [0.0, 0.0]
+    if _table_exists(connection, "runs") and _table_exists(connection, "samples"):
+        run_rows = connection.execute("SELECT id, elapsed_seconds FROM runs").fetchall()
+        sample_rows = connection.execute(
+            "SELECT * FROM samples ORDER BY run_id, elapsed_seconds, id"
+        ).fetchall()
+        samples_by_run: dict[int, list[dict]] = {}
+        for row in sample_rows:
+            samples_by_run.setdefault(int(row["run_id"]), []).append(_sample_dict(row))
+        for row in run_rows:
+            seconds = heater_on_seconds(
+                samples_by_run.get(int(row["id"]), []),
+                float(row["elapsed_seconds"] or 0),
+            )
+            totals[0] += seconds[0]
+            totals[1] += seconds[1]
+    for slot, seconds in enumerate(totals):
+        connection.execute(
+            "INSERT INTO heater_meters (slot, on_seconds) VALUES (?, ?)",
+            (slot, seconds),
+        )
 
 
 def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
@@ -522,16 +867,69 @@ def _settings_values(settings: Settings) -> tuple:
         json.dumps(settings.heater_names),
         json.dumps(settings.sensor_names),
         settings.target_temp_f,
+        settings.heater_min_on_seconds,
+        settings.heater_min_off_seconds,
+        settings.early_cutoff_f,
+        settings.learned_coast_f,
+        settings.learned_coast_seconds,
+        settings.charge_gallons,
         json.dumps([channel.to_dict() for channel in settings.heaters]),
         json.dumps([channel.to_dict() for channel in settings.sensors]),
+        1 if settings.setup_complete else 0,
+        json.dumps((settings.gpio or default_gpio()).to_dict()),
     )
 
 
 def _settings_from_row(row: sqlite3.Row) -> Settings:
+    heaters = _channels_from_row(row, "heaters", "heater", default_gpios=DEFAULT_HEATER_GPIOS)
+    gpio = _gpio_from_row(row)
+    sensors = _align_probe_pins(
+        _channels_from_row(row, "sensors", "sensor", default_gpios=DEFAULT_SENSOR_GPIOS, probe=True),
+        heaters,
+        gpio,
+    )
     return Settings(
-        heaters=_channels_from_row(row, "heaters", "heater", default_gpios=DEFAULT_HEATER_GPIOS),
-        sensors=_channels_from_row(row, "sensors", "sensor", default_gpios=DEFAULT_SENSOR_GPIOS),
+        heaters=heaters,
+        sensors=sensors,
         target_temp_f=_stored_target(row["target_temp_f"]),
+        heater_min_on_seconds=_stored_float(
+            row, "heater_min_on_seconds", HEATER_MIN_ON_DEFAULT_SECONDS
+        ),
+        heater_min_off_seconds=_stored_float(
+            row, "heater_min_off_seconds", HEATER_MIN_OFF_DEFAULT_SECONDS
+        ),
+        early_cutoff_f=_stored_float(row, "early_cutoff_f", EARLY_CUTOFF_DEFAULT_F),
+        learned_coast_f=_optional_float(row, "learned_coast_f"),
+        learned_coast_seconds=_optional_float(row, "learned_coast_seconds"),
+        charge_gallons=_optional_float(row, "charge_gallons"),
+        setup_complete=_stored_flag(row, "setup_complete"),
+        gpio=gpio,
+    )
+
+
+def _gpio_from_row(row: sqlite3.Row) -> GpioConfig:
+    """Load the pin map. A database from before the column existed uses the defaults."""
+
+    if "gpio" not in row.keys() or row["gpio"] is None:
+        return default_gpio()
+    return _gpio_config(json.loads(row["gpio"]))
+
+
+def _probe(
+    name: str,
+    enabled: bool,
+    gpio: int | None,
+    wires: int = DEFAULT_WIRES,
+    rtd: str = DEFAULT_RTD,
+    ref_ohms: float | None = None,
+) -> Channel:
+    return Channel(
+        name,
+        enabled,
+        gpio,
+        wires,
+        rtd,
+        DEFAULT_REF_OHMS[rtd] if ref_ohms is None else ref_ohms,
     )
 
 
@@ -540,46 +938,70 @@ def _channels_from_row(
     column: str,
     prefix: str,
     default_gpios: tuple[int, int] | None = None,
+    probe: bool = False,
 ) -> list[Channel]:
     """Load a device list, or rebuild it from the older count-and-names columns."""
 
     raw = row[column] if column in row.keys() else None
     if raw:
-        return [_channel_from_stored(item) for item in json.loads(raw)]
+        return [_channel_from_stored(item, probe=probe) for item in json.loads(raw)]
     names = json.loads(row[f"{prefix}_names"])
     count = int(row[f"{prefix}_count"])
     channels = []
     for index in range(SLOT_COUNT):
         gpio = None if default_gpios is None else default_gpios[index]
-        channels.append(Channel(names[index], index < count, gpio))
+        if probe:
+            channels.append(_probe(names[index], index < count, gpio))
+        else:
+            channels.append(Channel(names[index], index < count, gpio))
     return channels
 
 
-def _channel_from_stored(item: dict) -> Channel:
+def _channel_from_stored(item: dict, *, probe: bool = False) -> Channel:
     gpio = item.get("gpio")
+    pin = None if gpio is None else int(gpio)
+    if not probe:
+        return Channel(name=item["name"], enabled=bool(item["enabled"]), gpio=pin)
+    if any(key in item for key in ("wires", "rtd", "ref_ohms")):
+        wires, rtd, ref_ohms = _probe_config(item, "sensors")
+    else:
+        wires, rtd, ref_ohms = DEFAULT_WIRES, DEFAULT_RTD, DEFAULT_REF_OHMS[DEFAULT_RTD]
     return Channel(
         name=item["name"],
         enabled=bool(item["enabled"]),
-        gpio=None if gpio is None else int(gpio),
+        gpio=pin,
+        wires=wires,
+        rtd=rtd,
+        ref_ohms=ref_ohms,
     )
 
 
 def _channels(value: object, field: str) -> list[Channel]:
     label = "heater" if field == "heaters" else "temperature probe"
+    probe = field == "sensors"
+    allowed = {"name", "enabled", "gpio"}
+    if probe:
+        allowed |= {"wires", "rtd", "ref_ohms"}
     if not isinstance(value, list) or len(value) != SLOT_COUNT:
         raise SettingsError(f"{field} must be a list of {SLOT_COUNT} {label}s")
     channels = []
     for index, item in enumerate(value):
         if not isinstance(item, dict):
             raise SettingsError(f"{field}[{index}] must be an object")
-        unknown = sorted(set(item) - {"name", "enabled", "gpio"})
+        unknown = sorted(set(item) - allowed)
         if unknown:
             raise SettingsError(f"Unknown {field}[{index}] settings: {', '.join(unknown)}")
+        wires = rtd = ref_ohms = None
+        if probe:
+            wires, rtd, ref_ohms = _probe_config(item, f"{field}[{index}]")
         channels.append(
             Channel(
                 name=_name(item.get("name"), f"{field}[{index}].name"),
                 enabled=_enabled(item.get("enabled"), f"{field}[{index}].enabled"),
                 gpio=_gpio(item.get("gpio"), f"{field}[{index}].gpio"),
+                wires=wires,
+                rtd=rtd,
+                ref_ohms=ref_ohms,
             )
         )
     if not any(channel.enabled for channel in channels):
@@ -587,13 +1009,194 @@ def _channels(value: object, field: str) -> list[Channel]:
     return channels
 
 
-def _check_pins(heaters: list[Channel], sensors: list[Channel]) -> None:
+def _probe_config(item: dict, field: str) -> tuple[int, str, float]:
+    rtd = item.get("rtd", DEFAULT_RTD)
+    if rtd not in DEFAULT_REF_OHMS:
+        raise SettingsError(f"{field}.rtd must be pt100 or pt1000")
+    wires = item.get("wires", DEFAULT_WIRES)
+    if isinstance(wires, bool) or not isinstance(wires, int) or wires not in (2, 3, 4):
+        raise SettingsError(f"{field}.wires must be 2, 3, or 4")
+    ref_ohms = item.get("ref_ohms", DEFAULT_REF_OHMS[rtd])
+    if isinstance(ref_ohms, bool) or not isinstance(ref_ohms, (int, float)):
+        raise SettingsError(f"{field}.ref_ohms must be a number of ohms")
+    ohms = round(float(ref_ohms), 2)
+    if ohms < REF_OHMS_MIN or ohms > REF_OHMS_MAX:
+        raise SettingsError(
+            f"{field}.ref_ohms must be between {REF_OHMS_MIN:.0f} and {REF_OHMS_MAX:.0f}"
+        )
+    return wires, rtd, ohms
+
+
+def _align_probe_pins(
+    sensors: list[Channel], heaters: list[Channel], gpio: GpioConfig
+) -> list[Channel]:
+    """Give each probe a chip select a MAX31865 can use.
+
+    Older settings put both probes on the 1-wire pin. A shared pin, or one
+    already taken by a heater or by the rest of the GPIO map, is replaced
+    with a free chip select. The next save stores that assignment. A pin that
+    is already valid is left alone.
+    """
+
+    occupied = _occupied_pins(heaters, gpio)
+    pins = [sensor.gpio for sensor in sensors]
+    shared = {pin for pin in pins if pins.count(pin) > 1}
+    used: set[int] = set()
+    aligned = []
+    for index, sensor in enumerate(sensors):
+        pin = sensor.gpio
+        if pin in shared or not _chip_select_free(pin, used, occupied):
+            pin = _free_chip_select(used, occupied, DEFAULT_SENSOR_GPIOS[index])
+        used.add(pin)
+        aligned.append(replace(sensor, gpio=pin))
+    return aligned
+
+
+def _occupied_pins(heaters: list[Channel], gpio: GpioConfig) -> set[int]:
+    pins = {channel.gpio for channel in heaters if isinstance(channel.gpio, int)}
+    pins.update(pin for _, pin in gpio.pins())
+    return pins
+
+
+def _chip_select_free(pin: int | None, used: set[int], occupied: set[int]) -> bool:
+    return isinstance(pin, int) and GPIO_MIN <= pin <= GPIO_MAX and pin not in occupied and pin not in used
+
+
+def _free_chip_select(used: set[int], occupied: set[int], preferred: int) -> int:
+    candidates = (preferred, *DEFAULT_SENSOR_GPIOS, *range(GPIO_MIN, GPIO_MAX + 1))
+    for pin in candidates:
+        if _chip_select_free(pin, used, occupied):
+            return pin
+    raise SettingsError("No chip select is free for a temperature probe")
+
+
+def _check_pins(heaters: list[Channel], sensors: list[Channel], gpio: GpioConfig) -> None:
+    claimed: dict[int, str] = {}
+    for label, pin in gpio.pins():
+        if pin in claimed:
+            raise SettingsError(f"BCM {pin} is shared by {claimed[pin]} and {label}")
+        claimed[pin] = label
+    spi = gpio.spi_pins()
+    for channel in (*heaters, *sensors):
+        if channel.gpio in spi:
+            listed = _bcm_list(sorted(spi))
+            verb = "is" if len(spi) == 1 else "are"
+            raise SettingsError(
+                f"BCM {listed} {verb} the SPI bus shared by the temperature probes"
+            )
     heater_pins = [channel.gpio for channel in heaters]
     if len(set(heater_pins)) != len(heater_pins):
         raise SettingsError("Each heater needs its own GPIO pin")
-    sensor_pins = {channel.gpio for channel in sensors}
+    sensor_pins = [channel.gpio for channel in sensors]
+    if len(set(sensor_pins)) != len(sensor_pins):
+        raise SettingsError("Each temperature probe needs its own chip select")
     if any(pin in sensor_pins for pin in heater_pins):
         raise SettingsError("A heater and a probe cannot share a GPIO pin")
+    roles = [(f"heater {index + 1}", channel.gpio) for index, channel in enumerate(heaters)]
+    roles += [(f"probe {index + 1}", channel.gpio) for index, channel in enumerate(sensors)]
+    for label, pin in roles:
+        if pin in claimed and pin not in spi:
+            raise SettingsError(f"BCM {pin} is shared by {claimed[pin]} and {label}")
+        claimed[pin] = label
+
+
+def _bcm_list(pins: list[int]) -> str:
+    labels = [str(pin) for pin in pins]
+    if len(labels) <= 1:
+        return labels[0] if labels else ""
+    if len(labels) == 2:
+        return f"{labels[0]} and {labels[1]}"
+    return ", ".join(labels[:-1]) + f", and {labels[-1]}"
+
+
+_GPIO_GROUPS = {
+    "spi": ("clk", "sdo", "sdi"),
+    "i2c": ("sda", "scl"),
+    "encoder": ("a", "b"),
+    "leds": ("start", "stop"),
+    "buttons": ("start", "stop"),
+}
+
+
+def _gpio_config(value: object) -> GpioConfig:
+    if value is None:
+        return default_gpio()
+    if not isinstance(value, dict):
+        raise SettingsError("gpio must be an object")
+    allowed = set(_GPIO_GROUPS) | {"i2c_devices"}
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise SettingsError(f"Unknown gpio settings: {', '.join(unknown)}")
+    groups = {name: _pin_group(value.get(name), f"gpio.{name}", keys) for name, keys in _GPIO_GROUPS.items()}
+    spi = groups["spi"]
+    i2c = groups["i2c"]
+    encoder = groups["encoder"]
+    leds = groups["leds"]
+    buttons = groups["buttons"]
+    return GpioConfig(
+        spi_clk=spi["clk"],
+        spi_sdo=spi["sdo"],
+        spi_sdi=spi["sdi"],
+        i2c_sda=i2c["sda"],
+        i2c_scl=i2c["scl"],
+        encoder_a=encoder["a"],
+        encoder_b=encoder["b"],
+        led_start=leds["start"],
+        led_stop=leds["stop"],
+        button_start=buttons["start"],
+        button_stop=buttons["stop"],
+        i2c_devices=_i2c_devices(value.get("i2c_devices")),
+    )
+
+
+def _pin_group(value: object, field: str, keys: tuple[str, ...]) -> dict[str, int]:
+    if not isinstance(value, dict):
+        raise SettingsError(f"{field} must be an object")
+    unknown = sorted(set(value) - set(keys))
+    if unknown:
+        raise SettingsError(f"Unknown {field} settings: {', '.join(unknown)}")
+    missing = [key for key in keys if key not in value]
+    if missing:
+        raise SettingsError(f"{field} needs {', '.join(missing)}")
+    return {key: _gpio(value[key], f"{field}.{key}") for key in keys}
+
+
+def _i2c_devices(value: object) -> tuple[I2cDevice, ...]:
+    if not isinstance(value, list) or len(value) != len(I2C_DEVICE_IDS):
+        raise SettingsError("gpio.i2c_devices must list the HTS221 and the LCD")
+    devices = []
+    for index, expected in enumerate(I2C_DEVICE_IDS):
+        item = value[index]
+        field = f"gpio.i2c_devices[{index}]"
+        if not isinstance(item, dict):
+            raise SettingsError(f"{field} must be an object")
+        unknown = sorted(set(item) - {"id", "name", "enabled"})
+        if unknown:
+            raise SettingsError(f"Unknown {field} settings: {', '.join(unknown)}")
+        if item.get("id") != expected:
+            raise SettingsError(f"{field}.id must be {expected}")
+        devices.append(
+            I2cDevice(
+                expected,
+                _name(item.get("name"), f"{field}.name"),
+                _enabled(item.get("enabled"), f"{field}.enabled"),
+            )
+        )
+    return tuple(devices)
+
+
+def _flag(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    raise SettingsError("setup_complete must be true or false")
+
+
+def _stored_flag(row: sqlite3.Row, column: str) -> bool:
+    if column not in row.keys() or row[column] is None:
+        return False
+    return bool(row[column])
 
 
 def _name(value: object, field: str) -> str:
@@ -617,6 +1220,71 @@ def _gpio(value: object, field: str) -> int:
     if value < GPIO_MIN or value > GPIO_MAX:
         raise SettingsError(f"{field} must be a BCM pin from {GPIO_MIN} to {GPIO_MAX}")
     return value
+
+
+def _stored_float(row: sqlite3.Row, column: str, default: float) -> float:
+    """A saved number. Databases from before the column existed use the default."""
+
+    if column not in row.keys() or row[column] is None:
+        return default
+    return float(row[column])
+
+
+def _dwell_seconds(value: object, field: str, default: float) -> float:
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SettingsError(f"{field} must be a number of seconds")
+    seconds = round(float(value), 2)
+    if seconds < HEATER_DWELL_FLOOR_SECONDS or seconds > HEATER_DWELL_CEILING_SECONDS:
+        raise SettingsError(
+            f"{field} must be between {HEATER_DWELL_FLOOR_SECONDS:g} and {HEATER_DWELL_CEILING_SECONDS:g}"
+        )
+    return seconds
+
+
+def charge_gallons(value: object) -> float:
+    """Gallons of liquid in the pot for a calibration."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SettingsError("charge_gallons must be a number of gallons")
+    gallons = round(float(value), 2)
+    if gallons < CHARGE_MIN_GALLONS or gallons > CHARGE_MAX_GALLONS:
+        raise SettingsError(
+            "charge_gallons must be between "
+            f"{CHARGE_MIN_GALLONS:g} and {CHARGE_MAX_GALLONS:g}"
+        )
+    return gallons
+
+
+def _optional_charge(value: object) -> float | None:
+    if value is None:
+        return None
+    return charge_gallons(value)
+
+
+def _optional_setting(value: object, field: str, low: float, high: float) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SettingsError(f"{field} must be a number")
+    number = round(float(value), 2)
+    if number < low or number > high:
+        raise SettingsError(f"{field} must be between {low:g} and {high:g}")
+    return number
+
+
+def _early_cutoff(value: object) -> float:
+    if value is None:
+        return EARLY_CUTOFF_DEFAULT_F
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SettingsError("early_cutoff_f must be a number of degrees")
+    degrees = round(float(value), 2)
+    if degrees < EARLY_CUTOFF_MIN_F or degrees > EARLY_CUTOFF_MAX_F:
+        raise SettingsError(
+            f"early_cutoff_f must be between {EARLY_CUTOFF_MIN_F:g} and {EARLY_CUTOFF_MAX_F:g}"
+        )
+    return degrees
 
 
 def _stored_target(value: object) -> int:

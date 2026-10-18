@@ -37,10 +37,12 @@ export function mountShell(active) {
           <div class="menu-title">Brewski</div>
           <div class="source-badge">Dummy source</div>
         </header>
+        <div class="status-strip-host" id="status-strip-host"></div>
         <main class="container">
           <div id="page"></div>
         </main>
       </div>
+      <div id="setup-host"></div>
     </div>
   `
   const sidebar = document.getElementById('sidebar')

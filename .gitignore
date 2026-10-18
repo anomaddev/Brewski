@@ -210,3 +210,6 @@ web/dist/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Ignore Coding Prompts
+.prompts/

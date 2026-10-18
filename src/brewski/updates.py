@@ -23,6 +23,7 @@ from brewski.lcd import (
     Display,
     open_buttons,
     open_display,
+    open_prompt_leds,
     progress_lines,
     prompt_lines,
 )
@@ -194,21 +195,30 @@ def run_boot_update() -> int:
         logger.warning("An update is available and the LCD could not be opened. Keeping this version.")
         display.close()
         return 0
+    latest = release.latest or ""
+    display.write(prompt_lines(release.current, latest, PROMPT_SECONDS))
     buttons = open_buttons(settings)
     if buttons is None:
-        logger.warning("An update is available and the buttons could not be read. Keeping this version.")
-        display.close()
-        return 0
+        logger.warning(
+            "An update is available and the buttons could not be read. "
+            "Waiting %ss, then keeping this version.",
+            PROMPT_SECONDS,
+        )
+    leds = open_prompt_leds(settings)
+    logger.info("Update %s is available. Waiting %ss for Start or Stop.", latest, PROMPT_SECONDS)
     try:
         choice = wait_for_choice(
             display,
-            buttons.pressed,
+            buttons.pressed if buttons is not None else (lambda: None),
             current=release.current,
-            latest=release.latest or "",
+            latest=latest,
             seconds=PROMPT_SECONDS,
         )
     finally:
-        buttons.close()
+        if leds is not None:
+            leds.close()
+        if buttons is not None:
+            buttons.close()
     if choice != "start":
         display.write(progress_lines("kept", release.current, release.latest or ""))
         time.sleep(1)
@@ -248,11 +258,15 @@ def wait_for_choice(
     current: str,
     latest: str,
     seconds: int = PROMPT_SECONDS,
-    now=time.monotonic,
-    sleep=time.sleep,
+    now=None,
+    sleep=None,
 ) -> str:
     """Block until Start, Stop, or the timeout. The timeout keeps the current version."""
 
+    if now is None:
+        now = time.monotonic
+    if sleep is None:
+        sleep = time.sleep
     deadline = now() + seconds
     shown: list[str] | None = None
     while True:

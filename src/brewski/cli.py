@@ -136,7 +136,13 @@ def run_dev() -> None:
 
 def _build_runtime(dev: bool) -> tuple[Controller, object]:
     store = Store(data_directory(dev))
-    controller = Controller(store, DummySource())
+    if dev:
+        source = DummySource()
+    else:
+        from brewski.sources.pi import PiSource
+
+        source = PiSource(store)
+    controller = Controller(store, source)
     return controller, create_app(controller)
 
 

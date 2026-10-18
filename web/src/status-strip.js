@@ -13,7 +13,20 @@ export function mountStatusStrip(host) {
           <span class="status-strip-timer" data-strip="timer" hidden>00:00:00</span>
         </span>
         <span class="status-strip-temps" data-strip="temps"></span>
+        <span class="status-strip-emergency" data-strip="emergency" hidden></span>
         <span class="status-strip-side">
+          <span class="status-strip-stat">
+            <span class="status-strip-kicker">Cabinet</span>
+            <strong data-strip="cabinet">—</strong>
+          </span>
+          <span class="status-strip-stat">
+            <span class="status-strip-kicker">Humidity</span>
+            <strong data-strip="humidity">—</strong>
+          </span>
+          <span class="status-strip-stat">
+            <span class="status-strip-kicker">Limit</span>
+            <strong data-strip="limit">—</strong>
+          </span>
           <span class="status-strip-heaters" data-strip="heaters"></span>
           <span class="status-strip-stat">
             <span class="status-strip-kicker">Target</span>
@@ -92,6 +105,19 @@ export function mountStatusStrip(host) {
     timer.hidden = !active
     if (active) timer.textContent = formatDuration(status.elapsed_seconds)
     host.querySelector('[data-strip="target"]').textContent = formatTarget(status.target_temp_f)
+    const cabinet = status.cabinet_temp_f
+    const humidity = status.cabinet_humidity_pct
+    const limit = status.cabinet_limit_f
+    host.querySelector('[data-strip="cabinet"]').textContent =
+      cabinet == null || Number.isNaN(Number(cabinet)) ? '—' : `${Number(cabinet).toFixed(1)}°F`
+    host.querySelector('[data-strip="humidity"]').textContent =
+      humidity == null || Number.isNaN(Number(humidity)) ? '—' : `${Math.round(Number(humidity))}%`
+    host.querySelector('[data-strip="limit"]').textContent =
+      limit == null || Number.isNaN(Number(limit)) ? '—' : `${Math.round(Number(limit))}°F`
+    const codes = status.emergency || []
+    const alarm = host.querySelector('[data-strip="emergency"]')
+    alarm.hidden = codes.length === 0
+    alarm.textContent = codes.map((item) => `${item.code}: ${item.summary}`).join(' ')
     renderTemps(status)
     renderHeaters(status)
     host.hidden = false

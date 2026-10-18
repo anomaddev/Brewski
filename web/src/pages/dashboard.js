@@ -87,6 +87,23 @@ export function mountDashboard(root) {
   root.innerHTML = `
     <div class="board">
       <section class="probe-grid" id="temp-rows" aria-label="Temperatures"></section>
+      <section class="dashboard-card cabinet-card" id="cabinet-card" aria-label="Cabinet safety">
+        <p class="emergency-banner" id="emergency-banner" hidden></p>
+        <div class="cabinet-readout">
+          <div>
+            <span class="eyebrow">Cabinet</span>
+            <p class="cabinet-value" id="cabinet-temp">—</p>
+          </div>
+          <div>
+            <span class="eyebrow">Humidity</span>
+            <p class="cabinet-value" id="cabinet-humidity">—</p>
+          </div>
+          <div>
+            <span class="eyebrow">Limit</span>
+            <p class="cabinet-value" id="cabinet-limit">—</p>
+          </div>
+        </div>
+      </section>
       <section class="dashboard-card console">
         <div class="console-main">
           <div class="run-identity">
@@ -115,7 +132,7 @@ export function mountDashboard(root) {
         <div class="console-target target-card">
           <label class="eyebrow" for="target-input">Target</label>
           <div class="target-field">
-            <input id="target-input" type="number" min="40" max="250" step="1" inputmode="numeric" />
+            <input id="target-input" type="number" min="90" max="240" step="1" inputmode="numeric" />
             <div class="target-stepper">
               <button type="button" class="step-btn" data-delta="1" aria-label="Increase target">
                 <svg viewBox="0 0 12 8" aria-hidden="true"><path d="M1 6.5 6 1.5l5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -294,8 +311,28 @@ export function mountDashboard(root) {
     }
   }
 
-  function renderActions(mode, ready) {
+  function renderCabinet(status) {
+    const temp = status.cabinet_temp_f
+    const humidity = status.cabinet_humidity_pct
+    document.getElementById('cabinet-temp').textContent =
+      temp == null || Number.isNaN(Number(temp)) ? '—' : `${Number(temp).toFixed(1)}°F`
+    document.getElementById('cabinet-humidity').textContent =
+      humidity == null || Number.isNaN(Number(humidity)) ? '—' : `${Math.round(Number(humidity))}%`
+    const limit = status.cabinet_limit_f
+    document.getElementById('cabinet-limit').textContent =
+      limit == null || Number.isNaN(Number(limit)) ? '—' : `${Math.round(Number(limit))}°F`
+    const banner = document.getElementById('emergency-banner')
+    const codes = status.emergency || []
+    banner.hidden = codes.length === 0
+    banner.textContent = codes.map((item) => `${item.code}: ${item.summary}`).join(' ')
+  }
+
+  function renderActions(mode, ready, emergency) {
     const host = document.getElementById('actions')
+    if (emergency) {
+      host.innerHTML = ''
+      return
+    }
     if (mode === 'running') {
       host.innerHTML = `
         <button class="action-btn pause-btn" type="button" id="pause-btn">Pause</button>
@@ -428,14 +465,16 @@ export function mountDashboard(root) {
     mode.className = `status-badge ${statusClass(status.mode)}`
     renderHeaters(status)
     renderTemps(status)
+    renderCabinet(status)
     const target = document.getElementById('target-input')
     if (document.activeElement !== target) target.value = String(Math.round(Number(status.target_temp_f)))
     syncTargetWarning()
     calibrated = status.learned_coast_f != null
-    const actionKey = `${status.mode}:${calibrated ? 'ready' : 'raw'}`
+    const emergency = (status.emergency || []).map((item) => item.code).join(',')
+    const actionKey = `${status.mode}:${calibrated ? 'ready' : 'raw'}:${emergency}`
     if (renderedMode !== actionKey) {
       renderedMode = actionKey
-      renderActions(status.mode, calibrated)
+      renderActions(status.mode, calibrated, Boolean(emergency))
     }
     const charge = document.getElementById('charge-gallons')
     if (!charge.dataset.ready && status.charge_gallons != null && document.activeElement !== charge) {

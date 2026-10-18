@@ -45,6 +45,13 @@ class DummySource:
         # clear this; the stored heat drains into the boiler on later steps.
         self.residual = [0.0, 0.0]
         self._initial_temps = (float(initial_temps[0]), float(initial_temps[1]))
+        # A steady room reading so `brewski dev` stays under the cabinet limit.
+        # Tests raise the temperature or set a fault to trip an emergency.
+        self.cabinet_temp_f = 70.0
+        self.cabinet_humidity_pct = 40.0
+        self.probe_faults = [False, False]
+        self.spi_fault = False
+        self.climate_fault = False
 
     def reset(self) -> None:
         """Return the simulated pot to the temperature it had at startup."""
@@ -53,12 +60,22 @@ class DummySource:
         self.heaters = [False, False]
         self.residual = [0.0, 0.0]
 
-    def read_temperatures(self, count: int) -> list[float]:
+    def read_temperatures(self, count: int) -> list[float | None]:
         count = max(1, min(2, int(count)))
-        temps = [float(temp) for temp in self.temps[:count]]
-        if not self.noise:
-            return temps
-        return [_clamp(temp + random.uniform(-NOISE_F, NOISE_F)) for temp in temps]
+        if self.spi_fault:
+            return [None] * count
+        temps: list[float | None] = [float(temp) for temp in self.temps[:count]]
+        if self.noise:
+            temps = [_clamp(float(temp) + random.uniform(-NOISE_F, NOISE_F)) for temp in temps]
+        for index, fault in enumerate(self.probe_faults):
+            if fault and index < len(temps):
+                temps[index] = None
+        return temps
+
+    def read_climate(self) -> tuple[float | None, float | None]:
+        if self.climate_fault:
+            return None, None
+        return float(self.cabinet_temp_f), float(self.cabinet_humidity_pct)
 
     def set_heaters(self, states: list[bool]) -> None:
         self.heaters = [False, False]

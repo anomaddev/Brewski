@@ -43,7 +43,7 @@ function openSetup(host, settings) {
             <div class="setup-devices">${deviceFields('heater', 'Heater', settings.heaters)}</div>
           </section>
           <section class="setup-panel" data-step="probes">
-            <p class="setup-lead">One probe has to stay enabled. The first enabled probe controls the heaters. Each probe is a MAX31865 with its own chip select. Probe 2 starts disabled until that board is wired. Defaults are chip selects 17 and 8.</p>
+            <p class="setup-lead">One probe has to stay enabled. The first enabled probe controls the heaters. A probe name is 1 to 11 characters. Each probe is a MAX31865 with its own chip select. Probe 2 starts disabled until that board is wired. Defaults are chip selects 17 and 8.</p>
             <div class="setup-devices">${deviceFields('sensor', 'Probe', settings.sensors)}</div>
           </section>
           <section class="setup-panel" data-step="panel">
@@ -57,7 +57,7 @@ function openSetup(host, settings) {
           <section class="setup-panel" data-step="target">
             <p class="setup-lead">Calibration heats water to this temperature and measures how far it keeps climbing after the element turns off. That climb becomes the early cutoff.</p>
             <label class="field">Temperature (°F)
-              <input name="target_temp_f" id="setup-target" type="number" min="40" max="250" step="1" inputmode="numeric" required value="${Math.round(Number(settings.target_temp_f))}" />
+              <input name="target_temp_f" id="setup-target" type="number" min="90" max="240" step="1" inputmode="numeric" required value="${Math.round(Number(settings.target_temp_f))}" />
             </label>
             <p class="boil-warning" id="setup-boil" hidden>Above water's boiling point (212°F).</p>
             <label class="field">Still size (gal)
@@ -316,7 +316,7 @@ function deviceFields(kind, label, channels) {
           </div>
           <div class="device-fields">
             <label class="field">Name
-              <input name="${kind}_name_${index}" maxlength="40" required value="${escapeHtml(channel.name)}" />
+              <input name="${kind}_name_${index}" maxlength="${kind === 'sensor' ? 11 : 40}" required value="${escapeHtml(channel.name)}" />
             </label>
             <label class="field gpio-field">${kind === 'sensor' ? 'Chip select' : 'BCM GPIO'}
               <input name="${kind}_gpio_${index}" type="number" min="2" max="27" step="1" inputmode="numeric" required value="${channel.gpio ?? ''}" />
@@ -386,7 +386,10 @@ function validateStep(form, step) {
     if (enabledCount(form, kind) === 0) return `One ${label} must stay enabled.`
     const devices = readDevices(form, kind)
     for (const device of devices) {
-      if (!device.name || device.name.length > 40) return 'Each name needs 1 to 40 characters.'
+      const nameLimit = kind === 'sensor' ? 11 : 40
+      if (!device.name || device.name.length > nameLimit) {
+        return `Each name needs 1 to ${nameLimit} characters.`
+      }
       if (!Number.isInteger(device.gpio) || device.gpio < 2 || device.gpio > 27) {
         const pin = kind === 'sensor' ? 'chip select' : 'BCM pin'
         return `Each ${pin} must be a whole number from 2 to 27.`
@@ -408,8 +411,8 @@ function validateStep(form, step) {
   }
   if (step === 'target') {
     const target = Number(form.elements.target_temp_f.value)
-    if (!Number.isInteger(target) || target < 40 || target > 250) {
-      return 'Target must be a whole number from 40 to 250.'
+    if (!Number.isInteger(target) || target < 90 || target > 240) {
+      return 'Target must be a whole number from 90 to 240.'
     }
     const raw = form.elements.charge_gallons.value.trim()
     const gallons = Number(raw)

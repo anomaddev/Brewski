@@ -8,9 +8,15 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-TARGET_MIN_F = 40.0
-TARGET_MAX_F = 250.0
+TARGET_MIN_F = 90.0
+TARGET_MAX_F = 240.0
 MAX_NAME_LENGTH = 40
+# A probe name, a colon, a space, and a 7-character reading ("168.5 F") fill
+# the 20-column LCD. 11 is the longest name that still leaves that room.
+PROBE_NAME_MAX = 11
+CABINET_LIMIT_DEFAULT_F = 170
+CABINET_LIMIT_MIN_F = 100
+CABINET_LIMIT_MAX_F = 200
 SLOT_COUNT = 2
 # BCM numbers on the 40-pin header. GPIO 0 and 1 are the board ID EEPROM.
 GPIO_MIN = 2
@@ -58,6 +64,7 @@ CREATE TABLE IF NOT EXISTS settings (
     heater_min_on_seconds REAL NOT NULL DEFAULT 1,
     heater_min_off_seconds REAL NOT NULL DEFAULT 1,
     early_cutoff_f REAL NOT NULL DEFAULT 3,
+    cabinet_limit_f REAL NOT NULL DEFAULT 170,
     learned_coast_f REAL,
     learned_coast_seconds REAL,
     charge_gallons REAL,
@@ -239,6 +246,7 @@ class Settings:
     heater_min_on_seconds: float = HEATER_MIN_ON_DEFAULT_SECONDS
     heater_min_off_seconds: float = HEATER_MIN_OFF_DEFAULT_SECONDS
     early_cutoff_f: float = EARLY_CUTOFF_DEFAULT_F
+    cabinet_limit_f: int = CABINET_LIMIT_DEFAULT_F
     learned_coast_f: float | None = None
     learned_coast_seconds: float | None = None
     charge_gallons: float | None = None
@@ -275,6 +283,7 @@ class Settings:
             "heater_min_on_seconds": self.heater_min_on_seconds,
             "heater_min_off_seconds": self.heater_min_off_seconds,
             "early_cutoff_f": self.early_cutoff_f,
+            "cabinet_limit_f": self.cabinet_limit_f,
             "learned_coast_f": self.learned_coast_f,
             "learned_coast_seconds": self.learned_coast_seconds,
             "charge_gallons": self.charge_gallons,
@@ -321,6 +330,7 @@ def merge_settings(current: Settings, patch: dict) -> Settings:
         "heater_min_on_seconds",
         "heater_min_off_seconds",
         "early_cutoff_f",
+        "cabinet_limit_f",
         "learned_coast_f",
         "learned_coast_seconds",
         "charge_gallons",
@@ -355,6 +365,7 @@ def parse_settings(data: dict) -> Settings:
             HEATER_MIN_OFF_DEFAULT_SECONDS,
         ),
         early_cutoff_f=_early_cutoff(data.get("early_cutoff_f")),
+        cabinet_limit_f=_cabinet_limit(data.get("cabinet_limit_f")),
         learned_coast_f=_optional_setting(
             data.get("learned_coast_f"), "learned_coast_f", EARLY_CUTOFF_MIN_F, EARLY_CUTOFF_MAX_F
         ),
@@ -467,7 +478,7 @@ class Store:
                 UPDATE settings
                 SET heater_count = ?, sensor_count = ?, heater_names = ?,
                     sensor_names = ?, target_temp_f = ?, heater_min_on_seconds = ?,
-                    heater_min_off_seconds = ?, early_cutoff_f = ?,
+                    heater_min_off_seconds = ?, early_cutoff_f = ?, cabinet_limit_f = ?,
                     learned_coast_f = ?, learned_coast_seconds = ?, charge_gallons = ?,
                     heaters = ?, sensors = ?, setup_complete = ?, gpio = ?
                 WHERE id = 1
@@ -687,9 +698,9 @@ class Store:
             INSERT INTO settings (
                 id, heater_count, sensor_count, heater_names, sensor_names,
                 target_temp_f, heater_min_on_seconds, heater_min_off_seconds,
-                early_cutoff_f, learned_coast_f, learned_coast_seconds,
+                early_cutoff_f, cabinet_limit_f, learned_coast_f, learned_coast_seconds,
                 charge_gallons, heaters, sensors, setup_complete, gpio
-            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             _settings_values(settings),
         )
@@ -776,6 +787,7 @@ def _migrate(connection: sqlite3.Connection) -> None:
     _add_column(connection, "settings", "heater_min_on_seconds", "REAL")
     _add_column(connection, "settings", "heater_min_off_seconds", "REAL")
     _add_column(connection, "settings", "early_cutoff_f", "REAL")
+    _add_column(connection, "settings", "cabinet_limit_f", "REAL")
     _add_column(connection, "settings", "learned_coast_f", "REAL")
     _add_column(connection, "settings", "learned_coast_seconds", "REAL")
     _add_column(connection, "settings", "charge_gallons", "REAL")
@@ -876,6 +888,7 @@ def _settings_values(settings: Settings) -> tuple:
         settings.heater_min_on_seconds,
         settings.heater_min_off_seconds,
         settings.early_cutoff_f,
+        settings.cabinet_limit_f,
         settings.learned_coast_f,
         settings.learned_coast_seconds,
         settings.charge_gallons,
@@ -897,7 +910,7 @@ def _settings_from_row(row: sqlite3.Row) -> Settings:
     return Settings(
         heaters=heaters,
         sensors=sensors,
-        target_temp_f=_stored_target(row["target_temp_f"]),
+        target_temp_f=_clamped_target(row["target_temp_f"]),
         heater_min_on_seconds=_stored_float(
             row, "heater_min_on_seconds", HEATER_MIN_ON_DEFAULT_SECONDS
         ),
@@ -905,6 +918,7 @@ def _settings_from_row(row: sqlite3.Row) -> Settings:
             row, "heater_min_off_seconds", HEATER_MIN_OFF_DEFAULT_SECONDS
         ),
         early_cutoff_f=_stored_float(row, "early_cutoff_f", EARLY_CUTOFF_DEFAULT_F),
+        cabinet_limit_f=_stored_cabinet_limit(row),
         learned_coast_f=_optional_float(row, "learned_coast_f"),
         learned_coast_seconds=_optional_float(row, "learned_coast_seconds"),
         charge_gallons=_optional_float(row, "charge_gallons"),
@@ -985,7 +999,7 @@ def _channels_from_row(
     for index in range(SLOT_COUNT):
         gpio = None if default_gpios is None else default_gpios[index]
         if probe:
-            channels.append(_probe(names[index], index < count, gpio))
+            channels.append(_probe(_fit_probe_name(names[index]), index < count, gpio))
         else:
             channels.append(Channel(names[index], index < count, gpio))
     return channels
@@ -996,6 +1010,7 @@ def _channel_from_stored(item: dict, *, probe: bool = False) -> Channel:
     pin = None if gpio is None else int(gpio)
     if not probe:
         return Channel(name=item["name"], enabled=bool(item["enabled"]), gpio=pin)
+    item = {**item, "name": _fit_probe_name(item["name"])}
     if any(key in item for key in ("wires", "rtd", "ref_ohms")):
         wires, rtd, ref_ohms = _probe_config(item, "sensors")
     else:
@@ -1030,7 +1045,11 @@ def _channels(value: object, field: str) -> list[Channel]:
             wires, rtd, ref_ohms = _probe_config(item, f"{field}[{index}]")
         channels.append(
             Channel(
-                name=_name(item.get("name"), f"{field}[{index}].name"),
+                name=_name(
+                    item.get("name"),
+                    f"{field}[{index}].name",
+                    PROBE_NAME_MAX if probe else MAX_NAME_LENGTH,
+                ),
                 enabled=_enabled(item.get("enabled"), f"{field}[{index}].enabled"),
                 gpio=_gpio(item.get("gpio"), f"{field}[{index}].gpio"),
                 wires=wires,
@@ -1233,13 +1252,20 @@ def _stored_flag(row: sqlite3.Row, column: str) -> bool:
     return bool(row[column])
 
 
-def _name(value: object, field: str) -> str:
+def _name(value: object, field: str, limit: int = MAX_NAME_LENGTH) -> str:
     if not isinstance(value, str):
         raise SettingsError(f"{field} must be text")
     cleaned = value.strip()
-    if not cleaned or len(cleaned) > MAX_NAME_LENGTH:
-        raise SettingsError(f"{field} must be 1 to {MAX_NAME_LENGTH} characters")
+    if not cleaned or len(cleaned) > limit:
+        raise SettingsError(f"{field} must be 1 to {limit} characters")
     return cleaned
+
+
+def _fit_probe_name(name: str) -> str:
+    """Cut a stored probe name so the LCD can still show ``: `` and the reading."""
+
+    cleaned = str(name).strip()[:PROBE_NAME_MAX]
+    return cleaned or "Probe"
 
 
 def _enabled(value: object, field: str) -> bool:
@@ -1325,6 +1351,36 @@ def _stored_target(value: object) -> int:
     """Whole degrees already saved. Older rows may be fractional."""
 
     return int(round(float(value)))
+
+
+def _clamped_target(value: object) -> int:
+    """A saved target brought inside the current dial range."""
+
+    target = _stored_target(value)
+    return min(int(TARGET_MAX_F), max(int(TARGET_MIN_F), target))
+
+
+def _cabinet_limit(value: object) -> int:
+    if value is None:
+        return CABINET_LIMIT_DEFAULT_F
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SettingsError("cabinet_limit_f must be a whole number")
+    if isinstance(value, float) and not value.is_integer():
+        raise SettingsError("cabinet_limit_f must be a whole number")
+    limit = int(value)
+    if limit < CABINET_LIMIT_MIN_F or limit > CABINET_LIMIT_MAX_F:
+        raise SettingsError(
+            "cabinet_limit_f must be a whole number between "
+            f"{CABINET_LIMIT_MIN_F} and {CABINET_LIMIT_MAX_F}"
+        )
+    return limit
+
+
+def _stored_cabinet_limit(row: sqlite3.Row) -> int:
+    if "cabinet_limit_f" not in row.keys() or row["cabinet_limit_f"] is None:
+        return CABINET_LIMIT_DEFAULT_F
+    limit = int(round(float(row["cabinet_limit_f"])))
+    return min(CABINET_LIMIT_MAX_F, max(CABINET_LIMIT_MIN_F, limit))
 
 
 def _target(value: object) -> int:

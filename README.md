@@ -2,7 +2,7 @@
 
 Brewski is a local web controller for a small still. A Python program runs the heater logic and stores every run. A plain JavaScript dashboard, in a dark layout, shows live temperatures, heater state, and the history of those runs.
 
-There is no Raspberry Pi wiring in this version. Sensors and heaters come from a **dummy source** that simulates a still, so the dashboard can be built before the hardware exists. A later hardware source can replace that dummy without changing the UI.
+The installed controller drives the live Pi wiring: the heater SSRs, the MAX31865 still probes, and the HTS221 cabinet sensor. `brewski dev` on a Mac uses a **dummy source** that simulates a still, so the dashboard can be built without that hardware. The installed service never falls back to the dummy source.
 
 ## What a run does
 
@@ -17,20 +17,43 @@ A run is one session of the still.
 - **Calibrate.** From the dashboard, with the pot filled with water, Calibrate heats until the control probe is a little above the target. The early cutoff is not used, so the still can actually reach the setpoint and coast past it. Once the element has been hot for 30 seconds and turns off, Brewski watches a rolling average of that probe. The run ends on its own when the average stops changing. The degrees it climbed after the heaters turned off, and how long that took, become the early cutoff. The calibration uses the still size from setup. A different size on a later calibration scales the remembered coast, then the measurement replaces it. Calibration runs stay in the log with their own badge and are left out of the run count, average duration, average cooldown, and the per-run heater-on totals. They still add to each element's hour meter, because the element was powered.
 - **Cooldown.** A cooldown is the stretch from the target temperature to the lower stop. Timing starts the first time the control probe reaches the target, including the rest of the run. After Stop, heaters stay off, and the lower stop is when that probe stays inside a 2°F band for 5 minutes. Those readings stay on the dashboard chart, and the time is saved. The dashboard and the history page show the average of every finished cooldown. A run that never reaches its target has no cooldown.
 
-Each heater and each probe can be enabled or disabled on its own. Changing names, which devices are enabled, a heater's GPIO pin, a probe's MAX31865 chip select, RTD, wire count, or reference resistor, or any other GPIO pin, is locked while a run is open. The target temperature, the early cutoff, and the minimum on and off times can still be changed; later samples record the new target, and the run keeps the target it started with.
+Each heater and each probe can be enabled or disabled on its own. Changing names, which devices are enabled, a heater's GPIO pin, a probe's MAX31865 chip select, RTD, wire count, or reference resistor, or any other GPIO pin, is locked while a run is open. The target temperature, the cabinet limit, the early cutoff, and the minimum on and off times can still be changed; later samples record the new target, and the run keeps the target it started with. The target dial on the panel changes that same target by 1°F, from 90 to 240.
+
+The HTS221 is not a process temperature. It watches the cabinet. If it is enabled and the cabinet rises above the cabinet limit (170°F unless changed, allowed from 100 to 200), Brewski opens every SSR immediately, stops and saves an open run, and refuses Start until the cabinet is back at the limit. The controller process keeps running so the SSR pins stay driven off. Humidity is shown and does not trip the stop. Disabling the HTS221 turns the interlock off.
+
+## Emergency codes
+
+`src/brewski/emergency.py` is the only list. A new fault takes the next number there and a line here. Numbers are not reused. The LCD shows the lowest active code. The dashboard and the status strip show every active code and its sentence. Heaters stay off and Start stays refused while any code is active.
+
+- `E01` — cabinet temperature is above the cabinet limit.
+- `E02` — the HTS221 is enabled and does not answer.
+- `E03` — the control probe faulted or did not answer.
+- `E04` — the SPI bus did not open, or the saved SPI pins are not the hardware bus.
 
 Any enabled probe after the control probe is logged and charted only. It does not decide when the heaters fire.
 
+## Pi source
+
+`brewski` with no command, including the systemd service, uses `src/brewski/sources/pi.py`. There is no switch back to the dummy source. A missing still probe or a failed SPI open leaves that reading empty and keeps every SSR off. A missing HTS221 trips the cabinet emergency only when that sensor is enabled.
+
+- **SSRs.** gpiozero outputs on each heater's BCM pin, active high. Forced off on startup, shutdown, pause, stop, a control-probe fault, and any emergency code. Defaults are BCM 12 and 16.
+- **MAX31865.** Hardware SPI0 only when the saved pins are CLK 11, MOSI 10, and MISO 9. Chip select is a separate GPIO, so probe 1 can use BCM 17. The driver uses the saved wire count, PT100 or PT1000 type, and reference resistor. Any other SPI pin set is left unread.
+- **HTS221.** smbus2 on I2C bus 1 at `0x5F`, only when the sensor is enabled and SDA/SCL are BCM 2 and 3.
+
+The LCD is a 20×4 I2C display on the saved SDA and SCL pins, after setup. Saved BCM 2 and 3 use the Pi's hardware bus. The running controller keeps the start and stop buttons, their LED relays, and the target encoder open. An LED is solid on only while that button will do something. The boot update prompt turns both LEDs on and does not blink them.
+
+The installer enables SPI and I2C and adds the service user to the `spi`, `i2c`, and `gpio` groups. The Pi may need one reboot before `/dev/spidev0.0` appears.
+
 ## Dummy source
 
-`DummySource` stands in for the pot and the heaters. Two heaters together lift the boiler from about 70°F toward a 165°F target in a few minutes. That is faster than a real still, on purpose, so the chart moves while the UI is being designed. After the heaters turn off, stored element heat keeps raising the boiler for a few seconds, then it cools back toward room temperature. Sensor 2 lags sensor 1 and sits about 8°F cooler.
+`DummySource` is only for `brewski dev` on a Mac, and for tests. Two heaters together lift the boiler from about 70°F toward a 165°F target in a few minutes. That is faster than a real still, on purpose, so the chart moves while the UI is being designed. After the heaters turn off, stored element heat keeps raising the boiler for a few seconds, then it cools back toward room temperature. Sensor 2 lags sensor 1 and sits about 8°F cooler. The cabinet reading stays at room temperature, under the limit.
 
-The status payload includes `"source": "dummy"`. The dashboard shows that as a badge. Each heater stores a BCM GPIO pin, and each probe stores the chip select of its MAX31865, so a later Raspberry Pi source can be wired differently on each still. Defaults are BCM 12 and 16 for the heaters, and chip selects BCM 17 and 8 for the probes. Probe 2 starts disabled. Both converters share SPI (defaults BCM 11 CLK, 9 SDO, and 10 SDI). Settings also store the I2C bus (BCM 2 SDA and 3 SCL), enable switches for the HTS221 and the LCD, the encoder (BCM 27 and 22), the start and stop LED relays (BCM 23 and 24), and the start and stop buttons (BCM 5 and 6). Every one of those pins must be unique. The dummy source ignores heater, probe, and SPI pin numbers. The LCD is the first real device: after setup it is a 20×4 I2C display on the saved SDA and SCL pins. Saved BCM 2 and 3 use the Pi's hardware bus. The start and stop buttons are read only while a boot update is waiting for an answer. A future Raspberry Pi source should use the same two methods for the still itself:
+The status payload includes `"source": "dummy"` for dev and `"source": "pi"` on the installed controller. The dashboard badge reads **Dummy source** or **Pi**. The dummy source ignores heater, probe, and SPI pin numbers.
 
 - `read_temperatures(count)` returns `count` temperatures in °F, sensor 1 first.
 - `set_heaters(states)` turns each heater on or off, heater 1 first.
 
-Those methods live in `src/brewski/sources/base.py`. The dummy implementation is `src/brewski/sources/dummy.py`. The LCD and the update buttons are the only GPIO this version opens, and only after setup.
+Those methods live in `src/brewski/sources/base.py`. The dummy implementation is `src/brewski/sources/dummy.py`.
 
 ## Develop on a Mac
 
@@ -65,7 +88,7 @@ That installs the latest GitHub release, then enables a systemd service so the c
 
 A fresh boot does not look for an update. The I2C pins are not known until setup saves them, and the LCD stays closed. Finish setup in the dashboard first. That write is stored before any update check. If a newer release exists, the same screen offers it. Update installs that release and keeps the setup that was just saved. Not now leaves the current version running.
 
-The next boot, once setup is saved, asks on the LCD when a newer release exists. Start downloads and installs it, with each stage on the display. Stop, or a minute with no press, starts the version already on the Pi. If GitHub cannot be reached, the LCD cannot be opened, or the saved pins are not BCM 2 and 3, Brewski starts the installed version and does not update on its own. Commits on `main` stay off the Pi until they are published as a release. After the controller is up, the LCD shows the mode, the control temperature, the target, and the heaters.
+The next boot, once setup is saved, asks on the LCD when a newer release exists. Start and Stop are both lit, solid. Start downloads and installs it, with each stage on the display. Stop, or a minute with no press, starts the version already on the Pi. If GitHub cannot be reached, the LCD cannot be opened, or the saved pins are not BCM 2 and 3, Brewski starts the installed version and does not update on its own. Commits on `main` stay off the Pi until they are published as a release. After the controller is up, the LCD shows the mode and clock, the target, the probe or probes, and both heaters. A still that has never been calibrated asks for Start. An emergency code replaces that screen until it clears.
 
 The service runs as the account that invoked `sudo`, or as `pi` when that account exists and sudo did not record a user. Set `BREWSKI_USER` to choose a different account:
 
@@ -82,7 +105,7 @@ Running the script again upgrades Brewski and restarts the service. It does not 
 
 SQLite, one file. There is no separate database server.
 
-**Settings** (one row): the target in °F, and for each of the two heaters and two probes a name, an enabled switch, and a BCM pin. A heater pin drives its SSR. A probe pin is the chip select of that probe's MAX31865. The same row stores the rest of the BCM map: SPI CLK, SDO, and SDI; I2C SDA and SCL; enable switches for the HTS221 and the LCD on that bus; encoder A and B; the start and stop LED relays; and the start and stop buttons. Every pin in that map, including both heaters and both chip selects, must be unique and from BCM 2 to 27. Each probe also stores its RTD (`pt100` or `pt1000`), wire count (2, 3, or 4), and reference resistor in ohms. Disabling a device keeps its name and wiring. Defaults are BCM 12 and 16 for the heaters and chip selects BCM 17 and 8 for the probes. Probe 2 starts disabled. SPI defaults are BCM 11, 9, and 10. I2C defaults are BCM 2 and 3, with the HTS221 and the LCD enabled. The encoder defaults are BCM 27 and 22, the LED relays BCM 23 and 24, and the buttons BCM 5 and 6. Each probe starts as a 3-wire PT100 with a 430 Ω reference. The allowed target range is 40–250°F. I2C addresses are not stored. The LCD probes `0x27`, then `0x3F`.
+**Settings** (one row): the target in °F, the cabinet limit, and for each of the two heaters and two probes a name, an enabled switch, and a BCM pin. A heater pin drives its SSR. A probe pin is the chip select of that probe's MAX31865. A probe name is 1 to 11 characters. A heater name can be 40. The same row stores the rest of the BCM map: SPI CLK, SDO, and SDI; I2C SDA and SCL; enable switches for the HTS221 and the LCD on that bus; encoder A and B; the start and stop LED relays; and the start and stop buttons. Every pin in that map, including both heaters and both chip selects, must be unique and from BCM 2 to 27. Each probe also stores its RTD (`pt100` or `pt1000`), wire count (2, 3, or 4), and reference resistor in ohms. Disabling a device keeps its name and wiring. Defaults are BCM 12 and 16 for the heaters and chip selects BCM 17 and 8 for the probes. Probe 2 starts disabled. SPI defaults are BCM 11, 9, and 10. I2C defaults are BCM 2 and 3, with the HTS221 and the LCD enabled. The encoder defaults are BCM 27 and 22, the LED relays BCM 23 and 24, and the buttons BCM 5 and 6. Each probe starts as a 3-wire PT100 with a 430 Ω reference. The allowed target range is 90–240°F. The cabinet limit defaults to 170°F and accepts 100–200. I2C addresses are not stored. The LCD probes `0x27`, then `0x3F`.
 
 **Runs:** start time, end time, status (`running`, `paused`, or `stopped`), elapsed seconds (the pause does not add time), and a snapshot of the settings from the moment Start was pressed.
 
@@ -96,7 +119,7 @@ Time each heater spent on during a run is estimated from that log and shown on t
 
 ```
 src/brewski/          Python controller, API, and CLI
-src/brewski/sources/  Hardware contract and the dummy still
+src/brewski/sources/  Hardware contract, the Pi source, and the Mac dummy still
 web/                  Vite dashboard (plain JavaScript, no TypeScript)
 deploy/               Pi install script and systemd unit
 tests/

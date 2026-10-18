@@ -225,7 +225,7 @@ install_packages() {
   command -v apt-get >/dev/null 2>&1 || die "apt-get was not found. This script installs Brewski on Raspberry Pi OS."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update < /dev/null
-  apt-get install -y python3 python3-venv python3-pip nodejs npm ca-certificates i2c-tools < /dev/null
+  apt-get install -y python3 python3-venv python3-pip nodejs npm ca-certificates i2c-tools python3-lgpio < /dev/null
 }
 
 enable_i2c() {
@@ -234,10 +234,16 @@ enable_i2c() {
   fi
 }
 
+enable_spi() {
+  if command -v raspi-config >/dev/null 2>&1; then
+    raspi-config nonint do_spi 0 || true
+  fi
+}
+
 add_device_groups() {
   local user=$1
   local group
-  for group in i2c gpio; do
+  for group in i2c spi gpio; do
     if getent group "$group" >/dev/null 2>&1; then
       usermod -aG "$group" "$user" || true
     fi
@@ -410,6 +416,7 @@ main() {
     install_packages
   fi
   enable_i2c
+  enable_spi
   add_device_groups "$user"
   build_dashboard "$repo_root"
   install_python "$repo_root" "$user" "$group"

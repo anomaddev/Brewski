@@ -4,8 +4,9 @@ The loop is hardware-agnostic. It reads a :class:`HardwareSource`, decides
 whether the heaters should be on, and appends samples while a run is going.
 The first enabled probe is the one compared with the target. Heaters turn
 off before that target so heat still stored in the element can finish the
-rise. Disabled heaters stay off. Heater and probe pins are stored for a
-later Raspberry Pi source. After setup, this loop does drive the I2C LCD.
+rise. Disabled heaters stay off. The installed service drives the SSRs,
+the MAX31865 probes, and the HTS221. After setup, this loop also drives
+the I2C LCD, the panel buttons, the LED relays, and the target encoder.
 """
 
 from __future__ import annotations
@@ -17,7 +18,9 @@ import threading
 import time
 from dataclasses import replace
 
+from brewski.emergency import summary
 from brewski.lcd import NullDisplay, display_key, open_display, status_lines
+from brewski.panel import indicator_leds, open_panel, panel_key
 from brewski.sources.base import HardwareSource
 from brewski.updates import read_status
 from brewski.updates import report as update_report
@@ -25,10 +28,13 @@ from brewski.updates import start_apply_service, write_status
 from brewski.store import (
     EARLY_CUTOFF_MAX_F,
     SLOT_COUNT,
+    TARGET_MAX_F,
+    TARGET_MIN_F,
     Settings,
     SettingsError,
     Store,
     charge_gallons,
+    default_gpio,
     heater_on_seconds,
     merge_settings,
     shape_changed,
@@ -136,7 +142,13 @@ class Controller:
         self._shut_down = False
         self._display = NullDisplay()
         self._display_key: tuple[int, int] | None = None
+        self._panel: object | None = None
+        self._panel_key: tuple[int, ...] | None = None
         self._hold_display = False
+        self._emergency: list[str] = []
+        self._cabinet_temp: float | None = None
+        self._cabinet_humidity: float | None = None
+        self._climate_fault = False
         self._mode = "idle"
         self._run_id: int | None = None
         self._elapsed = 0.0
@@ -169,12 +181,15 @@ class Controller:
         if open_cooldown is not None:
             self._adopt_cooldown(open_cooldown)
         self._live_temps = self.source.read_temperatures(SLOT_COUNT)
-        self._set_heaters(self._heaters)
+        self._sample_climate()
+        self._emergency = self._emergency_codes(self.store.get_settings())
+        self._set_heaters([False] * SLOT_COUNT if self._emergency else self._heaters)
 
     def start_loop(self) -> None:
         if self._thread and self._thread.is_alive():
             return
         self._stop_loop.clear()
+        self._sync_panel()
         self._thread = threading.Thread(target=self._loop, name="brewski-controller", daemon=True)
         self._thread.start()
 
@@ -193,10 +208,15 @@ class Controller:
             self._set_heaters([False] * SLOT_COUNT, release_off_dwell=True)
             self._flush_heater_life()
         self._close_display()
+        self._close_panel()
+        closer = getattr(self.source, "close", None)
+        if closer is not None:
+            closer()
 
     def tick(self, dt: float) -> None:
         """Advance the simulation and the run clock by ``dt`` seconds."""
 
+        self._apply_panel()
         remaining = min(max(0.0, float(dt)), MAX_TICK_SECONDS)
         with self._lock:
             while remaining > 0:
@@ -369,6 +389,11 @@ class Controller:
             self._coast_seconds = None
             self._calibration_settled = False
             self._live_temps = self.source.read_temperatures(SLOT_COUNT)
+            self._sample_climate()
+            self._emergency = self._emergency_codes(settings)
+            if self._emergency:
+                self._set_heaters([False] * SLOT_COUNT, release_off_dwell=True)
+                raise ControllerError("Emergency stop is active", 409)
             self._command_heaters(settings)
             run = self.store.create_run(settings, kind=kind, charge_gallons=gallons)
             self._run_id = int(run["id"])
@@ -400,6 +425,11 @@ class Controller:
                 raise ControllerError("There is no paused run to resume", 409)
             settings = self.store.get_settings()
             self._live_temps = self.source.read_temperatures(SLOT_COUNT)
+            self._sample_climate()
+            self._emergency = self._emergency_codes(settings)
+            if self._emergency:
+                self._set_heaters([False] * SLOT_COUNT, release_off_dwell=True)
+                raise ControllerError("Emergency stop is active", 409)
             self._command_heaters(settings)
             self._mode = "running"
             self._record_sample(settings)
@@ -424,6 +454,10 @@ class Controller:
             settings = self.store.get_settings()
             key = display_key(settings)
             lines = self._panel_lines(settings) if key is not None else None
+            led_state = indicator_leds(self._mode, emergency=bool(self._emergency))
+        self._sync_panel()
+        if self._panel is not None:
+            self._panel.set_leds(*led_state)  # type: ignore[attr-defined]
         if key != self._display_key:
             self._display.clear()
             self._display.close()
@@ -444,26 +478,33 @@ class Controller:
         self._display_key = None
 
     def _panel_lines(self, settings: Settings) -> list[str]:
-        control = self._current_control(settings)
-        if control is None:
-            probe_name = ""
-            temp_f = None
-        else:
-            index, temp_f = control
-            probe_name = settings.sensors[index].name
+        probes: list[tuple[str, float | None]] = []
+        for index, channel in enumerate(settings.sensors):
+            if not channel.enabled or index >= len(self._live_temps):
+                continue
+            value = self._live_temps[index]
+            probes.append((channel.name, None if value is None else float(value)))
         heaters = [
-            (index, bool(self._heaters[index]))
+            (
+                channel.enabled,
+                bool(self._heaters[index]) if index < len(self._heaters) else False,
+            )
             for index, channel in enumerate(settings.heaters)
-            if channel.enabled and index < len(self._heaters)
         ]
         elapsed = self._cooldown_elapsed if self._mode == "cooling" else self._elapsed
+        code = self._emergency[0] if self._emergency else None
         return status_lines(
             mode=self._mode,
             elapsed_seconds=elapsed,
-            probe_name=probe_name,
-            temp_f=temp_f,
             target_f=settings.target_temp_f,
+            probes=probes,
             heaters=heaters,
+            calibrating=self._run_kind == "calibration" and self._mode in ("running", "paused"),
+            needs_calibration=settings.learned_coast_f is None and self._mode == "idle",
+            emergency_code=code,
+            cabinet_temp_f=self._cabinet_temp,
+            cabinet_limit_f=settings.cabinet_limit_f,
+            cabinet_fault=code == "E02",
         )
 
     def _loop(self) -> None:
@@ -488,6 +529,13 @@ class Controller:
         if stepper is not None:
             stepper(dt)
         self._live_temps = self.source.read_temperatures(SLOT_COUNT)
+        self._sample_climate()
+        self._emergency = self._emergency_codes(settings)
+        if self._emergency:
+            if self._mode in ("running", "paused"):
+                self._finish_run()
+            self._set_heaters([False] * SLOT_COUNT, release_off_dwell=True)
+            return
         if self._mode != "running":
             self._apply_idle_outputs(settings)
             if self._mode == "cooling":
@@ -667,7 +715,7 @@ class Controller:
     def _record_cooldown_sample(self, settings: Settings) -> None:
         if self._cooldown_run_id is None:
             return
-        temps = [round(float(temp), 2) for temp in self._live_temps[:SLOT_COUNT]]
+        temps = self._sample_temps()
         self.store.add_sample(
             run_id=self._cooldown_run_id,
             elapsed_seconds=round(self._cooldown_elapsed, 2),
@@ -898,7 +946,10 @@ class Controller:
         # average settles so a second heat pulse does not interrupt it.
         if self._run_kind == "calibration" and self._coast_watch is not None:
             return off
-        primary = float(temps[control_indexes[0]])
+        raw = temps[control_indexes[0]]
+        if raw is None:
+            return off
+        primary = float(raw)
         current = list(self._heaters[:SLOT_COUNT])
         while len(current) < SLOT_COUNT:
             current.append(False)
@@ -922,7 +973,7 @@ class Controller:
         if self._run_id is None:
             return
         # Samples stay aligned to the physical slots. A disabled heater is off.
-        temps = [round(float(temp), 2) for temp in self._live_temps[:SLOT_COUNT]]
+        temps = self._sample_temps()
         heaters = [False] * SLOT_COUNT
         for index, on in enumerate(self._heaters[:SLOT_COUNT]):
             heaters[index] = bool(on) and settings.heaters[index].enabled
@@ -947,11 +998,12 @@ class Controller:
         settings = self.store.get_settings()
         sensor_indexes = settings.enabled_sensor_indexes()
         heater_indexes = settings.enabled_heater_indexes()
-        temps = [
-            round(float(self._live_temps[index]), 1)
-            for index in sensor_indexes
-            if index < len(self._live_temps)
-        ]
+        temps = []
+        for index in sensor_indexes:
+            if index >= len(self._live_temps):
+                continue
+            value = self._live_temps[index]
+            temps.append(None if value is None else round(float(value), 1))
         heaters = [
             bool(self._heaters[index])
             for index in heater_indexes
@@ -989,6 +1041,13 @@ class Controller:
             "run_id": self._run_id,
             "cooldown_run_id": self._cooldown_run_id if self._mode == "cooling" else None,
             "settings_locked": self._mode in ("running", "paused"),
+            "cabinet_temp_f": None if self._cabinet_temp is None else round(self._cabinet_temp, 1),
+            "cabinet_humidity_pct": None
+            if self._cabinet_humidity is None
+            else round(self._cabinet_humidity, 1),
+            "cabinet_limit_f": settings.cabinet_limit_f,
+            "emergency_codes": list(self._emergency),
+            "emergency": [{"code": code, "summary": summary(code)} for code in self._emergency],
         }
 
 
@@ -997,4 +1056,117 @@ class Controller:
         if not indexes or indexes[0] >= len(self._live_temps):
             return None
         index = indexes[0]
-        return index, float(self._live_temps[index])
+        value = self._live_temps[index]
+        if value is None:
+            return None
+        return index, float(value)
+
+    def nudge_target(self, steps: int) -> None:
+        """Move the saved target by whole degrees. Steps past the dial ends are ignored."""
+
+        steps = int(steps)
+        if steps == 0:
+            return
+        current = int(self.store.get_settings().target_temp_f)
+        target = min(int(TARGET_MAX_F), max(int(TARGET_MIN_F), current + steps))
+        if target == current:
+            return
+        self.update_settings({"target_temp_f": target})
+
+    def _sample_temps(self) -> list[float | None]:
+        return [
+            None if temp is None else round(float(temp), 2) for temp in self._live_temps[:SLOT_COUNT]
+        ]
+
+    def _sample_climate(self) -> None:
+        reader = getattr(self.source, "read_climate", None)
+        if reader is None:
+            # A test double with no cabinet sensor is not a failed HTS221.
+            self._cabinet_temp = None
+            self._cabinet_humidity = None
+            self._climate_fault = False
+            return
+        try:
+            temp, humidity = reader()
+        except Exception:
+            logger.exception("Cabinet sensor read failed")
+            self._cabinet_temp = None
+            self._cabinet_humidity = None
+            self._climate_fault = True
+            return
+        self._cabinet_temp = None if temp is None else float(temp)
+        self._cabinet_humidity = None if humidity is None else float(humidity)
+        self._climate_fault = bool(getattr(self.source, "climate_fault", False)) or temp is None
+
+    def _hts_enabled(self, settings: Settings) -> bool:
+        gpio = settings.gpio or default_gpio()
+        return any(device.id == "hts221" and device.enabled for device in gpio.i2c_devices)
+
+    def _emergency_codes(self, settings: Settings) -> list[str]:
+        codes: list[str] = []
+        if self._hts_enabled(settings) and hasattr(self.source, "read_climate"):
+            if self._climate_fault or self._cabinet_temp is None:
+                codes.append("E02")
+            elif self._cabinet_temp > settings.cabinet_limit_f:
+                codes.append("E01")
+        spi_fault = bool(getattr(self.source, "spi_fault", False))
+        faults = list(getattr(self.source, "probe_faults", []) or [])
+        if spi_fault:
+            codes.append("E04")
+        indexes = settings.enabled_sensor_indexes()
+        control = indexes[0] if indexes else 0
+        temp = self._live_temps[control] if control < len(self._live_temps) else None
+        probe_fault = bool(faults[control]) if control < len(faults) else False
+        if spi_fault or probe_fault or temp is None:
+            codes.append("E03")
+        return codes
+
+    def _apply_panel(self) -> None:
+        panel = self._panel
+        if panel is None:
+            return
+        starts, stops, steps = panel.take()  # type: ignore[attr-defined]
+        if steps:
+            try:
+                self.nudge_target(steps)
+            except ControllerError:
+                logger.debug("Target dial ignored", exc_info=True)
+        if stops:
+            try:
+                self.stop()
+            except ControllerError:
+                return
+            return
+        if not starts:
+            return
+        try:
+            snapshot = self.status()
+            if snapshot["emergency_codes"]:
+                return
+            if snapshot["mode"] == "paused":
+                self.resume()
+            elif snapshot["mode"] in ("idle", "cooling"):
+                if snapshot["learned_coast_f"] is None:
+                    self.start({"kind": "calibration"})
+                else:
+                    self.start()
+        except ControllerError:
+            return
+
+    def _sync_panel(self) -> None:
+        settings = self.store.get_settings()
+        key = panel_key(settings)
+        if key == self._panel_key:
+            return
+        self._close_panel()
+        self._panel_key = key
+        if key is None:
+            return
+        self._panel = open_panel(settings)
+
+    def _close_panel(self) -> None:
+        panel = self._panel
+        self._panel = None
+        self._panel_key = None
+        if panel is not None:
+            panel.close()  # type: ignore[attr-defined]

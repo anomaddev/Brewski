@@ -146,8 +146,18 @@ def test_boot_installs_when_start_is_pressed(tmp_path, monkeypatch):
         def close(self):
             pass
 
+    flashes = []
+
+    class Leds:
+        def close(self):
+            flashes.append("closed")
+
     monkeypatch.setattr("brewski.updates.open_display", lambda _settings: Panel())
     monkeypatch.setattr("brewski.updates.open_buttons", lambda _settings: Buttons())
+    monkeypatch.setattr(
+        "brewski.updates.open_prompt_leds",
+        lambda _settings: flashes.append("opened") or Leds(),
+    )
     installed = []
     monkeypatch.setattr(
         "brewski.updates.run_installer",
@@ -155,6 +165,65 @@ def test_boot_installs_when_start_is_pressed(tmp_path, monkeypatch):
     )
     assert run_boot_update() == 0
     assert installed == [True]
+    assert flashes == ["opened", "closed"]
+
+
+def test_boot_waits_on_the_prompt_when_buttons_cannot_open(tmp_path, monkeypatch):
+    store = Store(tmp_path)
+    store.save_settings(merge_settings(store.get_settings(), {"setup_complete": True}))
+    monkeypatch.setenv("BREWSKI_DATA_DIR", str(tmp_path))
+    clock = {"now": 0.0}
+
+    def sleep(seconds):
+        clock["now"] += seconds
+
+    monkeypatch.setattr("brewski.updates.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr("brewski.updates.time.sleep", sleep)
+    monkeypatch.setattr(
+        "brewski.updates.check_release",
+        lambda **_kwargs: ReleaseInfo(
+            current="0.2.0",
+            latest="v0.3.0",
+            available=True,
+            reachable=True,
+        ),
+    )
+
+    class Panel(NullDisplay):
+        def __init__(self):
+            super().__init__()
+            self.history: list[list[str]] = []
+
+        @property
+        def hardware(self):
+            return True
+
+        def write(self, lines):
+            super().write(lines)
+            self.history.append(list(self.lines))
+
+    class Leds:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    panel = Panel()
+    leds = Leds()
+    monkeypatch.setattr("brewski.updates.open_display", lambda _settings: panel)
+    monkeypatch.setattr("brewski.updates.open_buttons", lambda _settings: None)
+    monkeypatch.setattr("brewski.updates.open_prompt_leds", lambda _settings: leds)
+    installed = []
+    monkeypatch.setattr("brewski.updates.run_installer", lambda *_args: installed.append(True))
+    assert run_boot_update() == 0
+    assert installed == []
+    assert panel.history[0][0] == "Update available"
+    assert panel.history[0][2] == "START update"
+    assert panel.history[0][3] == "STOP keep 60s"
+    assert panel.lines[0] == "Keeping this copy"
+    assert clock["now"] >= 60
+    assert leds.closed
 
 
 def test_prompt_times_out_as_a_decline():

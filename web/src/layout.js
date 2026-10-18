@@ -64,7 +64,7 @@ export function mountShell(active) {
 }
 
 export function setSourceBadge(source) {
-  const label = source === 'dummy' ? 'Dummy source' : source || 'Controller'
+  const label = source === 'dummy' ? 'Dummy source' : source === 'pi' ? 'Pi' : source || 'Controller'
   document.querySelectorAll('.source-badge').forEach((badge) => {
     badge.textContent = label
   })

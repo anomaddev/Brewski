@@ -21,69 +21,115 @@ def _lines_fit(lines):
     assert all(len(line) <= COLUMNS for line in framed)
 
 
-def test_status_screen_for_each_mode():
-    idle = status_lines(
-        mode="idle",
-        elapsed_seconds=0,
-        probe_name="Boiler",
-        temp_f=70,
-        target_f=165,
-        heaters=[(0, False), (1, False)],
-    )
-    assert idle[0] == "Idle"
-    assert idle[1] == "Boiler 70 F"
-    assert idle[2] == "Target 165 F"
-    assert idle[3] == "Heaters off"
-    _lines_fit(idle)
-
-    running = status_lines(
-        mode="running",
-        elapsed_seconds=754,
-        probe_name="Boiler",
-        temp_f=168.4,
-        target_f=172,
-        heaters=[(0, True), (1, False)],
-    )
-    assert running[0] == "Running 12:34"
-    assert running[1] == "Boiler 168.4 F"
-    assert running[3] == "H1 on  H2 off"
-    _lines_fit(running)
-
-    paused = status_lines(
-        mode="paused",
-        elapsed_seconds=3661,
-        probe_name="Boiler",
-        temp_f=160,
-        target_f=172,
-        heaters=[(0, False)],
-    )
-    assert paused[0] == "Paused 1:01:01"
-    _lines_fit(paused)
-
-    cooling = status_lines(
-        mode="cooling",
-        elapsed_seconds=5,
-        probe_name="Boiler",
-        temp_f=150,
-        target_f=172,
-        heaters=[(0, False), (1, False)],
-    )
-    assert cooling[0] == "Cooling 00:05"
-    assert cooling[3] == "Heaters off"
-    _lines_fit(cooling)
+def _screen(**overrides):
+    fields = {
+        "mode": "running",
+        "elapsed_seconds": 0,
+        "target_f": 165,
+        "probes": [("Boiler", 168.5)],
+        "heaters": [(True, False), (True, False)],
+    }
+    fields.update(overrides)
+    return status_lines(**fields)
 
 
-def test_long_probe_name_keeps_the_temperature():
-    lines = status_lines(
-        mode="idle",
-        elapsed_seconds=0,
-        probe_name="Very long boiler probe name",
-        temp_f=70.2,
-        target_f=165,
-        heaters=[],
+def test_running_screen_fills_every_line():
+    lines = _screen()
+    assert lines == [
+        "Running:    00:00:00",
+        "Target:        165 F",
+        "Boiler:      168.5 F",
+        "H1: OFF      H2: OFF",
+    ]
+    assert all(len(line) == COLUMNS for line in lines)
+
+
+def test_two_probe_line_and_heater_padding():
+    both = _screen(probes=[("Boiler", 168.2), ("Column", 154.1)])
+    assert both[1] == "Target:        165 F"
+    assert both[2] == "T1:168.2F  T2:154.1F"
+    assert both[3] == "H1: OFF      H2: OFF"
+    assert all(len(line) == COLUMNS for line in both)
+
+    assert _screen(heaters=[(True, True), (True, False)])[3] == "H1: ON       H2: OFF"
+    assert _screen(heaters=[(True, False), (True, True)])[3] == "H1: OFF      H2: ON "
+    assert _screen(heaters=[(True, True), (True, True)])[3] == "H1: ON       H2: ON "
+    assert _screen(heaters=[(False, True), (False, True)])[3] == "H1: OFF      H2: OFF"
+
+    fault = _screen(probes=[("Boiler", None), ("Column", 154.1)])
+    assert fault[2] == "T1:FAULT   T2:154.1F"
+    assert len(fault[2]) == COLUMNS
+
+
+def test_shorter_target_keeps_the_degree_flush_right():
+    lines = _screen(target_f=90, probes=[("Boiler", 90.0)])
+    assert lines[1] == "Target:         90 F"
+    assert len(lines[1]) == COLUMNS
+    assert _screen(probes=[("Thermometer", 168.5)])[2] == "Thermometer: 168.5 F"
+
+
+def test_calibration_prompt_and_clock():
+    prompt = _screen(mode="idle", needs_calibration=True)
+    assert prompt[0] == "Calibrate:     START"
+    assert prompt[1] == "Target:        165 F"
+    assert prompt[2] == "Boiler:      168.5 F"
+    assert prompt[3] == "H1: OFF      H2: OFF"
+    assert all(len(line) == COLUMNS for line in prompt)
+
+    running = _screen(calibrating=True)
+    assert running[0] == "Calibrate:  00:00:00"
+    assert len(running[0]) == COLUMNS
+
+
+def test_idle_paused_and_cooling():
+    idle = _screen(mode="idle")
+    assert idle[0] == "Idle:"
+    assert idle[1] == "Target:        165 F"
+    assert idle[3] == "H1: OFF      H2: OFF"
+
+    paused = _screen(mode="paused", elapsed_seconds=3661, probes=[("Boiler", 160.0)])
+    assert paused[0] == "Paused:     01:01:01"
+    assert len(paused[0]) == COLUMNS
+
+    cooling = _screen(mode="cooling", elapsed_seconds=5, probes=[("Boiler", 150.0)])
+    assert cooling[0] == "Cooling:    00:00:05"
+    assert len(cooling[0]) == COLUMNS
+
+
+def test_emergency_screens():
+    heaters = [(True, False), (True, False)]
+    cabinet = _screen(
+        emergency_code="E01",
+        cabinet_temp_f=171.2,
+        cabinet_limit_f=170,
+        heaters=heaters,
     )
-    assert lines[1].endswith("70.2 F")
-    assert len(lines[1]) <= COLUMNS
+    assert cabinet == [
+        "Emergency:       E01",
+        "Limit:         170 F",
+        "Cabinet:     171.2 F",
+        "H1: OFF      H2: OFF",
+    ]
+    assert all(len(line) == COLUMNS for line in cabinet)
+
+    unread = _screen(emergency_code="E02", cabinet_fault=True, cabinet_limit_f=170)
+    assert unread[0] == "Emergency:       E02"
+    assert unread[1] == "Limit:         170 F"
+    assert unread[2] == "Cabinet:       FAULT"
+    assert unread[3] == "H1: OFF      H2: OFF"
+    assert all(len(line) == COLUMNS for line in unread)
+
+    probe = _screen(emergency_code="E03", probes=[("Boiler", None)])
+    assert probe[0] == "Emergency:       E03"
+    assert probe[1] == "Target:        165 F"
+    assert probe[2] == "Boiler:        FAULT"
+    assert all(len(line) == COLUMNS for line in probe)
+
+    spi = _screen(emergency_code="E04", probes=[("Boiler", None), ("Column", None)])
+    assert spi[0] == "Emergency:       E04"
+    assert spi[1] == "Target:        165 F"
+    assert spi[2] == "T1:FAULT    T2:FAULT"
+    assert len(spi[2]) == COLUMNS
 
 
 def test_prompt_and_progress_screens():
@@ -182,4 +228,4 @@ def test_controller_opens_the_saved_pins_after_setup(store, source, monkeypatch)
     controller = Controller(store, DummySource(noise=False))
     controller._refresh_display()
     assert opened == [(2, 3)]
-    assert controller._display.lines[0] == "Idle"
+    assert controller._display.lines[0] == "Calibrate:     START"

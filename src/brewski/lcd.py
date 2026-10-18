@@ -1,13 +1,19 @@
-"""20×4 I2C LCD and the boot-time start and stop buttons.
+"""20×4 I2C LCD, the boot-time buttons, and the LED relays.
 
 The display stays closed until setup has saved the pins. The Pi's hardware
 I2C controller is ``/dev/i2c-1`` on BCM 2 (SDA) and BCM 3 (SCL). Any other
 saved pair is left unused. The backpack address is probed, not stored.
+
+The button pins and the LED relay pins are different. Each button is wired
+from its GPIO to ground and is read with the internal pull-up. Each LED is
+switched by its own relay.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import sys
 from typing import Protocol
 
 from brewski.store import Settings, default_gpio
@@ -21,8 +27,14 @@ HARDWARE_SDA = 2
 HARDWARE_SCL = 3
 I2C_BUS = 1
 BACKPACK_ADDRESSES = (0x27, 0x3F)
+# LED relay modules, on the saved LED pins, not the button pins. Those
+# boards energize when the pin is low, so "on" has to drive the pin low.
+LED_ACTIVE_HIGH = False
+_SYSTEM_LGPIO = "/usr/lib/python3/dist-packages"
 
 _logged: set[str] = set()
+_pin_factory: object | None = None
+_pin_factory_failed = False
 
 
 class Display(Protocol):
@@ -100,7 +112,7 @@ class HardwareDisplay:
 
 
 class ButtonReader:
-    """Active-low start and stop buttons, using the Pi's internal pull-ups.
+    """Start and stop buttons wired to ground, using the Pi's internal pull-ups.
 
     The first new press wins. A button already held when the prompt opens
     does not count, so a stuck switch cannot accept the update by itself.
@@ -185,12 +197,50 @@ def open_display(settings: Settings) -> Display:
     return NullDisplay()
 
 
+class PromptLeds:
+    """Hold the start and stop indicators solid on while a prompt is open."""
+
+    def __init__(self, start: object, stop: object) -> None:
+        self._start = start
+        self._stop = stop
+        self.set(True, True)
+
+    def set(self, start_on: bool, stop_on: bool) -> None:
+        _drive_led(self._start, start_on)
+        _drive_led(self._stop, stop_on)
+
+    def close(self) -> None:
+        for led in (self._start, self._stop):
+            try:
+                led.off()  # type: ignore[attr-defined]
+            except Exception:
+                logger.exception("Could not turn off a panel LED")
+            try:
+                led.close()  # type: ignore[attr-defined]
+            except Exception:
+                logger.exception("Could not release a panel LED")
+
+
+def _drive_led(led: object, on: bool) -> None:
+    try:
+        if on:
+            led.on()  # type: ignore[attr-defined]
+        else:
+            led.off()  # type: ignore[attr-defined]
+    except Exception:
+        logger.exception("Could not change a panel LED")
+
+
 def open_buttons(settings: Settings) -> ButtonReader | None:
     """Read the saved start and stop pins. None when they cannot be opened."""
 
     if not settings.setup_complete:
         return None
     gpio = settings.gpio or default_gpio()
+    factory = panel_pin_factory()
+    if factory is None:
+        _log_once("buttons", "Start and stop buttons could not be opened: lgpio is unavailable.")
+        return None
     try:
         from gpiozero import Button
     except ImportError:
@@ -198,8 +248,18 @@ def open_buttons(settings: Settings) -> ButtonReader | None:
         return None
     start = stop = None
     try:
-        start = Button(gpio.button_start, pull_up=True, bounce_time=0.05)
-        stop = Button(gpio.button_stop, pull_up=True, bounce_time=0.05)
+        start = Button(
+            gpio.button_start,
+            pull_up=True,
+            bounce_time=0.05,
+            pin_factory=factory,
+        )
+        stop = Button(
+            gpio.button_stop,
+            pull_up=True,
+            bounce_time=0.05,
+            pin_factory=factory,
+        )
         return ButtonReader(start, stop)
     except Exception as exc:
         _log_once("buttons", "Start and stop buttons could not be opened: %s", exc)
@@ -212,6 +272,83 @@ def open_buttons(settings: Settings) -> ButtonReader | None:
         return None
 
 
+def open_prompt_leds(settings: Settings) -> PromptLeds | None:
+    """Turn the saved start and stop LED relays solid on. None when they cannot be opened."""
+
+    if not settings.setup_complete:
+        return None
+    gpio = settings.gpio or default_gpio()
+    factory = panel_pin_factory()
+    if factory is None:
+        _log_once("leds", "Start and stop LEDs were left off because lgpio is unavailable.")
+        return None
+    try:
+        from gpiozero import LED
+    except ImportError:
+        _log_once("gpiozero-led", "gpiozero is not installed. Panel LEDs left off.")
+        return None
+    start = stop = None
+    try:
+        start = LED(gpio.led_start, active_high=LED_ACTIVE_HIGH, pin_factory=factory)
+        stop = LED(gpio.led_stop, active_high=LED_ACTIVE_HIGH, pin_factory=factory)
+        return PromptLeds(start, stop)
+    except Exception as exc:
+        _log_once("leds", "Start and stop LEDs could not be opened: %s", exc)
+        for led in (start, stop):
+            if led is not None:
+                try:
+                    led.close()
+                except Exception:
+                    pass
+        return None
+
+
+def panel_pin_factory() -> object | None:
+    """The lgpio pin factory, shared so buttons and LEDs open one gpiochip."""
+
+    global _pin_factory, _pin_factory_failed
+    if _pin_factory is not None:
+        return _pin_factory
+    if _pin_factory_failed:
+        return None
+    if not _ensure_lgpio():
+        _pin_factory_failed = True
+        return None
+    try:
+        from gpiozero.pins.lgpio import LGPIOFactory
+
+        _pin_factory = LGPIOFactory()
+    except Exception as exc:
+        _log_once("factory", "Could not open the lgpio pin factory: %s", exc)
+        _pin_factory_failed = True
+        return None
+    return _pin_factory
+
+
+def _ensure_lgpio() -> bool:
+    """Import lgpio from the venv, or from Raspberry Pi OS if the venv hid it.
+
+    gpiozero's own fallback is the legacy /dev/gpiomem interface. On current
+    Pi OS that open returns EINVAL, so the panel pins never come up.
+    """
+
+    try:
+        import lgpio  # noqa: F401
+    except ImportError:
+        lgpio = None
+    if lgpio is not None:
+        return True
+    if not os.path.isdir(_SYSTEM_LGPIO):
+        return False
+    if _SYSTEM_LGPIO not in sys.path:
+        sys.path.append(_SYSTEM_LGPIO)
+    try:
+        import lgpio  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def frame(lines: list[str]) -> list[str]:
     """Four lines, each clipped to the width of the panel."""
 
@@ -222,33 +359,121 @@ def frame(lines: list[str]) -> list[str]:
 
 
 def clip_line(text: str) -> str:
-    return " ".join(str(text).split())[:COLUMNS]
+    """Keep interior spaces so a right-aligned value stays in the last column."""
+
+    return str(text).replace("\n", " ")[:COLUMNS]
 
 
 def status_lines(
     *,
     mode: str,
     elapsed_seconds: float,
-    probe_name: str,
-    temp_f: float | None,
     target_f: float,
-    heaters: list[tuple[int, bool]],
+    probes: list[tuple[str, float | None]],
+    heaters: list[tuple[bool, bool]],
+    calibrating: bool = False,
+    needs_calibration: bool = False,
+    emergency_code: str | None = None,
+    cabinet_temp_f: float | None = None,
+    cabinet_limit_f: int = 170,
+    cabinet_fault: bool = False,
 ) -> list[str]:
-    """Live still screen. A clock is shown while a run or a cooldown is open."""
+    """Four 20-column lines. Labels sit on the left and values on the right."""
 
-    label = {"idle": "Idle", "running": "Running", "paused": "Paused", "cooling": "Cooling"}.get(
-        mode, "Brewski"
-    )
-    if mode in {"running", "paused", "cooling"}:
-        head = f"{label} {format_clock(elapsed_seconds)}"
+    heater_row = _heater_line(heaters)
+    if emergency_code in {"E01", "E02"}:
+        cabinet = None if cabinet_fault or cabinet_temp_f is None else cabinet_temp_f
+        return [
+            _pair("Emergency:", emergency_code),
+            _value_line("Limit:", f"{int(cabinet_limit_f)} F"),
+            _reading_line("Cabinet", cabinet),
+            heater_row,
+        ]
+    if emergency_code:
+        return [
+            _pair("Emergency:", emergency_code),
+            _value_line("Target:", _whole_temp(target_f)),
+            _probe_line(probes),
+            heater_row,
+        ]
+    if needs_calibration and mode == "idle":
+        head = _pair("Calibrate:", "START")
+    elif mode in {"running", "paused", "cooling"}:
+        label = _mode_label(mode, calibrating)
+        head = _pair(label, format_clock(elapsed_seconds))
     else:
-        head = label
+        head = "Idle:"
     return [
         head,
-        _temp_line(probe_name, temp_f),
-        f"Target {format_temp(target_f)} F",
-        _heater_line(heaters),
+        _value_line("Target:", _whole_temp(target_f)),
+        _probe_line(probes),
+        heater_row,
     ]
+
+
+def _mode_label(mode: str, calibrating: bool) -> str:
+    if calibrating and mode in {"running", "paused"}:
+        return "Calibrate:"
+    return {"running": "Running:", "paused": "Paused:", "cooling": "Cooling:"}.get(mode, "Brewski:")
+
+
+def _pair(left: str, right: str) -> str:
+    """One line with ``left`` flush left and ``right`` flush right."""
+
+    left = str(left)
+    right = str(right)
+    gap = COLUMNS - len(left) - len(right)
+    if gap < 1:
+        left = left[: max(0, COLUMNS - len(right) - 1)]
+        gap = COLUMNS - len(left) - len(right)
+    return f"{left}{' ' * gap}{right}"[:COLUMNS]
+
+
+def _value_line(label: str, value: str) -> str:
+    return _pair(label, value)
+
+
+def _reading_line(name: str, temp_f: float | None) -> str:
+    value = "FAULT" if temp_f is None else f"{format_temp(temp_f)} F"
+    return _pair(f"{name}:", value)
+
+
+def _probe_line(probes: list[tuple[str, float | None]]) -> str:
+    enabled = list(probes[:2])
+    if len(enabled) >= 2:
+        left = _compact_probe(1, enabled[0][1])
+        right = _compact_probe(2, enabled[1][1])
+        gap = COLUMNS - len(left) - len(right)
+        return f"{left}{' ' * max(gap, 1)}{right}"[:COLUMNS]
+    if enabled:
+        return _reading_line(enabled[0][0], enabled[0][1])
+    return _reading_line("Probe", None)
+
+
+def _compact_probe(index: int, temp_f: float | None) -> str:
+    if temp_f is None:
+        return f"T{index}:FAULT"
+    return f"T{index}:{format_temp(temp_f)}F"
+
+
+def _heater_line(heaters: list[tuple[bool, bool]]) -> str:
+    """Both heater slots. ``ON`` is padded so ``H1`` and ``H2`` stay put."""
+
+    slots = list(heaters[:2])
+    while len(slots) < 2:
+        slots.append((False, False))
+    left = _heater_token(1, slots[0][0], slots[0][1])
+    right = _heater_token(2, slots[1][0], slots[1][1])
+    return _pair(left, right)
+
+
+def _heater_token(index: int, enabled: bool, on: bool) -> str:
+    state = "ON " if enabled and on else "OFF"
+    return f"H{index}: {state}"
+
+
+def _whole_temp(value: float) -> str:
+    return f"{int(round(float(value)))} F"
 
 
 def prompt_lines(current: str, latest: str, seconds_left: int) -> list[str]:
@@ -277,33 +502,11 @@ def format_clock(seconds: float) -> str:
     total = max(0, int(float(seconds)))
     hours, rem = divmod(total, 3600)
     minutes, secs = divmod(rem, 60)
-    if hours:
-        return f"{hours}:{minutes:02d}:{secs:02d}"
-    return f"{minutes:02d}:{secs:02d}"
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
 def format_temp(value: float) -> str:
-    number = round(float(value), 1)
-    if number == int(number):
-        return str(int(number))
-    return f"{number:.1f}"
-
-
-def _temp_line(probe_name: str, temp_f: float | None) -> str:
-    if temp_f is None:
-        return "No probe"
-    suffix = f" {format_temp(temp_f)} F"
-    room = COLUMNS - len(suffix)
-    name = probe_name[:room].rstrip() if room > 0 else ""
-    if not name:
-        return suffix.strip()
-    return f"{name}{suffix}"
-
-
-def _heater_line(heaters: list[tuple[int, bool]]) -> str:
-    if not heaters or not any(on for _, on in heaters):
-        return "Heaters off"
-    return "  ".join(f"H{index + 1} {'on' if on else 'off'}" for index, on in heaters)
+    return f"{float(value):.1f}"
 
 
 def _log_once(key: str, message: str, *args: object) -> None:

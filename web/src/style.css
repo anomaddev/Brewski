@@ -154,6 +154,12 @@ button { cursor: pointer; }
   outline-offset: -2px;
 }
 .status-strip [hidden] { display: none !important; }
+.status-strip-emergency {
+  color: #fcd34d;
+  font-size: 0.78rem;
+  font-weight: 650;
+  line-height: 1.3;
+}
 .status-strip-inner {
   width: min(1180px, calc(100% - 48px));
   margin: 0 auto;
@@ -1147,4 +1153,20 @@ tr[data-href] { cursor: pointer; }
   .history-table a { min-height: 44px; display: inline-flex; flex-direction: column; justify-content: center; }
   .sample-log tr { margin-bottom: 8px; }
   .sample-log td { padding: 5px 0; }
+}
+
+.cabinet-card { padding: 18px 22px; }
+.cabinet-readout { display: flex; flex-wrap: wrap; gap: 22px 36px; }
+.cabinet-value {
+  margin: 6px 0 0;
+  font-size: 1.7rem;
+  font-weight: 640;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+}
+.emergency-banner {
+  margin: 0 0 14px;
+  color: #fcd34d;
+  font-weight: 650;
+  line-height: 1.4;
 }

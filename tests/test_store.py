@@ -20,6 +20,7 @@ def test_default_settings_are_two_heaters_and_two_sensors(store):
     assert [channel.rtd for channel in settings.sensors] == ["pt100", "pt100"]
     assert [channel.ref_ohms for channel in settings.sensors] == [430.0, 430.0]
     assert settings.target_temp_f == 165
+    assert settings.cabinet_limit_f == 170
     assert settings.heater_min_on_seconds == 1.0
     assert settings.heater_min_off_seconds == 1.0
     assert settings.early_cutoff_f == 3.0
@@ -68,8 +69,22 @@ def test_settings_validation_rejects_bad_values(store):
     with pytest.raises(SettingsError):
         merge_settings(current, {"target_temp_f": 20})
     with pytest.raises(SettingsError):
-        merge_settings(current, {"target_temp_f": 251})
-    assert merge_settings(current, {"target_temp_f": 250}).target_temp_f == 250
+        merge_settings(current, {"target_temp_f": 89})
+    with pytest.raises(SettingsError):
+        merge_settings(current, {"target_temp_f": 241})
+    assert merge_settings(current, {"target_temp_f": 90}).target_temp_f == 90
+    assert merge_settings(current, {"target_temp_f": 240}).target_temp_f == 240
+    with pytest.raises(SettingsError):
+        merge_settings(current, {"cabinet_limit_f": 99})
+    with pytest.raises(SettingsError):
+        merge_settings(current, {"cabinet_limit_f": 201})
+    assert merge_settings(current, {"cabinet_limit_f": 100}).cabinet_limit_f == 100
+    assert merge_settings(current, {"cabinet_limit_f": 200}).cabinet_limit_f == 200
+    sensors = [channel.to_dict() for channel in current.sensors]
+    accepted = [{**sensors[0], "name": "Thermometer"}, sensors[1]]
+    assert merge_settings(current, {"sensors": accepted}).sensors[0].name == "Thermometer"
+    with pytest.raises(SettingsError, match="1 to 11"):
+        merge_settings(current, {"sensors": [{**sensors[0], "name": "ThermometerX"}, sensors[1]]})
     with pytest.raises(SettingsError):
         merge_settings(current, {"target_temp_f": 172.5})
     with pytest.raises(SettingsError):
@@ -300,6 +315,28 @@ def test_existing_runs_seed_element_hours_once(tmp_path):
     assert reopened.heater_life_seconds() == pytest.approx([15, 4])
     again = Store(path)
     assert again.heater_life_seconds() == pytest.approx([15, 4])
+
+
+def test_old_target_limit_and_probe_name_are_brought_into_range(store):
+    import json
+
+    saved = store.get_settings()
+    sensors = [channel.to_dict() for channel in saved.sensors]
+    sensors[0]["name"] = "Very long probe name"
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            """
+            UPDATE settings
+            SET target_temp_f = 40, cabinet_limit_f = 250, sensors = ?, sensor_names = ?
+            WHERE id = 1
+            """,
+            (json.dumps(sensors), json.dumps(["Very long probe name", sensors[1]["name"]])),
+        )
+    loaded = store.get_settings()
+    assert loaded.target_temp_f == 90
+    assert loaded.cabinet_limit_f == 200
+    assert loaded.sensors[0].name == "Very long p"
+    assert len(loaded.sensors[0].name) == 11
 
 
 def test_heater_math_adds_the_tail_after_the_last_sample():

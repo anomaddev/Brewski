@@ -13,12 +13,12 @@ export function mountSettings(root) {
         <h2 class="card-title">Settings</h2>
       </div>
       <p class="lock-banner" id="lock-banner" hidden>
-        Heater, probe, and GPIO setup is locked while a run is open. The target, the early cutoff, and the minimum on and off times can still be changed.
+        Heater, probe, and GPIO setup is locked while a run is open. The target, the cabinet limit, the early cutoff, and the minimum on and off times can still be changed.
       </p>
       <fieldset>
         <legend>Default Target</legend>
         <label class="field target-field-setting">Temperature (°F)
-          <input name="target_temp_f" id="settings-target" type="number" min="40" max="250" step="1" inputmode="numeric" required />
+          <input name="target_temp_f" id="settings-target" type="number" min="90" max="240" step="1" inputmode="numeric" required />
           <p class="boil-warning" id="target-warning" hidden>Above water's boiling point (212°F).</p>
         </label>
         <p class="help">The first enabled probe is compared with this. Heaters turn off early, by the cutoff below, and come back on 2°F under that cutoff.</p>
@@ -29,6 +29,13 @@ export function mountSettings(root) {
           <input name="early_cutoff_f" id="early-cutoff" type="number" min="0" max="20" step="0.5" inputmode="decimal" required />
         </label>
         <p class="help">The element turns off this many degrees before the target. It stays hot after the SSR opens, and the probe lags the liquid, so cutting power early lets that residual heat finish the rise instead of overshooting. 3°F is a starting point for a typical small still. Use 0 to wait until the probe reaches the target. A calibration run replaces this with the measured coast.</p>
+      </fieldset>
+      <fieldset>
+        <legend>Cabinet limit</legend>
+        <label class="field target-field-setting">Maximum cabinet temperature (°F)
+          <input name="cabinet_limit_f" id="cabinet-limit" type="number" min="100" max="200" step="1" inputmode="numeric" required />
+        </label>
+        <p class="help">The HTS221 watches the cabinet. Above this temperature every heater turns off and Start stays refused until the cabinet cools back to the limit. 170°F is the default. Humidity is shown and does not trip the stop. Disabling the HTS221 turns this interlock off.</p>
       </fieldset>
       <fieldset>
         <legend>Minimum on time</legend>
@@ -53,7 +60,7 @@ export function mountSettings(root) {
         </section>
         <section class="device-column">
           <h3 class="column-title">Temperature probes</h3>
-          <p class="help">One must stay enabled. The first enabled probe controls the heaters. Each probe is a MAX31865 with its own chip select. Probe 2 starts disabled. Defaults are chip selects BCM 17 and 8.</p>
+          <p class="help">One must stay enabled. The first enabled probe controls the heaters. A probe name is 1 to 11 characters. Each probe is a MAX31865 with its own chip select. Probe 2 starts disabled. Defaults are chip selects BCM 17 and 8.</p>
           ${deviceSection('sensor', 'Probe')}
           <p class="form-error device-guard" id="sensor-guard" data-message="One temperature probe must stay enabled."></p>
         </section>
@@ -68,7 +75,7 @@ export function mountSettings(root) {
         <p class="help">Both probes share SPI. Defaults are CLK 11, SDO 9, and SDI 10. The HTS221 and the LCD share I2C. Defaults are SDA 2 and SCL 3. Every pin on this page has to be unique.</p>
         ${busFields()}
       </fieldset>
-      <p class="help">Names, pins, and which devices are enabled are copied onto each run when it starts, along with each probe's RTD, wire count, and reference resistor. Pins are saved for a Raspberry Pi controller. The dummy source ignores them until that controller is connected. Heater defaults are BCM 12 and 16. Each probe starts as a 3-wire PT100 with a 430 Ω reference.</p>
+      <p class="help">Names, pins, and which devices are enabled are copied onto each run when it starts, along with each probe's RTD, wire count, and reference resistor. The installed controller drives these pins. brewski dev on a Mac uses the dummy source and ignores them. Heater defaults are BCM 12 and 16. Each probe starts as a 3-wire PT100 with a 430 Ω reference.</p>
       <p class="form-error" id="settings-error" hidden></p>
       <p class="saved" id="settings-saved" hidden>Saved</p>
       <div class="status-actions">
@@ -106,7 +113,7 @@ export function mountSettings(root) {
       button.disabled = isLocked
     }
     for (const input of form.querySelectorAll(
-      'input:not([name="target_temp_f"]):not([name="heater_min_on_seconds"]):not([name="heater_min_off_seconds"]):not([name="early_cutoff_f"]), select',
+      'input:not([name="target_temp_f"]):not([name="cabinet_limit_f"]):not([name="heater_min_on_seconds"]):not([name="heater_min_off_seconds"]):not([name="early_cutoff_f"]), select',
     )) {
       input.disabled = isLocked
     }
@@ -171,6 +178,7 @@ export function mountSettings(root) {
     }
     const body = {
       target_temp_f: Math.round(Number(form.elements.target_temp_f.value)),
+      cabinet_limit_f: Math.round(Number(form.elements.cabinet_limit_f.value)),
       early_cutoff_f: Number(form.elements.early_cutoff_f.value),
       heater_min_on_seconds: Number(form.elements.heater_min_on_seconds.value),
       heater_min_off_seconds: Number(form.elements.heater_min_off_seconds.value),
@@ -224,6 +232,10 @@ export function mountSettings(root) {
     const minOn = form.elements.heater_min_on_seconds
     if (document.activeElement !== minOn) {
       minOn.value = String(settings.heater_min_on_seconds)
+    }
+    const cabinet = form.elements.cabinet_limit_f
+    if (document.activeElement !== cabinet && settings.cabinet_limit_f != null) {
+      cabinet.value = String(Math.round(Number(settings.cabinet_limit_f)))
     }
     const cutoff = form.elements.early_cutoff_f
     if (document.activeElement !== cutoff) {
@@ -309,7 +321,7 @@ function deviceSection(kind, label) {
         </div>
         <div class="device-fields">
           <label class="field">Name
-            <input name="${kind}_name_${index}" maxlength="40" required />
+            <input name="${kind}_name_${index}" maxlength="${kind === 'sensor' ? 11 : 40}" required />
           </label>
           <label class="field gpio-field">${kind === 'sensor' ? 'Chip select' : 'BCM GPIO'}
             <input name="${kind}_gpio_${index}" type="number" min="2" max="27" step="1" inputmode="numeric" required />

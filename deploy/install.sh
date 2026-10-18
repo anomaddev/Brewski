@@ -13,7 +13,10 @@ INSTALL_ROOT=/opt/brewski
 DATA_DIR=/var/lib/brewski
 VENV="${INSTALL_ROOT}/venv"
 UNIT_PATH=/etc/systemd/system/brewski.service
+UPDATE_UNIT_PATH=/etc/systemd/system/brewski-update.service
+REVISION_PATH="${INSTALL_ROOT}/revision"
 PORT=8080
+BOOT_UPDATE=0
 
 # Empty when this script is piped into bash (curl | bash). A path when it is a file.
 SCRIPT_PATH=""
@@ -43,6 +46,7 @@ die() {
 }
 
 service_user() {
+  local existing=""
   if [[ -n "${BREWSKI_USER:-}" ]]; then
     printf '%s\n' "$BREWSKI_USER"
     return
@@ -50,6 +54,13 @@ service_user() {
   if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
     printf '%s\n' "$SUDO_USER"
     return
+  fi
+  if [[ -f "$UNIT_PATH" ]]; then
+    existing=$(sed -n 's/^User=//p' "$UNIT_PATH" | head -n 1)
+    if [[ -n "$existing" ]]; then
+      printf '%s\n' "$existing"
+      return
+    fi
   fi
   if id pi >/dev/null 2>&1; then
     printf '%s\n' pi
@@ -89,16 +100,75 @@ ensure_curl() {
   apt-get install -y ca-certificates curl < /dev/null
 }
 
-# Download main and replace this process with the install.sh inside that archive.
-# Does not return.
-download_and_reexec() {
-  local dest tarball url status repo
+# Latest published release tag.
+# Prints the tag and returns 0, returns 2 when no release exists, and returns
+# 1 when GitHub cannot be read.
+latest_release() {
+  local payload status tag
+  payload=$(mktemp)
+  status=$(
+    curl -sS -L --retry 2 --max-time 30 -o "$payload" -w "%{http_code}" \
+      -H "Accept: application/vnd.github+json" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" || true
+  )
+  if [[ "$status" == "404" ]]; then
+    rm -f "$payload"
+    return 2
+  fi
+  if [[ "$status" != "200" ]]; then
+    rm -f "$payload"
+    return 1
+  fi
+  tag=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])' <"$payload" 2>/dev/null || true)
+  rm -f "$payload"
+  [[ "$tag" =~ ^[A-Za-z0-9._+-]+$ ]] || return 1
+  printf '%s\n' "$tag"
+}
 
+# Remember the installed release so a later boot can skip an unchanged one.
+save_revision() {
+  [[ -n "${RELEASE_TAG:-}" ]] || return 0
+  printf '%s\n' "$RELEASE_TAG" >"$REVISION_PATH"
+}
+
+# Download the latest release into FETCHED_ROOT. The first argument is 1 when
+# a missing release or a failed download should keep the installed version.
+fetch_release() {
+  local soft=$1
+  local rc=0 tag="" installed="" dest tarball url status repo
   ensure_curl
+  tag=$(latest_release) || rc=$?
+  if [[ "$rc" -eq 1 ]]; then
+    if [[ "$soft" == "1" ]]; then
+      echo "brewski: GitHub is unreachable. Starting the installed version."
+      exit 0
+    fi
+    die "could not reach GitHub to read the latest release."
+  fi
+  if [[ "$rc" -eq 2 || -z "$tag" ]]; then
+    if [[ "$soft" == "1" ]]; then
+      echo "brewski: no GitHub release yet. Starting the installed version."
+      exit 0
+    fi
+    die "no GitHub release exists yet. Publish a release, then run this installer again."
+  fi
+  if [[ -f "$REVISION_PATH" ]]; then
+    installed=$(tr -d '[:space:]' <"$REVISION_PATH")
+  fi
+  if [[ "$installed" == "$tag" ]]; then
+    if [[ "$soft" == "1" ]]; then
+      echo "brewski: already at release ${tag}."
+      exit 0
+    fi
+    echo "brewski: release ${tag} is already installed. Reinstalling it."
+  fi
+
   dest=$(mktemp -d /tmp/brewski-src.XXXXXX)
+  BREWSKI_SRC_TMP=$dest
   tarball=$dest/brewski.tar.gz
-  url="https://api.github.com/repos/${GITHUB_REPO}/tarball/${GITHUB_REF}"
-  echo "Downloading ${GITHUB_REPO} (${GITHUB_REF})..."
+  url="https://api.github.com/repos/${GITHUB_REPO}/tarball/${tag}"
+  echo "Downloading ${GITHUB_REPO} release ${tag}..."
 
   status=$(
     curl -sS -L -o "$tarball" -w "%{http_code}" \
@@ -108,31 +178,41 @@ download_and_reexec() {
   )
   if [[ "$status" != "200" ]]; then
     rm -rf "$dest"
-    die "could not download ${GITHUB_REPO} (${GITHUB_REF}) (HTTP ${status})."
+    BREWSKI_SRC_TMP=""
+    if [[ "$soft" == "1" ]]; then
+      echo "brewski: could not download release ${tag} (HTTP ${status}). Starting the installed version."
+      exit 0
+    fi
+    die "could not download release ${tag} (HTTP ${status})."
   fi
 
-  tar -xzf "$tarball" -C "$dest" || {
+  if ! tar -xzf "$tarball" -C "$dest"; then
     rm -rf "$dest"
+    BREWSKI_SRC_TMP=""
+    if [[ "$soft" == "1" ]]; then
+      echo "brewski: the download was not a valid archive. Starting the installed version."
+      exit 0
+    fi
     die "the download was not a valid archive."
-  }
+  fi
   rm -f "$tarball"
 
   shopt -s nullglob
   local dirs=("$dest"/*/)
   if [[ ${#dirs[@]} -ne 1 ]]; then
     rm -rf "$dest"
+    BREWSKI_SRC_TMP=""
     die "the download did not contain a single project directory."
   fi
   repo=${dirs[0]%/}
   if [[ ! -f "$repo/deploy/install.sh" || ! -f "$repo/pyproject.toml" ]]; then
     rm -rf "$dest"
-    die "main has no deploy/install.sh."
+    BREWSKI_SRC_TMP=""
+    die "release ${tag} has no deploy/install.sh."
   fi
 
-  export BREWSKI_SRC_TMP=$dest
-  exec "$repo/deploy/install.sh" < /dev/null
-  rm -rf "$dest"
-  die "could not start the downloaded installer."
+  RELEASE_TAG=$tag
+  FETCHED_ROOT=$repo
 }
 
 install_packages() {
@@ -170,7 +250,7 @@ install_python() {
   # Force a reinstall so a repeat run picks up code even when the version
   # number in pyproject.toml has not changed.
   "$VENV/bin/python" -m pip install --upgrade --force-reinstall "$root"
-  chown -R "${user}:${group}" "$INSTALL_ROOT" "$DATA_DIR"
+  chown -R "${user}:${group}" "$VENV" "$DATA_DIR"
   [[ -x "$VENV/bin/brewski" ]] || die "pip install did not create ${VENV}/bin/brewski."
 }
 
@@ -180,6 +260,7 @@ install_service() {
   local group=$3
   local line
   [[ -f "$root/deploy/brewski.service" ]] || die "deploy/brewski.service is missing."
+  [[ -f "$root/deploy/brewski-update.service" ]] || die "deploy/brewski-update.service is missing."
   command -v systemctl >/dev/null 2>&1 || die "systemd is required so Brewski can start on boot."
 
   : >"$UNIT_PATH"
@@ -190,9 +271,14 @@ install_service() {
     esac
     printf '%s\n' "$line" >>"$UNIT_PATH"
   done <"$root/deploy/brewski.service"
+  cp "$root/deploy/brewski-update.service" "$UPDATE_UNIT_PATH"
+  install -m 755 "$root/deploy/install.sh" "${INSTALL_ROOT}/install.sh"
 
   systemctl daemon-reload
-  systemctl enable brewski
+  systemctl enable brewski brewski-update
+  if [[ "$BOOT_UPDATE" == "1" ]]; then
+    return
+  fi
   systemctl restart brewski
   if ! systemctl is-active --quiet brewski; then
     echo "brewski: the service did not stay running. Recent logs:" >&2
@@ -213,26 +299,40 @@ lan_address() {
 
 main() {
   local user group repo_root
-  if [[ -n "${BREWSKI_SRC_TMP:-}" ]]; then
-    trap 'rm -rf "$BREWSKI_SRC_TMP"' EXIT
+  if [[ "${1:-}" == "--boot-update" ]]; then
+    BOOT_UPDATE=1
   fi
+  trap '[[ -n "${BREWSKI_SRC_TMP:-}" ]] && rm -rf "$BREWSKI_SRC_TMP"' EXIT
 
   user=$(service_user)
   id "$user" >/dev/null 2>&1 || die "account ${user} does not exist."
   group=$(id -gn "$user")
 
   if ! repo_root=$(checkout_root); then
-    download_and_reexec
+    fetch_release "$BOOT_UPDATE"
+    repo_root=$FETCHED_ROOT
   fi
 
-  echo "Installing Brewski for ${user}:${group}"
+  if [[ "$BOOT_UPDATE" == "1" ]]; then
+    echo "Updating Brewski for ${user}:${group}"
+  else
+    echo "Installing Brewski for ${user}:${group}"
+  fi
   echo "Source: ${repo_root}"
-  install_packages
+  if [[ "$BOOT_UPDATE" != "1" ]] || ! command -v python3 >/dev/null || ! command -v node >/dev/null || ! command -v npm >/dev/null; then
+    install_packages
+  fi
   build_dashboard "$repo_root"
   install_python "$repo_root" "$user" "$group"
   install_service "$repo_root" "$user" "$group"
+  save_revision "$repo_root"
 
+  if [[ "$BOOT_UPDATE" == "1" ]]; then
+    echo "Brewski is updated and will start next."
+    return
+  fi
   echo "Brewski is installed and will start on every reboot."
+  echo "Each boot installs a newer GitHub release. Commits stay off the Pi until they are published."
   echo "Open http://$(lan_address):${PORT}"
   echo "Database: ${DATA_DIR}/brewski.db"
 }

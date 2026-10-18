@@ -61,7 +61,7 @@ Git is not required. On the Pi:
 curl -fsSL https://raw.githubusercontent.com/anomaddev/Brewski/main/deploy/install.sh | sudo bash
 ```
 
-That downloads `main`, installs Python and Node, builds the dashboard, installs Brewski into `/opt/brewski/venv`, and enables a systemd service so the controller starts on every reboot. The service listens on port 8080. The database is `/var/lib/brewski/brewski.db`. Open `http://<pi-address>:8080`.
+That installs the latest GitHub release, then enables a systemd service so the controller starts on every reboot. Each later boot installs a newer release before the controller starts. Commits on `main` stay off the Pi until they are published as a release. The database is kept. If GitHub cannot be reached, or there is no release yet, the version already on the Pi starts. The service listens on port 8080. The database is `/var/lib/brewski/brewski.db`. Open `http://<pi-address>:8080`.
 
 The service runs as the account that invoked `sudo`, or as `pi` when that account exists and sudo did not record a user. Set `BREWSKI_USER` to choose a different account:
 

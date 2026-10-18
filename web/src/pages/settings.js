@@ -75,7 +75,7 @@ export function mountSettings(root) {
         <p class="help">Both probes share SPI. Defaults are CLK 11, SDO 9, and SDI 10. The HTS221 and the LCD share I2C. Defaults are SDA 2 and SCL 3. Every pin on this page has to be unique.</p>
         ${busFields()}
       </fieldset>
-      <p class="help">Names, pins, and which devices are enabled are copied onto each run when it starts, along with each probe's RTD, wire count, and reference resistor. The installed controller drives these pins. brewski dev on a Mac uses the dummy source and ignores them. Heater defaults are BCM 12 and 16. Each probe starts as a 3-wire PT100 with a 430 Ω reference.</p>
+      <p class="help">Names, pins, and which devices are enabled are copied onto each run when it starts, along with each probe's RTD, wire count, and reference resistor. The installed controller drives these pins. brewski dev on a Mac uses the dummy source and ignores them. Heater defaults are BCM 12 and 16. Each probe starts as a 2-wire PT100 with a 430 Ω reference.</p>
       <p class="form-error" id="settings-error" hidden></p>
       <p class="saved" id="settings-saved" hidden>Saved</p>
       <div class="status-actions">
@@ -258,7 +258,7 @@ export function mountSettings(root) {
     if (kind !== 'sensor') return
     const rtd = channel.rtd === 'pt1000' ? 'pt1000' : 'pt100'
     form.elements[`sensor_rtd_${index}`].value = rtd
-    form.elements[`sensor_wires_${index}`].value = String([2, 3, 4].includes(channel.wires) ? channel.wires : 3)
+    form.elements[`sensor_wires_${index}`].value = String([2, 3, 4].includes(channel.wires) ? channel.wires : 2)
     const ref = channel.ref_ohms == null ? (rtd === 'pt1000' ? 4300 : 430) : channel.ref_ohms
     form.elements[`sensor_ref_${index}`].value = String(ref)
   }

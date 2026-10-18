@@ -330,7 +330,7 @@ function deviceFields(kind, label, channels) {
 
 function probeConfig(index, channel) {
   const rtd = channel.rtd === 'pt1000' ? 'pt1000' : 'pt100'
-  const wires = [2, 3, 4].includes(channel.wires) ? channel.wires : 3
+  const wires = [2, 3, 4].includes(channel.wires) ? channel.wires : 2
   const ref = channel.ref_ohms == null ? (rtd === 'pt1000' ? 4300 : 430) : channel.ref_ohms
   const wireOptions = [2, 3, 4]
     .map((count) => `<option value="${count}" ${wires === count ? 'selected' : ''}>${count}</option>`)

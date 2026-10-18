@@ -28,9 +28,9 @@ HARDWARE_SDA = 2
 HARDWARE_SCL = 3
 I2C_BUS = 1
 BACKPACK_ADDRESSES = (0x27, 0x3F)
-# LED relay modules, on the saved LED pins, not the button pins. Those
-# boards energize when the pin is low, so "on" has to drive the pin low.
-LED_ACTIVE_HIGH = False
+# LED relay modules, on the saved LED pins, not the button pins. On this
+# board the lamp lights when the pin is high.
+LED_ACTIVE_HIGH = True
 _SYSTEM_LGPIO = "/usr/lib/python3/dist-packages"
 
 _logged: set[str] = set()

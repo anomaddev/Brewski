@@ -16,7 +16,7 @@ def test_default_settings_are_two_heaters_and_two_sensors(store):
     assert [channel.gpio for channel in settings.heaters] == [12, 16]
     assert [channel.gpio for channel in settings.sensors] == [17, 8]
     assert settings.gpio == default_gpio()
-    assert [channel.wires for channel in settings.sensors] == [3, 3]
+    assert [channel.wires for channel in settings.sensors] == [2, 2]
     assert [channel.rtd for channel in settings.sensors] == ["pt100", "pt100"]
     assert [channel.ref_ohms for channel in settings.sensors] == [430.0, 430.0]
     assert settings.target_temp_f == 165
@@ -145,7 +145,7 @@ def test_settings_validation_rejects_bad_values(store):
     assert merge_settings(current, {"early_cutoff_f": 2.5}).early_cutoff_f == 2.5
 
 
-def test_probe_fields_default_to_a_three_wire_pt100(store):
+def test_probe_fields_default_to_a_two_wire_pt100(store):
     current = store.get_settings()
     updated = merge_settings(
         current,
@@ -156,10 +156,10 @@ def test_probe_fields_default_to_a_three_wire_pt100(store):
             ]
         },
     )
-    assert updated.sensors[0].wires == 3
+    assert updated.sensors[0].wires == 2
     assert updated.sensors[0].rtd == "pt100"
     assert updated.sensors[0].ref_ohms == 430.0
-    assert updated.sensors[1].wires == 3
+    assert updated.sensors[1].wires == 2
     assert updated.sensors[1].rtd == "pt1000"
     assert updated.sensors[1].ref_ohms == 4300.0
 
@@ -180,7 +180,7 @@ def test_shared_one_wire_pins_become_separate_chip_selects(store):
     assert [channel.gpio for channel in loaded.sensors] == [17, 8]
     assert loaded.sensors[0].name == "Boiler"
     assert loaded.sensors[1].rtd == "pt100"
-    assert loaded.sensors[1].wires == 3
+    assert loaded.sensors[1].wires == 2
     assert loaded.sensors[1].ref_ohms == 430.0
 
 
@@ -235,7 +235,7 @@ def test_older_databases_keep_counts_and_gain_default_pins(tmp_path):
     assert [channel.gpio for channel in settings.sensors] == [17, 8]
     assert settings.gpio == default_gpio()
     assert settings.sensors[0].rtd == "pt100"
-    assert settings.sensors[0].wires == 3
+    assert settings.sensors[0].wires == 2
     assert settings.sensors[0].ref_ohms == 430.0
     assert settings.target_temp_f == 165
     assert settings.heater_min_on_seconds == 1.0

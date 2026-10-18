@@ -46,7 +46,7 @@ class PiSource:
         self._outputs: list[object | None] = []
         self._spi: object | None = None
         self._cs: dict[int, object] = {}
-        self._configured: set[int] = set()
+        self._configured: dict[int, int] = {}
         self._bus: object | None = None
         self._calibration = None
         self._open()
@@ -84,7 +84,12 @@ class PiSource:
                 temps.append(None)
                 faults.append(False)
                 continue
-            reading = self._read_probe(channel.gpio, channel.wires or 3, channel.rtd or "pt100", channel.ref_ohms or 430.0)
+            reading = self._read_probe(
+                channel.gpio,
+                channel.wires or 2,
+                channel.rtd or "pt100",
+                channel.ref_ohms or 430.0,
+            )
             temps.append(reading)
             faults.append(reading is None)
         self.probe_faults = faults
@@ -247,9 +252,10 @@ class PiSource:
             return None
         cs = self._cs[cs_pin]
         try:
-            if cs_pin not in self._configured:
-                _transfer(self._spi, cs, [0x80, config_byte(wires)])
-                self._configured.add(cs_pin)
+            config = config_byte(wires)
+            if self._configured.get(cs_pin) != config:
+                _transfer(self._spi, cs, [0x80, config])
+                self._configured[cs_pin] = config
                 time.sleep(_CONVERT_SECONDS)
             data = _transfer(self._spi, cs, [0x01, 0x00, 0x00])
             fault = _transfer(self._spi, cs, [0x07, 0x00])

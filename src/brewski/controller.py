@@ -509,19 +509,30 @@ class Controller:
 
     def _loop(self) -> None:
         last = time.monotonic()
+        since_control = 1.0
         while not self._stop_loop.is_set():
             now = time.monotonic()
             dt = now - last
             last = now
-            try:
-                self.tick(dt)
-            except Exception:
-                logger.exception("Controller tick failed")
-            try:
-                self._refresh_display()
-            except Exception:
-                logger.exception("LCD refresh failed")
-            self._stop_loop.wait(1.0)
+            since_control += dt
+            if since_control >= 1.0:
+                try:
+                    self.tick(since_control)
+                except Exception:
+                    logger.exception("Controller tick failed")
+                since_control = 0.0
+                try:
+                    self._refresh_display()
+                except Exception:
+                    logger.exception("LCD refresh failed")
+            else:
+                # The dial is read between sensor passes so the target on the
+                # LCD keeps up with the knob instead of jumping once a second.
+                try:
+                    self._apply_panel()
+                except Exception:
+                    logger.exception("Panel update failed")
+            self._stop_loop.wait(0.05)
 
     def _tick(self, dt: float) -> None:
         settings = self.store.get_settings()

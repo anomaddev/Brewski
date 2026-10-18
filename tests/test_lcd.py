@@ -1,4 +1,6 @@
+import os
 from dataclasses import replace
+from pathlib import Path
 
 from brewski.controller import Controller
 from brewski.lcd import (
@@ -229,3 +231,34 @@ def test_controller_opens_the_saved_pins_after_setup(store, source, monkeypatch)
     controller._refresh_display()
     assert opened == [(2, 3)]
     assert controller._display.lines[0] == "Calibrate:     START"
+
+
+def test_lgpio_is_imported_from_a_writable_directory(tmp_path, monkeypatch):
+    from brewski import lcd
+
+    monkeypatch.setattr(lcd, "_lgpio_directory", lambda: tmp_path)
+    seen = {}
+
+    def load():
+        seen["cwd"] = os.getcwd()
+        return object()
+
+    monkeypatch.setattr(lcd, "_load_lgpio_module", load)
+    before = os.getcwd()
+    assert lcd._ensure_lgpio() is True
+    assert Path(seen["cwd"]) == tmp_path
+    assert os.getcwd() == before
+
+
+def test_a_broken_lgpio_import_does_not_stop_startup(tmp_path, monkeypatch):
+    from brewski import lcd
+
+    monkeypatch.setattr(lcd, "_lgpio_directory", lambda: tmp_path)
+
+    def load():
+        raise FileNotFoundError(".lgd-nfy0")
+
+    monkeypatch.setattr(lcd, "_load_lgpio_module", load)
+    before = os.getcwd()
+    assert lcd._ensure_lgpio() is False
+    assert os.getcwd() == before

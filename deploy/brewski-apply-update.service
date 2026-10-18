@@ -6,5 +6,6 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 Environment=BREWSKI_DATA_DIR=/var/lib/brewski
+WorkingDirectory=/var/lib/brewski
 ExecStart=/opt/brewski/venv/bin/brewski apply-update
 TimeoutStartSec=900

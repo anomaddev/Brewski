@@ -11,6 +11,8 @@ Group=pi
 Environment=BREWSKI_DATA_DIR=/var/lib/brewski
 Environment=BREWSKI_HOST=0.0.0.0
 Environment=BREWSKI_PORT=8080
+# lgpio creates a notify pipe in the working directory at import time.
+WorkingDirectory=/var/lib/brewski
 ExecStart=/opt/brewski/venv/bin/brewski
 Restart=on-failure
 RestartSec=3

@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Protocol
 
 from brewski.store import Settings, default_gpio
@@ -325,6 +326,53 @@ def panel_pin_factory() -> object | None:
     return _pin_factory
 
 
+def _lgpio_directory() -> Path | None:
+    """A directory the current user can write, where lgpio can create its pipe."""
+
+    from brewski.paths import data_directory
+
+    for folder in (data_directory(False), Path("/tmp")):
+        if folder.is_dir() and os.access(folder, os.W_OK | os.X_OK):
+            return folder
+    return None
+
+
+def _load_lgpio_module():
+    import lgpio
+
+    return lgpio
+
+
+def _import_lgpio():
+    """Import lgpio from a writable directory, then restore the previous cwd.
+
+    The library creates a notify pipe in the current directory while it is
+    imported. systemd starts this service in ``/``. The service account cannot
+    create that pipe there, the import raises, and the new process exits. The
+    files from the update are on disk, but the controller stays down until a
+    later start happens to get past it.
+    """
+
+    folder = _lgpio_directory()
+    previous = None
+    if folder is not None:
+        try:
+            previous = os.getcwd()
+        except OSError:
+            previous = None
+        os.chdir(folder)
+    try:
+        return _load_lgpio_module()
+    except Exception:
+        return None
+    finally:
+        if previous is not None:
+            try:
+                os.chdir(previous)
+            except OSError:
+                pass
+
+
 def _ensure_lgpio() -> bool:
     """Import lgpio from the venv, or from Raspberry Pi OS if the venv hid it.
 
@@ -332,21 +380,13 @@ def _ensure_lgpio() -> bool:
     Pi OS that open returns EINVAL, so the panel pins never come up.
     """
 
-    try:
-        import lgpio  # noqa: F401
-    except ImportError:
-        lgpio = None
-    if lgpio is not None:
+    if _import_lgpio() is not None:
         return True
     if not os.path.isdir(_SYSTEM_LGPIO):
         return False
     if _SYSTEM_LGPIO not in sys.path:
         sys.path.append(_SYSTEM_LGPIO)
-    try:
-        import lgpio  # noqa: F401
-    except ImportError:
-        return False
-    return True
+    return _import_lgpio() is not None
 
 
 def frame(lines: list[str]) -> list[str]:

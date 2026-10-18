@@ -42,6 +42,14 @@ def create_app(controller: Controller) -> Flask:
     def reset_settings():
         return jsonify(controller.reset())
 
+    @app.get("/api/update")
+    def get_update():
+        return jsonify(controller.update_status())
+
+    @app.post("/api/update")
+    def post_update():
+        return jsonify(controller.start_update()), 202
+
     @app.get("/api/runs")
     def runs():
         return jsonify(controller.runs())

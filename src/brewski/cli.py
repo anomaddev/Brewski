@@ -35,8 +35,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["dev"],
-        help="dev starts the API and the Vite dashboard together",
+        choices=["dev", "boot-update", "apply-update"],
+        help="dev starts the API and the Vite dashboard together. "
+        "boot-update asks on the LCD before replacing a release. "
+        "apply-update installs the release the user already accepted.",
     )
     args = parser.parse_args(argv)
     logging.basicConfig(
@@ -45,6 +47,14 @@ def main(argv: list[str] | None = None) -> None:
     )
     if args.command == "dev":
         run_dev()
+    elif args.command == "boot-update":
+        from brewski.updates import run_boot_update
+
+        raise SystemExit(run_boot_update())
+    elif args.command == "apply-update":
+        from brewski.updates import run_apply_update
+
+        raise SystemExit(run_apply_update())
     else:
         run_serve()
 

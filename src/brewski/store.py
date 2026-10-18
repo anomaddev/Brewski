@@ -118,7 +118,10 @@ class SettingsError(ValueError):
 
 @dataclass(frozen=True)
 class I2cDevice:
-    """One board on the shared I2C bus. Addresses are chosen when a Pi source exists."""
+    """One board on the shared I2C bus.
+
+    The LCD driver probes the usual backpack addresses. They are not stored.
+    """
 
     id: str
     name: str
@@ -179,6 +182,9 @@ class GpioConfig:
 
     def spi_pins(self) -> frozenset[int]:
         return frozenset({self.spi_clk, self.spi_sdo, self.spi_sdi})
+
+    def lcd_enabled(self) -> bool:
+        return any(device.id == "lcd" and device.enabled for device in self.i2c_devices)
 
 
 def default_gpio() -> GpioConfig:
@@ -905,6 +911,34 @@ def _settings_from_row(row: sqlite3.Row) -> Settings:
         setup_complete=_stored_flag(row, "setup_complete"),
         gpio=gpio,
     )
+
+
+def load_settings(path: Path) -> Settings | None:
+    """Read settings without creating or migrating the database.
+
+    A missing file, or a file that is not a Brewski database yet, means setup
+    has not saved the I2C pins. Callers leave the LCD closed in that case.
+    """
+
+    path = Path(path)
+    if path.suffix != ".db":
+        path = path / "brewski.db"
+    if not path.is_file():
+        return None
+    try:
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+    connection.row_factory = sqlite3.Row
+    try:
+        row = connection.execute("SELECT * FROM settings WHERE id = 1").fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        connection.close()
+    if row is None:
+        return None
+    return _settings_from_row(row)
 
 
 def _gpio_from_row(row: sqlite3.Row) -> GpioConfig:

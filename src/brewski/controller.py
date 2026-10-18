@@ -4,19 +4,24 @@ The loop is hardware-agnostic. It reads a :class:`HardwareSource`, decides
 whether the heaters should be on, and appends samples while a run is going.
 The first enabled probe is the one compared with the target. Heaters turn
 off before that target so heat still stored in the element can finish the
-rise. Disabled heaters stay off. GPIO pins live on the settings for a later
-Raspberry Pi source; this loop does not drive pins itself.
+rise. Disabled heaters stay off. Heater and probe pins are stored for a
+later Raspberry Pi source. After setup, this loop does drive the I2C LCD.
 """
 
 from __future__ import annotations
 
 import logging
 import math
+import subprocess
 import threading
 import time
 from dataclasses import replace
 
+from brewski.lcd import NullDisplay, display_key, open_display, status_lines
 from brewski.sources.base import HardwareSource
+from brewski.updates import read_status
+from brewski.updates import report as update_report
+from brewski.updates import start_apply_service, write_status
 from brewski.store import (
     EARLY_CUTOFF_MAX_F,
     SLOT_COUNT,
@@ -129,6 +134,9 @@ class Controller:
         self._stop_loop = threading.Event()
         self._thread: threading.Thread | None = None
         self._shut_down = False
+        self._display = NullDisplay()
+        self._display_key: tuple[int, int] | None = None
+        self._hold_display = False
         self._mode = "idle"
         self._run_id: int | None = None
         self._elapsed = 0.0
@@ -175,6 +183,8 @@ class Controller:
             return
         self._shut_down = True
         self._stop_loop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
         with self._lock:
             if self._mode in ("running", "paused"):
                 self._finish_run()
@@ -182,6 +192,7 @@ class Controller:
                 self._persist_cooldown()
             self._set_heaters([False] * SLOT_COUNT, release_off_dwell=True)
             self._flush_heater_life()
+        self._close_display()
 
     def tick(self, dt: float) -> None:
         """Advance the simulation and the run clock by ``dt`` seconds."""
@@ -236,7 +247,9 @@ class Controller:
                 )
             self.store.save_settings(updated)
             self._apply_idle_outputs(updated)
-            return self.store.get_settings().to_dict()
+            saved = self.store.get_settings().to_dict()
+        self._refresh_display()
+        return saved
 
     def replace_heater(self, slot: int) -> dict:
         """Zero one element's hour meter after it has been replaced."""
@@ -272,7 +285,40 @@ class Controller:
             self._set_heaters(self._heaters)
             self.store.reset()
             self._live_temps = self.source.read_temperatures(SLOT_COUNT)
-            return self.store.get_settings().to_dict()
+            saved = self.store.get_settings().to_dict()
+        self._refresh_display()
+        return saved
+
+    def update_status(self) -> dict:
+        return update_report(self.store.path.parent)
+
+    def start_update(self) -> dict:
+        """Hand the install to the root oneshot. The database is already saved."""
+
+        current = self.update_status()
+        if not current["apply_supported"]:
+            raise ControllerError("This machine cannot install a Brewski update.", 400)
+        if not current["available"]:
+            if not current["reachable"]:
+                raise ControllerError("GitHub could not be reached.", 502)
+            raise ControllerError("No update is available.", 409)
+        directory = self.store.path.parent
+        write_status(
+            phase="downloading",
+            current=current["current"],
+            latest=current["latest"] or "",
+            error=None,
+            directory=directory,
+        )
+        self._hold_display = True
+        self._close_display()
+        try:
+            start_apply_service()
+        except (OSError, subprocess.CalledProcessError) as exc:
+            self._hold_display = False
+            self._refresh_display()
+            raise ControllerError("Could not start the updater.", 500) from exc
+        return self.update_status()
 
     def start(self, patch: dict | None = None) -> dict:
         with self._lock:
@@ -368,6 +414,58 @@ class Controller:
             self._finish_run()
             return self._status()
 
+    def _refresh_display(self) -> None:
+        if self._hold_display:
+            phase = read_status(self.store.path.parent).get("phase")
+            if phase != "failed":
+                return
+            self._hold_display = False
+        with self._lock:
+            settings = self.store.get_settings()
+            key = display_key(settings)
+            lines = self._panel_lines(settings) if key is not None else None
+        if key != self._display_key:
+            self._display.clear()
+            self._display.close()
+            if self._hold_display:
+                self._display = NullDisplay()
+                self._display_key = None
+                return
+            self._display = open_display(settings) if key is not None else NullDisplay()
+            self._display_key = key
+        if self._hold_display or lines is None:
+            return
+        self._display.write(lines)
+
+    def _close_display(self) -> None:
+        self._display.clear()
+        self._display.close()
+        self._display = NullDisplay()
+        self._display_key = None
+
+    def _panel_lines(self, settings: Settings) -> list[str]:
+        control = self._current_control(settings)
+        if control is None:
+            probe_name = ""
+            temp_f = None
+        else:
+            index, temp_f = control
+            probe_name = settings.sensors[index].name
+        heaters = [
+            (index, bool(self._heaters[index]))
+            for index, channel in enumerate(settings.heaters)
+            if channel.enabled and index < len(self._heaters)
+        ]
+        elapsed = self._cooldown_elapsed if self._mode == "cooling" else self._elapsed
+        return status_lines(
+            mode=self._mode,
+            elapsed_seconds=elapsed,
+            probe_name=probe_name,
+            temp_f=temp_f,
+            target_f=settings.target_temp_f,
+            heaters=heaters,
+        )
+
     def _loop(self) -> None:
         last = time.monotonic()
         while not self._stop_loop.is_set():
@@ -378,6 +476,10 @@ class Controller:
                 self.tick(dt)
             except Exception:
                 logger.exception("Controller tick failed")
+            try:
+                self._refresh_display()
+            except Exception:
+                logger.exception("LCD refresh failed")
             self._stop_loop.wait(1.0)
 
     def _tick(self, dt: float) -> None:

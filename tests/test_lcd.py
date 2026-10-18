@@ -5,6 +5,7 @@ from pathlib import Path
 from brewski.controller import Controller
 from brewski.lcd import (
     COLUMNS,
+    HardwareDisplay,
     NullDisplay,
     display_key,
     frame,
@@ -248,6 +249,27 @@ def test_lgpio_is_imported_from_a_writable_directory(tmp_path, monkeypatch):
     assert lcd._ensure_lgpio() is True
     assert Path(seen["cwd"]) == tmp_path
     assert os.getcwd() == before
+
+
+def test_a_target_change_rewrites_only_that_row():
+    class _Lcd:
+        def __init__(self) -> None:
+            self.cursor_pos = (0, 0)
+            self.writes: list[tuple[tuple[int, int], str]] = []
+
+        def write_string(self, text: str) -> None:
+            self.writes.append((self.cursor_pos, text))
+
+    lcd = _Lcd()
+    display = HardwareDisplay(lcd)
+    first = ["Idle", "Target 165 F", "Boiler 76 F", "Heaters off"]
+    second = ["Idle", "Target 170 F", "Boiler 76 F", "Heaters off"]
+    display.write(first)
+    lcd.writes.clear()
+    display.write(second)
+    assert len(lcd.writes) == 1
+    assert lcd.writes[0][0] == (1, 0)
+    assert "170 F" in lcd.writes[0][1]
 
 
 def test_a_broken_lgpio_import_does_not_stop_startup(tmp_path, monkeypatch):

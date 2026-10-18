@@ -45,6 +45,16 @@ def test_panel_leds_follow_the_action():
     assert indicator_leds("running", emergency=True) == (False, False)
 
 
+def test_encoder_step_shows_on_the_display_before_it_is_saved(controller, store):
+    controller._panel = _Panel((0, 0, 5))
+    assert controller._apply_panel() is True
+    assert store.get_settings().target_temp_f == 165
+    assert "170 F" in controller._display.lines[1]
+    assert controller.status()["target_temp_f"] == 170
+    controller._flush_dial_target()
+    assert store.get_settings().target_temp_f == 170
+
+
 def test_encoder_step_saves_the_target(controller, store):
     controller._panel = _Panel((0, 0, 1))
     controller.tick(0)

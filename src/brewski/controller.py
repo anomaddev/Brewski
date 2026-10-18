@@ -145,6 +145,11 @@ class Controller:
         self._panel: object | None = None
         self._panel_key: tuple[int, ...] | None = None
         self._hold_display = False
+        # The dial paints this immediately. It is written to the database
+        # once the knob has been still, so the screen is not waiting on disk.
+        self._dial_target: int | None = None
+        self._dial_dirty = False
+        self._dial_moved_at = 0.0
         self._emergency: list[str] = []
         self._cabinet_temp: float | None = None
         self._cabinet_humidity: float | None = None
@@ -217,6 +222,7 @@ class Controller:
         """Advance the simulation and the run clock by ``dt`` seconds."""
 
         self._apply_panel()
+        self._flush_dial_target()
         remaining = min(max(0.0, float(dt)), MAX_TICK_SECONDS)
         with self._lock:
             while remaining > 0:
@@ -255,6 +261,7 @@ class Controller:
 
     def update_settings(self, patch: dict) -> dict:
         with self._lock:
+            self._write_pending_target()
             current = self.store.get_settings()
             try:
                 updated = merge_settings(current, patch)
@@ -266,6 +273,8 @@ class Controller:
                     409,
                 )
             self.store.save_settings(updated)
+            self._dial_target = None
+            self._dial_dirty = False
             self._apply_idle_outputs(updated)
             saved = self.store.get_settings().to_dict()
         self._refresh_display()
@@ -304,6 +313,8 @@ class Controller:
                 reset_source()
             self._set_heaters(self._heaters)
             self.store.reset()
+            self._dial_target = None
+            self._dial_dirty = False
             self._live_temps = self.source.read_temperatures(SLOT_COUNT)
             saved = self.store.get_settings().to_dict()
         self._refresh_display()
@@ -365,6 +376,7 @@ class Controller:
                     gallons = charge_gallons(patch["charge_gallons"])
                 except SettingsError as exc:
                     raise ControllerError(str(exc), 400) from exc
+            self._write_pending_target()
             if "target_temp_f" in patch:
                 try:
                     updated = merge_settings(
@@ -374,6 +386,8 @@ class Controller:
                 except SettingsError as exc:
                     raise ControllerError(str(exc), 400) from exc
                 self.store.save_settings(updated)
+                self._dial_target = None
+                self._dial_dirty = False
             settings = self.store.get_settings()
             if kind == "calibration" and gallons is None:
                 gallons = settings.charge_gallons
@@ -496,7 +510,7 @@ class Controller:
         return status_lines(
             mode=self._mode,
             elapsed_seconds=elapsed,
-            target_f=settings.target_temp_f,
+            target_f=self._target_value(settings),
             probes=probes,
             heaters=heaters,
             calibrating=self._run_kind == "calibration" and self._mode in ("running", "paused"),
@@ -515,6 +529,16 @@ class Controller:
             dt = now - last
             last = now
             since_control += dt
+            try:
+                moved = self._apply_panel()
+            except Exception:
+                logger.exception("Panel update failed")
+                moved = False
+            if self._dial_dirty and now - self._dial_moved_at >= 0.15:
+                try:
+                    self._flush_dial_target()
+                except Exception:
+                    logger.exception("Could not save the target")
             if since_control >= 1.0:
                 try:
                     self.tick(since_control)
@@ -525,14 +549,10 @@ class Controller:
                     self._refresh_display()
                 except Exception:
                     logger.exception("LCD refresh failed")
-            else:
-                # The dial is read between sensor passes so the target on the
-                # LCD keeps up with the knob instead of jumping once a second.
-                try:
-                    self._apply_panel()
-                except Exception:
-                    logger.exception("Panel update failed")
-            self._stop_loop.wait(0.05)
+            # While the knob is moving, paint the next target immediately.
+            # Sleeping here is what left the number trailing the dial.
+            if not moved:
+                self._stop_loop.wait(0.02)
 
     def _tick(self, dt: float) -> None:
         settings = self.store.get_settings()
@@ -1028,7 +1048,7 @@ class Controller:
                 self._cooldown_elapsed if self._mode == "cooling" else self._elapsed,
                 1,
             ),
-            "target_temp_f": settings.target_temp_f,
+            "target_temp_f": self._target_value(settings),
             "early_cutoff_f": settings.early_cutoff_f,
             "learned_coast_f": settings.learned_coast_f,
             "learned_coast_seconds": settings.learned_coast_seconds,
@@ -1072,17 +1092,47 @@ class Controller:
             return None
         return index, float(value)
 
-    def nudge_target(self, steps: int) -> None:
-        """Move the saved target by whole degrees. Steps past the dial ends are ignored."""
+    def nudge_target(self, steps: int) -> bool:
+        """Move the target by whole degrees and paint it before saving.
+
+        The database write happens once the knob stops. Steps past the dial
+        ends are ignored. Returns whether the shown target changed.
+        """
 
         steps = int(steps)
         if steps == 0:
+            return False
+        with self._lock:
+            current = self._target_value(self.store.get_settings())
+            target = min(int(TARGET_MAX_F), max(int(TARGET_MIN_F), int(current) + steps))
+            if target == int(current):
+                return False
+            self._dial_target = target
+            self._dial_dirty = True
+            self._dial_moved_at = time.monotonic()
+        self._refresh_display()
+        return True
+
+    def _target_value(self, settings: Settings) -> int:
+        if self._dial_target is not None:
+            return self._dial_target
+        return int(settings.target_temp_f)
+
+    def _write_pending_target(self) -> None:
+        """Caller holds ``self._lock``. Store a dial change that is only on screen."""
+
+        if not self._dial_dirty or self._dial_target is None:
             return
-        current = int(self.store.get_settings().target_temp_f)
-        target = min(int(TARGET_MAX_F), max(int(TARGET_MIN_F), current + steps))
-        if target == current:
-            return
-        self.update_settings({"target_temp_f": target})
+        current = self.store.get_settings()
+        if int(current.target_temp_f) != self._dial_target:
+            updated = merge_settings(current, {"target_temp_f": self._dial_target})
+            self.store.save_settings(updated)
+        self._dial_dirty = False
+        self._dial_target = None
+
+    def _flush_dial_target(self) -> None:
+        with self._lock:
+            self._write_pending_target()
 
     def _sample_temps(self) -> list[float | None]:
         return [
@@ -1132,28 +1182,29 @@ class Controller:
             codes.append("E03")
         return codes
 
-    def _apply_panel(self) -> None:
+    def _apply_panel(self) -> bool:
         panel = self._panel
         if panel is None:
-            return
+            return False
         starts, stops, steps = panel.take()  # type: ignore[attr-defined]
+        moved = False
         if steps:
             try:
-                self.nudge_target(steps)
+                moved = self.nudge_target(steps)
             except ControllerError:
                 logger.debug("Target dial ignored", exc_info=True)
         if stops:
             try:
                 self.stop()
             except ControllerError:
-                return
-            return
+                return moved
+            return moved
         if not starts:
-            return
+            return moved
         try:
             snapshot = self.status()
             if snapshot["emergency_codes"]:
-                return
+                return moved
             if snapshot["mode"] == "paused":
                 self.resume()
             elif snapshot["mode"] in ("idle", "cooling"):
@@ -1162,7 +1213,8 @@ class Controller:
                 else:
                     self.start()
         except ControllerError:
-            return
+            return moved
+        return moved
 
     def _sync_panel(self) -> None:
         settings = self.store.get_settings()

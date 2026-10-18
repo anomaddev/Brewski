@@ -87,9 +87,14 @@ class HardwareDisplay:
         if self._closed:
             return
         framed = frame(lines)
-        if framed == self._last:
+        previous = self._last
+        if framed == previous:
             return
+        # A target change used to repaint all four rows. The I2C backpack
+        # is slow enough that the number then fell behind the dial.
         for row, line in enumerate(framed):
+            if previous is not None and previous[row] == line:
+                continue
             self._lcd.cursor_pos = (row, 0)  # type: ignore[attr-defined]
             self._lcd.write_string(f"{line:<{COLUMNS}}")  # type: ignore[attr-defined]
         self._last = framed

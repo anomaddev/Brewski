@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "brewski"
+dynamic = ["version"]
+description = "Local web controller for a small still"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "flask>=3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+brewski = "brewski.cli:main"
+
+[tool.hatch.version]
+path = "src/brewski/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/brewski"]
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/web",
+    "/tests",
+    "/deploy",
+    "/README.md",
+    "/pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "fresh: controller has no saved calibration",
+]

@@ -1,12 +1,13 @@
 [Unit]
-Description=Update Brewski to the latest GitHub release
+Description=Ask before updating Brewski
 After=network-online.target
 Wants=network-online.target
 Before=brewski.service
 
 [Service]
 Type=oneshot
-ExecStart=/opt/brewski/install.sh --boot-update
+Environment=BREWSKI_DATA_DIR=/var/lib/brewski
+ExecStart=/opt/brewski/venv/bin/brewski boot-update
 TimeoutStartSec=900
 RemainAfterExit=yes
 

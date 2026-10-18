@@ -78,6 +78,7 @@ function openSetup(host, settings) {
   const form = host.querySelector('#setup-form')
   const errorEl = host.querySelector('#setup-error')
   let step = 0
+  let left = false
 
   const syncDevices = () => {
     for (const kind of ['heater', 'sensor']) {
@@ -157,16 +158,100 @@ function openSetup(host, settings) {
         gpio: readGpio(form),
         setup_complete: true,
       })
-      close()
-      window.dispatchEvent(new Event('brewski-refresh'))
-      if (window.location.pathname !== '/') openPath('/')
     } catch (error) {
       showError(error.message)
       next.disabled = false
+      return
     }
+    let update = null
+    try {
+      update = await api.updateStatus()
+    } catch {
+      update = null
+    }
+    if (!update?.available) {
+      finishSetup()
+      return
+    }
+    showUpdateOffer(update)
   })
 
   showStep(0)
+
+  function finishSetup({ reload = false } = {}) {
+    close()
+    if (reload) {
+      window.location.assign('/')
+      return
+    }
+    window.dispatchEvent(new Event('brewski-refresh'))
+    if (window.location.pathname !== '/') openPath('/')
+  }
+
+  function showUpdateOffer(update) {
+    const latest = stripVersion(update.latest)
+    const current = stripVersion(update.current)
+    const canApply = update.apply_supported === true
+    host.innerHTML = `
+      <div class="setup-overlay" role="dialog" aria-modal="true" aria-labelledby="update-title">
+        <div class="setup-card">
+          <p class="eyebrow">Get started</p>
+          <h1 id="update-title">Update available</h1>
+          <p class="setup-lead">Setup is saved. Version ${escapeHtml(latest)} is available. This still is running ${escapeHtml(current)}.</p>
+          <p class="setup-progress" id="update-phase">${canApply ? '' : 'This session cannot install a release. Update from the Pi.'}</p>
+          <p class="form-error" id="update-error" hidden></p>
+          <div class="setup-actions">
+            <button class="setup-back" type="button" id="update-skip">Not now</button>
+            <button class="action-btn start-btn" type="button" id="update-apply" ${canApply ? '' : 'disabled'}>Update</button>
+          </div>
+        </div>
+      </div>
+    `
+    const phaseEl = host.querySelector('#update-phase')
+    const errorEl = host.querySelector('#update-error')
+    const apply = host.querySelector('#update-apply')
+    host.querySelector('#update-skip').addEventListener('click', () => finishSetup())
+    apply.addEventListener('click', async () => {
+      apply.disabled = true
+      host.querySelector('#update-skip').disabled = true
+      errorEl.hidden = true
+      try {
+        await api.applyUpdate()
+      } catch (error) {
+        errorEl.hidden = false
+        errorEl.textContent = error.message
+        apply.disabled = false
+        host.querySelector('#update-skip').disabled = false
+        return
+      }
+      await watchUpdate(latest, phaseEl, errorEl)
+    })
+  }
+
+  async function watchUpdate(latest, phaseEl, errorEl) {
+    while (!left) {
+      try {
+        const [update, status] = await Promise.all([api.updateStatus(), api.status()])
+        phaseEl.textContent = phaseText(update.phase)
+        if (update.phase === 'failed') {
+          errorEl.hidden = false
+          errorEl.textContent = update.error || 'The update did not finish. Setup is still saved.'
+          const skip = host.querySelector('#update-skip')
+          if (skip) skip.disabled = false
+          const apply = host.querySelector('#update-apply')
+          if (apply) apply.disabled = true
+          return
+        }
+        if (sameVersion(status.version, latest)) {
+          finishSetup({ reload: true })
+          return
+        }
+      } catch {
+        phaseEl.textContent = 'Reconnecting'
+      }
+      await delay(1000)
+    }
+  }
 
   function showError(message) {
     errorEl.hidden = false
@@ -177,10 +262,32 @@ function openSetup(host, settings) {
     errorEl.textContent = ''
   }
   function close() {
+    left = true
     host.innerHTML = ''
     document.body.classList.remove('setup-open')
   }
   return close
+}
+
+function stripVersion(value) {
+  return String(value || '').replace(/^v/i, '')
+}
+
+function sameVersion(running, latest) {
+  return latest && stripVersion(running) === stripVersion(latest)
+}
+
+function phaseText(phase) {
+  if (phase === 'downloading') return 'Downloading'
+  if (phase === 'building') return 'Building the dashboard'
+  if (phase === 'installing') return 'Installing'
+  if (phase === 'complete') return 'Starting'
+  if (phase === 'failed') return 'Update failed'
+  return 'Starting the update'
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function titleFor(step) {

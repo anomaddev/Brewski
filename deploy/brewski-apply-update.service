@@ -1,0 +1,10 @@
+[Unit]
+Description=Install the Brewski release the user accepted
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=BREWSKI_DATA_DIR=/var/lib/brewski
+ExecStart=/opt/brewski/venv/bin/brewski apply-update
+TimeoutStartSec=900

@@ -5,6 +5,7 @@ from brewski.api import create_app
 from brewski.controller import Controller
 from brewski.sources.dummy import DummySource
 from brewski.store import Store
+from brewski.updates import ReleaseInfo
 
 
 def test_status_starts_idle(client):
@@ -281,3 +282,53 @@ def test_built_ui_is_served_for_client_routes(tmp_path, monkeypatch, controller)
     assert b"Brewski" in client.get("/history/4").data
     assert b"console.log" in client.get("/assets/app.js").data
     assert b"nope" not in client.get("/../secret.txt").data
+
+
+def test_update_status_reports_a_newer_release(client, monkeypatch):
+    monkeypatch.setattr("brewski.updates.apply_supported", lambda: False)
+    monkeypatch.setattr(
+        "brewski.updates.check_release",
+        lambda **_kwargs: ReleaseInfo(
+            current="0.2.0",
+            latest="v0.3.0",
+            available=True,
+            reachable=True,
+        ),
+    )
+    body = client.get("/api/update").get_json()
+    assert body["available"] is True
+    assert body["latest"] == "v0.3.0"
+    assert body["current"] == "0.2.0"
+    assert body["apply_supported"] is False
+    assert body["phase"] == "idle"
+
+
+def test_apply_is_refused_when_this_machine_cannot_install(client, monkeypatch):
+    monkeypatch.setattr("brewski.updates.apply_supported", lambda: False)
+    monkeypatch.setattr(
+        "brewski.updates.check_release",
+        lambda **_kwargs: ReleaseInfo(
+            current="0.2.0",
+            latest="v0.3.0",
+            available=True,
+            reachable=True,
+        ),
+    )
+    refused = client.post("/api/update")
+    assert refused.status_code == 400
+    assert "cannot install" in refused.get_json()["error"]
+
+
+def test_apply_is_refused_when_nothing_is_newer(client, monkeypatch):
+    monkeypatch.setattr("brewski.updates.apply_supported", lambda: True)
+    monkeypatch.setattr(
+        "brewski.updates.check_release",
+        lambda **_kwargs: ReleaseInfo(
+            current="0.2.0",
+            latest="v0.2.0",
+            available=False,
+            reachable=True,
+        ),
+    )
+    refused = client.post("/api/update")
+    assert refused.status_code == 409

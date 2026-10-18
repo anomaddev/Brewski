@@ -14,9 +14,12 @@ DATA_DIR=/var/lib/brewski
 VENV="${INSTALL_ROOT}/venv"
 UNIT_PATH=/etc/systemd/system/brewski.service
 UPDATE_UNIT_PATH=/etc/systemd/system/brewski-update.service
+APPLY_UNIT_PATH=/etc/systemd/system/brewski-apply-update.service
 REVISION_PATH="${INSTALL_ROOT}/revision"
 PORT=8080
 BOOT_UPDATE=0
+APPLY=0
+SERVICE_OWNER=""
 
 # Empty when this script is piped into bash (curl | bash). A path when it is a file.
 SCRIPT_PATH=""
@@ -136,6 +139,9 @@ save_revision() {
 # a missing release or a failed download should keep the installed version.
 fetch_release() {
   local soft=$1
+  if [[ "$APPLY" == "1" ]]; then
+    write_phase downloading
+  fi
   local rc=0 tag="" installed="" dest tarball url status repo
   ensure_curl
   tag=$(latest_release) || rc=$?
@@ -219,11 +225,79 @@ install_packages() {
   command -v apt-get >/dev/null 2>&1 || die "apt-get was not found. This script installs Brewski on Raspberry Pi OS."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update < /dev/null
-  apt-get install -y python3 python3-venv python3-pip nodejs npm ca-certificates < /dev/null
+  apt-get install -y python3 python3-venv python3-pip nodejs npm ca-certificates i2c-tools < /dev/null
+}
+
+enable_i2c() {
+  if command -v raspi-config >/dev/null 2>&1; then
+    raspi-config nonint do_i2c 0 || true
+  fi
+}
+
+add_device_groups() {
+  local user=$1
+  local group
+  for group in i2c gpio; do
+    if getent group "$group" >/dev/null 2>&1; then
+      usermod -aG "$group" "$user" || true
+    fi
+  done
+}
+
+write_sudoers() {
+  local user=$1
+  local systemctl
+  systemctl=$(command -v systemctl)
+  [[ -n "$systemctl" ]] || die "systemctl was not found."
+  cat > /etc/sudoers.d/brewski <<EOF
+${user} ALL=(root) NOPASSWD: ${systemctl} start --no-block brewski-apply-update.service
+EOF
+  chmod 440 /etc/sudoers.d/brewski
+  visudo -cf /etc/sudoers.d/brewski >/dev/null
+}
+
+write_phase() {
+  local phase=$1
+  local error=${2:-}
+  local file=${BREWSKI_STATUS_FILE:-${DATA_DIR}/update-status.json}
+  PHASE="$phase" ERROR="$error" FILE="$file" OWNER="$SERVICE_OWNER" python3 - <<'PY' || true
+import json, os
+path = os.environ["FILE"]
+parent = os.path.dirname(path)
+if parent:
+    os.makedirs(parent, exist_ok=True)
+doc = {}
+if os.path.exists(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if isinstance(loaded, dict):
+            doc = loaded
+    except Exception:
+        doc = {}
+doc["phase"] = os.environ["PHASE"]
+doc["error"] = os.environ["ERROR"] or None
+temporary = path + ".tmp"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(doc, handle)
+os.replace(temporary, path)
+os.chmod(path, 0o644)
+owner = os.environ.get("OWNER") or ""
+if ":" in owner:
+    import shutil
+    user, group = owner.split(":", 1)
+    try:
+        shutil.chown(path, user, group)
+    except Exception:
+        pass
+PY
 }
 
 build_dashboard() {
   local root=$1
+  if [[ "$APPLY" == "1" ]]; then
+    write_phase building
+  fi
   [[ -f "$root/web/package-lock.json" ]] || die "web/package-lock.json is missing."
   command -v node >/dev/null 2>&1 || die "Node.js did not install a node command."
   local node_version
@@ -238,6 +312,9 @@ install_python() {
   local root=$1
   local user=$2
   local group=$3
+  if [[ "$APPLY" == "1" ]]; then
+    write_phase installing
+  fi
   local py_version
   py_version=$(python3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')
   require_version "Python" "$py_version" 3 10
@@ -249,7 +326,7 @@ install_python() {
   "$VENV/bin/python" -m pip install --upgrade pip
   # Force a reinstall so a repeat run picks up code even when the version
   # number in pyproject.toml has not changed.
-  "$VENV/bin/python" -m pip install --upgrade --force-reinstall "$root"
+  "$VENV/bin/python" -m pip install --upgrade --force-reinstall "${root}[pi]"
   chown -R "${user}:${group}" "$VENV" "$DATA_DIR"
   [[ -x "$VENV/bin/brewski" ]] || die "pip install did not create ${VENV}/bin/brewski."
 }
@@ -261,6 +338,7 @@ install_service() {
   local line
   [[ -f "$root/deploy/brewski.service" ]] || die "deploy/brewski.service is missing."
   [[ -f "$root/deploy/brewski-update.service" ]] || die "deploy/brewski-update.service is missing."
+  [[ -f "$root/deploy/brewski-apply-update.service" ]] || die "deploy/brewski-apply-update.service is missing."
   command -v systemctl >/dev/null 2>&1 || die "systemd is required so Brewski can start on boot."
 
   : >"$UNIT_PATH"
@@ -272,11 +350,13 @@ install_service() {
     printf '%s\n' "$line" >>"$UNIT_PATH"
   done <"$root/deploy/brewski.service"
   cp "$root/deploy/brewski-update.service" "$UPDATE_UNIT_PATH"
+  cp "$root/deploy/brewski-apply-update.service" "$APPLY_UNIT_PATH"
   install -m 755 "$root/deploy/install.sh" "${INSTALL_ROOT}/install.sh"
+  write_sudoers "$user"
 
   systemctl daemon-reload
   systemctl enable brewski brewski-update
-  if [[ "$BOOT_UPDATE" == "1" ]]; then
+  if [[ "$BOOT_UPDATE" == "1" || "$APPLY" == "1" ]]; then
     return
   fi
   systemctl restart brewski
@@ -300,39 +380,54 @@ lan_address() {
 main() {
   local user group repo_root
   if [[ "${1:-}" == "--boot-update" ]]; then
+    if [[ -x "${VENV}/bin/brewski" ]]; then
+      export BREWSKI_DATA_DIR="${BREWSKI_DATA_DIR:-$DATA_DIR}"
+      exec "${VENV}/bin/brewski" boot-update
+    fi
     BOOT_UPDATE=1
+  elif [[ "${1:-}" == "--apply" ]]; then
+    APPLY=1
   fi
   trap '[[ -n "${BREWSKI_SRC_TMP:-}" ]] && rm -rf "$BREWSKI_SRC_TMP"' EXIT
 
   user=$(service_user)
   id "$user" >/dev/null 2>&1 || die "account ${user} does not exist."
   group=$(id -gn "$user")
+  SERVICE_OWNER="${user}:${group}"
 
   if ! repo_root=$(checkout_root); then
     fetch_release "$BOOT_UPDATE"
     repo_root=$FETCHED_ROOT
   fi
 
-  if [[ "$BOOT_UPDATE" == "1" ]]; then
+  if [[ "$APPLY" == "1" || "$BOOT_UPDATE" == "1" ]]; then
     echo "Updating Brewski for ${user}:${group}"
   else
     echo "Installing Brewski for ${user}:${group}"
   fi
   echo "Source: ${repo_root}"
-  if [[ "$BOOT_UPDATE" != "1" ]] || ! command -v python3 >/dev/null || ! command -v node >/dev/null || ! command -v npm >/dev/null; then
+  if [[ "$APPLY" != "1" && "$BOOT_UPDATE" != "1" ]] || ! command -v python3 >/dev/null || ! command -v node >/dev/null || ! command -v npm >/dev/null; then
     install_packages
   fi
+  enable_i2c
+  add_device_groups "$user"
   build_dashboard "$repo_root"
   install_python "$repo_root" "$user" "$group"
   install_service "$repo_root" "$user" "$group"
   save_revision "$repo_root"
 
+  if [[ "$APPLY" == "1" ]]; then
+    write_phase complete
+    echo "Brewski is updated."
+    return
+  fi
   if [[ "$BOOT_UPDATE" == "1" ]]; then
     echo "Brewski is updated and will start next."
     return
   fi
   echo "Brewski is installed and will start on every reboot."
-  echo "Each boot installs a newer GitHub release. Commits stay off the Pi until they are published."
+  echo "A fresh boot does not look for an update until setup has saved the I2C pins."
+  echo "After that, each boot asks on the LCD before installing a newer GitHub release."
   echo "Open http://$(lan_address):${PORT}"
   echo "Database: ${DATA_DIR}/brewski.db"
 }

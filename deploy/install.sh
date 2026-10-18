@@ -3,12 +3,12 @@
 #
 # From a checkout: sudo ./deploy/install.sh
 # Without git, from the Pi:
-#   curl -fsSL https://raw.githubusercontent.com/anomaddev/Brewski/redev/deploy/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/anomaddev/Brewski/main/deploy/install.sh | sudo bash
 
 set -euo pipefail
 
 GITHUB_REPO=anomaddev/Brewski
-DEFAULT_REF=redev
+GITHUB_REF=main
 INSTALL_ROOT=/opt/brewski
 DATA_DIR=/var/lib/brewski
 VENV="${INSTALL_ROOT}/venv"
@@ -30,11 +30,10 @@ if [[ "$(id -u)" -ne 0 ]]; then
   if [[ -n "$SCRIPT_PATH" ]]; then
     exec sudo \
       "BREWSKI_USER=${BREWSKI_USER:-}" \
-      "BREWSKI_REF=${BREWSKI_REF:-}" \
       "$SCRIPT_PATH" "$@"
   fi
   echo "brewski: run this installer as root. Example:" >&2
-  echo "  curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPO}/${DEFAULT_REF}/deploy/install.sh | sudo bash" >&2
+  echo "  curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_REF}/deploy/install.sh | sudo bash" >&2
   exit 1
 fi
 
@@ -90,19 +89,16 @@ ensure_curl() {
   apt-get install -y ca-certificates curl < /dev/null
 }
 
-# Download the branch named by BREWSKI_REF (default redev) and replace this
-# process with the install.sh inside that archive. Does not return.
+# Download main and replace this process with the install.sh inside that archive.
+# Does not return.
 download_and_reexec() {
-  local ref dest tarball url status repo
-  ref=${BREWSKI_REF:-$DEFAULT_REF}
-  [[ "$ref" =~ ^[A-Za-z0-9._/-]+$ && "$ref" != *..* && "$ref" != /* && "$ref" != */ ]] \
-    || die "BREWSKI_REF must be a branch name."
+  local dest tarball url status repo
 
   ensure_curl
   dest=$(mktemp -d /tmp/brewski-src.XXXXXX)
   tarball=$dest/brewski.tar.gz
-  url="https://api.github.com/repos/${GITHUB_REPO}/tarball/${ref}"
-  echo "Downloading ${GITHUB_REPO} (${ref})..."
+  url="https://api.github.com/repos/${GITHUB_REPO}/tarball/${GITHUB_REF}"
+  echo "Downloading ${GITHUB_REPO} (${GITHUB_REF})..."
 
   status=$(
     curl -sS -L -o "$tarball" -w "%{http_code}" \
@@ -112,7 +108,7 @@ download_and_reexec() {
   )
   if [[ "$status" != "200" ]]; then
     rm -rf "$dest"
-    die "could not download ${GITHUB_REPO} at ${ref} (HTTP ${status}). Check BREWSKI_REF."
+    die "could not download ${GITHUB_REPO} (${GITHUB_REF}) (HTTP ${status})."
   fi
 
   tar -xzf "$tarball" -C "$dest" || {
@@ -130,7 +126,7 @@ download_and_reexec() {
   repo=${dirs[0]%/}
   if [[ ! -f "$repo/deploy/install.sh" || ! -f "$repo/pyproject.toml" ]]; then
     rm -rf "$dest"
-    die "the ${ref} branch has no deploy/install.sh. Push this installer to that branch, or set BREWSKI_REF."
+    die "main has no deploy/install.sh."
   fi
 
   export BREWSKI_SRC_TMP=$dest

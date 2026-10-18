@@ -55,35 +55,21 @@ Run the tests with `pytest`.
 
 ## Install on a Raspberry Pi
 
-Build the dashboard on a machine that has Node, then install the Python program. The Pi does not need Node just to run Brewski.
-
-On the build machine, from the repo:
+Copy this repo onto the Pi, then from that checkout:
 
 ```bash
-npm install --prefix web
-npm run build --prefix web
+sudo ./deploy/install.sh
 ```
 
-That writes `web/dist`. Copy the repo to the Pi (or build there if Node is installed) and install it into a virtualenv:
+That command installs Python and Node, builds the dashboard, installs Brewski into `/opt/brewski/venv`, and enables a systemd service so the controller starts on every reboot. The service listens on port 8080. The database is `/var/lib/brewski/brewski.db`. Open `http://<pi-address>:8080`.
+
+The service runs as the account that invoked `sudo`, or as `pi` when that account exists and sudo did not record a user. Set `BREWSKI_USER` to choose a different account:
 
 ```bash
-sudo mkdir -p /opt/brewski /var/lib/brewski
-sudo chown pi:pi /opt/brewski /var/lib/brewski
-python3 -m venv /opt/brewski/venv
-/opt/brewski/venv/bin/pip install /path/to/Brewski
+sudo BREWSKI_USER=still ./deploy/install.sh
 ```
 
-`pip install` packages the built dashboard into Brewski, so `brewski` serves both the API and the UI. The service listens on port 8080.
-
-```bash
-sudo cp deploy/brewski.service /etc/systemd/system/brewski.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now brewski
-```
-
-Edit `User=` and `Group=` in the unit if the Pi account is not `pi`. The database is `/var/lib/brewski/brewski.db`. Open `http://<pi-address>:8080`.
-
-If `web/dist` was missing at install time, the API still runs and the UI routes explain how to build it. Dev mode (`brewski dev`) does not need that build.
+Running the script again upgrades Brewski and restarts the service. It does not delete the database. Dev mode (`brewski dev`) does not need this install.
 
 ## What is stored
 
@@ -105,7 +91,7 @@ Time each heater spent on during a run is estimated from that log and shown on t
 src/brewski/          Python controller, API, and CLI
 src/brewski/sources/  Hardware contract and the dummy still
 web/                  Vite dashboard (plain JavaScript, no TypeScript)
-deploy/brewski.service
+deploy/               Pi install script and systemd unit
 tests/
 ```
 

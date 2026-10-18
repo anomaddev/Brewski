@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS settings (
     cabinet_limit_f REAL NOT NULL DEFAULT 170,
     learned_coast_f REAL,
     learned_coast_seconds REAL,
+    learned_cooldown_f_per_min REAL,
     charge_gallons REAL,
     heaters TEXT,
     sensors TEXT,
@@ -91,6 +92,7 @@ CREATE TABLE IF NOT EXISTS runs (
     charge_gallons REAL,
     coast_f REAL,
     coast_seconds REAL,
+    cooldown_f_per_min REAL,
     calibration_settled INTEGER NOT NULL DEFAULT 0,
     cooldown_status TEXT,
     cooldown_seconds REAL,
@@ -249,6 +251,7 @@ class Settings:
     cabinet_limit_f: int = CABINET_LIMIT_DEFAULT_F
     learned_coast_f: float | None = None
     learned_coast_seconds: float | None = None
+    learned_cooldown_f_per_min: float | None = None
     charge_gallons: float | None = None
     setup_complete: bool = False
     gpio: GpioConfig | None = None
@@ -286,6 +289,7 @@ class Settings:
             "cabinet_limit_f": self.cabinet_limit_f,
             "learned_coast_f": self.learned_coast_f,
             "learned_coast_seconds": self.learned_coast_seconds,
+            "learned_cooldown_f_per_min": self.learned_cooldown_f_per_min,
             "charge_gallons": self.charge_gallons,
             "setup_complete": self.setup_complete,
             "gpio": (self.gpio or default_gpio()).to_dict(),
@@ -333,6 +337,7 @@ def merge_settings(current: Settings, patch: dict) -> Settings:
         "cabinet_limit_f",
         "learned_coast_f",
         "learned_coast_seconds",
+        "learned_cooldown_f_per_min",
         "charge_gallons",
         "setup_complete",
         "gpio",
@@ -371,6 +376,12 @@ def parse_settings(data: dict) -> Settings:
         ),
         learned_coast_seconds=_optional_setting(
             data.get("learned_coast_seconds"), "learned_coast_seconds", 0.0, 3600.0
+        ),
+        learned_cooldown_f_per_min=_optional_setting(
+            data.get("learned_cooldown_f_per_min"),
+            "learned_cooldown_f_per_min",
+            0.0,
+            120.0,
         ),
         charge_gallons=_optional_charge(data.get("charge_gallons")),
         setup_complete=_flag(data.get("setup_complete")),
@@ -479,7 +490,8 @@ class Store:
                 SET heater_count = ?, sensor_count = ?, heater_names = ?,
                     sensor_names = ?, target_temp_f = ?, heater_min_on_seconds = ?,
                     heater_min_off_seconds = ?, early_cutoff_f = ?, cabinet_limit_f = ?,
-                    learned_coast_f = ?, learned_coast_seconds = ?, charge_gallons = ?,
+                    learned_coast_f = ?, learned_coast_seconds = ?, learned_cooldown_f_per_min = ?,
+                    charge_gallons = ?,
                     heaters = ?, sensors = ?, setup_complete = ?, gpio = ?
                 WHERE id = 1
                 """,
@@ -534,6 +546,7 @@ class Store:
             "cooldown_ended_at",
             "coast_f",
             "coast_seconds",
+            "cooldown_f_per_min",
             "calibration_settled",
         )
         keys = [key for key in allowed if key in fields]
@@ -699,8 +712,8 @@ class Store:
                 id, heater_count, sensor_count, heater_names, sensor_names,
                 target_temp_f, heater_min_on_seconds, heater_min_off_seconds,
                 early_cutoff_f, cabinet_limit_f, learned_coast_f, learned_coast_seconds,
-                charge_gallons, heaters, sensors, setup_complete, gpio
-            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                learned_cooldown_f_per_min, charge_gallons, heaters, sensors, setup_complete, gpio
+            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             _settings_values(settings),
         )
@@ -755,6 +768,7 @@ def _run_dict(row: sqlite3.Row) -> dict:
         "charge_gallons": _optional_float(row, "charge_gallons"),
         "coast_f": _optional_float(row, "coast_f"),
         "coast_seconds": _optional_float(row, "coast_seconds"),
+        "cooldown_f_per_min": _optional_float(row, "cooldown_f_per_min"),
         "calibration_settled": bool(row["calibration_settled"])
         if "calibration_settled" in row.keys() and row["calibration_settled"]
         else False,
@@ -790,11 +804,13 @@ def _migrate(connection: sqlite3.Connection) -> None:
     _add_column(connection, "settings", "cabinet_limit_f", "REAL")
     _add_column(connection, "settings", "learned_coast_f", "REAL")
     _add_column(connection, "settings", "learned_coast_seconds", "REAL")
+    _add_column(connection, "settings", "learned_cooldown_f_per_min", "REAL")
     _add_column(connection, "settings", "charge_gallons", "REAL")
     _add_column(connection, "runs", "kind", "TEXT")
     _add_column(connection, "runs", "charge_gallons", "REAL")
     _add_column(connection, "runs", "coast_f", "REAL")
     _add_column(connection, "runs", "coast_seconds", "REAL")
+    _add_column(connection, "runs", "cooldown_f_per_min", "REAL")
     _add_column(connection, "runs", "calibration_settled", "INTEGER")
     if _table_exists(connection, "samples"):
         _add_column(connection, "samples", "phase")
@@ -891,6 +907,7 @@ def _settings_values(settings: Settings) -> tuple:
         settings.cabinet_limit_f,
         settings.learned_coast_f,
         settings.learned_coast_seconds,
+        settings.learned_cooldown_f_per_min,
         settings.charge_gallons,
         json.dumps([channel.to_dict() for channel in settings.heaters]),
         json.dumps([channel.to_dict() for channel in settings.sensors]),
@@ -921,6 +938,7 @@ def _settings_from_row(row: sqlite3.Row) -> Settings:
         cabinet_limit_f=_stored_cabinet_limit(row),
         learned_coast_f=_optional_float(row, "learned_coast_f"),
         learned_coast_seconds=_optional_float(row, "learned_coast_seconds"),
+        learned_cooldown_f_per_min=_optional_float(row, "learned_cooldown_f_per_min"),
         charge_gallons=_optional_float(row, "charge_gallons"),
         setup_complete=_stored_flag(row, "setup_complete"),
         gpio=gpio,

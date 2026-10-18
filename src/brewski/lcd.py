@@ -422,10 +422,15 @@ def status_lines(
     cabinet_temp_f: float | None = None,
     cabinet_limit_f: int = 170,
     cabinet_fault: bool = False,
+    calibration_step: str | None = None,
+    calibration_rise_f: float | None = None,
+    calibration_peak_f: float | None = None,
+    calibration_rate_f: float | None = None,
 ) -> list[str]:
     """Four 20-column lines. Labels sit on the left and values on the right."""
 
     heater_row = _heater_line(heaters)
+    probe_row = _probe_line(probes)
     if emergency_code in {"E01", "E02"}:
         cabinet = None if cabinet_fault or cabinet_temp_f is None else cabinet_temp_f
         return [
@@ -441,19 +446,72 @@ def status_lines(
             _probe_line(probes),
             heater_row,
         ]
+    clock = format_clock(elapsed_seconds)
+    if mode == "cooling" and calibration_peak_f is not None:
+        if calibration_rate_f is None:
+            result = _pair("Coast:", _signed_degrees(calibration_peak_f))
+        else:
+            result = _pair(_signed_degrees(calibration_peak_f), _degrees_per_min(calibration_rate_f))
+        return [_pair("Cooling:", clock), result, probe_row, heater_row]
+    if calibrating and mode == "paused":
+        return [
+            _pair("Paused:", clock),
+            _pair("Step:", _calibration_step_name(calibration_step)),
+            probe_row,
+            heater_row,
+        ]
+    if calibrating and mode == "running":
+        return [
+            *_calibration_head(calibration_step, clock, target_f, calibration_rise_f, calibration_peak_f, calibration_rate_f),
+            probe_row,
+            heater_row,
+        ]
     if needs_calibration and mode == "idle":
         head = _pair("Calibrate:", "START")
     elif mode in {"running", "paused", "cooling"}:
         label = _mode_label(mode, calibrating)
-        head = _pair(label, format_clock(elapsed_seconds))
+        head = _pair(label, clock)
     else:
         head = "Idle:"
     return [
         head,
         _value_line("Target:", _whole_temp(target_f)),
-        _probe_line(probes),
+        probe_row,
         heater_row,
     ]
+
+
+def _calibration_step_name(step: str | None) -> str:
+    return {"coasting": "Coasting", "falling": "Falling"}.get(step or "", "Heating")
+
+
+def _calibration_head(
+    step: str | None,
+    clock: str,
+    target_f: float,
+    rise_f: float | None,
+    peak_f: float | None,
+    rate_f: float | None,
+) -> list[str]:
+    if step == "coasting":
+        return [_pair("Coasting:", clock), _pair("Rise:", _signed_degrees(rise_f))]
+    if step == "falling":
+        if rate_f is None:
+            detail = _pair("Peak:", _signed_degrees(peak_f))
+        else:
+            detail = _pair("Rate:", _degrees_per_min(rate_f))
+        return [_pair("Falling:", clock), detail]
+    return [_pair("Heating:", clock), _value_line("Target:", _whole_temp(target_f))]
+
+
+def _signed_degrees(value: float | None) -> str:
+    if value is None:
+        return "—"
+    return f"{float(value):+.1f} F"
+
+
+def _degrees_per_min(value: float) -> str:
+    return f"{float(value):.1f} F/min"
 
 
 def _mode_label(mode: str, calibrating: bool) -> str:

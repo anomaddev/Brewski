@@ -62,11 +62,28 @@ COAST_SOAK_SECONDS = 30.0
 # far above the target, then lets that overshoot become the measurement.
 CALIBRATION_ABOVE_F = 1.0
 # After that soaked shutoff, the coast is the rise in a rolling average of the
-# control probe. The run ends once that average sits inside the drift band.
-COAST_AVERAGE_SECONDS = 5.0
-COAST_AVERAGE_HOLD_SECONDS = 4.0
-COAST_AVERAGE_DRIFT_F = 0.25
-# Reached the target when the settled average is at least this close to it.
+# control probe, measured at the crest. A slow climb is still climbing.
+COAST_AVERAGE_SECONDS = 10.0
+# The crest is real once the average has fallen this far below its high and
+# stayed there. The saved coast is the high itself, not this confirmation dip.
+COAST_PEAK_DROP_F = 0.4
+COAST_PEAK_CONFIRM_SECONDS = 10.0
+# A pot that levels off without a clear drop. The high must gain this much
+# to keep the watch open.
+COAST_PLATEAU_RISE_F = 0.2
+COAST_PLATEAU_SECONDS = 90.0
+COAST_WATCH_MAX_SECONDS = 20 * 60
+# After the crest, how fast the pot falls with the elements off.
+COOLDOWN_MIN_DROP_F = 1.0
+COOLDOWN_MIN_SECONDS = 45.0
+COOLDOWN_AGREE_SECONDS = 30.0
+COOLDOWN_RATE_AGREE_F = 0.2
+COOLDOWN_RATE_AGREE_FRACTION = 0.25
+COOLDOWN_WATCH_MAX_SECONDS = 4 * 60
+COOLDOWN_RATE_MAX = 120.0
+# A sustain pulse is sized so its guessed coast replaces about this much sag.
+SUSTAIN_RIPPLE_F = 1.0
+# Reached the target when the crest is at least this close to it.
 # Above the target counts: that overshoot is what the calibration records.
 CALIBRATION_LAND_F = 0.5
 
@@ -88,6 +105,112 @@ def scaled_cutoff(
         return None
     scaled = learned_coast_f * (learned_gallons / new_gallons)
     return min(EARLY_CUTOFF_MAX_F, max(0.0, round(scaled, 2)))
+
+
+def scaled_rate(
+    learned_rate: float | None,
+    learned_gallons: float | None,
+    new_gallons: float | None,
+) -> float | None:
+    """Scale a cooling rate when the charge volume changes.
+
+    The same heat loss changes the temperature of a smaller charge faster.
+    Returns None when there is nothing to scale, including a repeat at the
+    same volume.
+    """
+
+    if learned_rate is None or learned_gallons is None or new_gallons is None:
+        return None
+    if learned_gallons == new_gallons:
+        return None
+    scaled = learned_rate * (learned_gallons / new_gallons)
+    return min(COOLDOWN_RATE_MAX, max(0.0, round(scaled, 2)))
+
+
+def sustain_pulse_seconds(
+    coast_f: float,
+    coast_seconds: float,
+    *,
+    ripple_f: float = SUSTAIN_RIPPLE_F,
+) -> float | None:
+    """On-time whose guessed coast replaces about ``ripple_f`` degrees.
+
+    A fully hot element coasts ``coast_f`` degrees over ``coast_seconds``.
+    A shorter on-time coasts less, approximately
+    ``coast_f * (1 - exp(-t / coast_seconds))``. Returns None when the full
+    coast is already as small as the ripple, because a shorter pulse cannot
+    shrink it.
+    """
+
+    if coast_f <= ripple_f or coast_seconds <= 0 or ripple_f <= 0:
+        return None
+    fraction = min(0.999, ripple_f / coast_f)
+    seconds = -float(coast_seconds) * math.log(1.0 - fraction)
+    return max(1.0, seconds)
+
+
+def reheat_temperature(
+    target_f: float,
+    cool_f_per_min: float,
+    pulse_seconds: float,
+    *,
+    ripple_f: float = SUSTAIN_RIPPLE_F,
+) -> float:
+    """Probe temperature where a sustain pulse should start.
+
+    The pulse begins early by the degrees the pot will fall, at the learned
+    cooling rate, during the pulse itself.
+    """
+
+    lead = (max(0.0, cool_f_per_min) / 60.0) * max(0.0, pulse_seconds)
+    return float(target_f) - ripple_f - lead
+
+
+def _slope_per_min(samples: list[tuple[float, float]], *, min_drop: float) -> float | None:
+    start_t, start_v = samples[0]
+    end_t, end_v = samples[-1]
+    dt = end_t - start_t
+    drop = start_v - end_v
+    if dt <= 0 or drop < min_drop:
+        return None
+    return drop / dt * 60.0
+
+
+def _cooling_progress(
+    samples: list[tuple[float, float]],
+    elapsed: float,
+    average: float,
+) -> tuple[float | None, bool]:
+    """Append one falling average and report the rate and whether it is settled.
+
+    The rate is °F per minute. Settled means the last 30 seconds agrees with
+    the whole fall, or the watch has run for 4 minutes.
+    """
+
+    samples.append((elapsed, average))
+    if len(samples) < 2:
+        return None, False
+    start_t = samples[0][0]
+    end_t = samples[-1][0]
+    duration = end_t - start_t
+    full = _slope_per_min(samples, min_drop=COOLDOWN_MIN_DROP_F)
+    if duration >= COOLDOWN_WATCH_MAX_SECONDS:
+        return full, True
+    if duration < COOLDOWN_MIN_SECONDS or full is None:
+        return full, False
+    window_start = end_t - COOLDOWN_AGREE_SECONDS
+    recent = [(stamp, reading) for stamp, reading in samples if stamp >= window_start]
+    if len(recent) < 2 or recent[-1][0] - recent[0][0] < COOLDOWN_AGREE_SECONDS - 1:
+        return full, False
+    recent_rate = _slope_per_min(recent, min_drop=0.05)
+    if recent_rate is None:
+        return full, False
+    agrees = abs(recent_rate - full) <= COOLDOWN_RATE_AGREE_F or (
+        full > 0 and abs(recent_rate - full) / full <= COOLDOWN_RATE_AGREE_FRACTION
+    )
+    if agrees:
+        return recent_rate, True
+    return full, False
 
 
 def heater_should_be_on(
@@ -171,6 +294,11 @@ class Controller:
         self._coast_f: float | None = None
         self._coast_seconds: float | None = None
         self._calibration_settled = False
+        # Shown on the cooldown screen after a calibration saves its result.
+        self._display_coast: float | None = None
+        self._display_rate: float | None = None
+        # Elapsed time when the current sustain pulse should end.
+        self._pulse_until: float | None = None
         self._heaters = [False] * SLOT_COUNT
         self._heater_on_for = [0.0] * SLOT_COUNT
         # Powered time not yet written to the element-hour meters.
@@ -392,9 +520,17 @@ class Controller:
             if kind == "calibration" and gallons is None:
                 gallons = settings.charge_gallons
             if kind == "calibration":
+                updates: dict = {}
                 scaled = scaled_cutoff(settings.learned_coast_f, settings.charge_gallons, gallons)
                 if scaled is not None:
-                    settings = replace(settings, early_cutoff_f=scaled)
+                    updates["early_cutoff_f"] = scaled
+                scaled_cool = scaled_rate(
+                    settings.learned_cooldown_f_per_min, settings.charge_gallons, gallons
+                )
+                if scaled_cool is not None:
+                    updates["learned_cooldown_f_per_min"] = scaled_cool
+                if updates:
+                    settings = replace(settings, **updates)
                     self.store.save_settings(settings)
             self._run_kind = kind
             self._charge_gallons = gallons
@@ -402,6 +538,9 @@ class Controller:
             self._coast_f = None
             self._coast_seconds = None
             self._calibration_settled = False
+            self._display_coast = None
+            self._display_rate = None
+            self._pulse_until = None
             self._live_temps = self.source.read_temperatures(SLOT_COUNT)
             self._sample_climate()
             self._emergency = self._emergency_codes(settings)
@@ -423,7 +562,7 @@ class Controller:
             if self._mode != "running":
                 raise ControllerError("There is no running run to pause", 409)
             settings = self.store.get_settings()
-            self._coast_watch = None
+            self._pulse_until = None
             self._set_heaters([False] * SLOT_COUNT, release_off_dwell=True)
             self._live_temps = self.source.read_temperatures(SLOT_COUNT)
             self._mode = "paused"
@@ -491,6 +630,30 @@ class Controller:
         self._display = NullDisplay()
         self._display_key = None
 
+    def _calibration_lcd(self) -> dict:
+        """Which calibration step the panel should name, and the number for it."""
+
+        if self._mode == "cooling" and self._display_coast is not None:
+            return {"peak": self._display_coast, "rate": self._display_rate}
+        if self._run_kind != "calibration" or self._mode not in ("running", "paused"):
+            return {}
+        watch = self._coast_watch
+        if watch is None:
+            return {"step": "heating"}
+        opened = float(watch["temp_at_open"])
+        peak_average = watch.get("peak_average")
+        if watch.get("phase") == "falling":
+            peak = self._coast_f
+            if peak is None and peak_average is not None:
+                peak = peak_average - opened
+            return {"step": "falling", "peak": peak, "rate": watch.get("rate")}
+        rise = None
+        if peak_average is not None:
+            rise = peak_average - opened
+        elif watch["samples"]:
+            rise = float(watch["samples"][-1][1]) - opened
+        return {"step": "coasting", "rise": rise}
+
     def _panel_lines(self, settings: Settings) -> list[str]:
         probes: list[tuple[str, float | None]] = []
         for index, channel in enumerate(settings.sensors):
@@ -507,6 +670,7 @@ class Controller:
         ]
         elapsed = self._cooldown_elapsed if self._mode == "cooling" else self._elapsed
         code = self._emergency[0] if self._emergency else None
+        lcd = self._calibration_lcd()
         return status_lines(
             mode=self._mode,
             elapsed_seconds=elapsed,
@@ -519,6 +683,10 @@ class Controller:
             cabinet_temp_f=self._cabinet_temp,
             cabinet_limit_f=settings.cabinet_limit_f,
             cabinet_fault=code == "E02",
+            calibration_step=lcd.get("step"),
+            calibration_rise_f=lcd.get("rise"),
+            calibration_peak_f=lcd.get("peak"),
+            calibration_rate_f=lcd.get("rate"),
         )
 
     def _loop(self) -> None:
@@ -591,7 +759,12 @@ class Controller:
 
     def _finish_run(self) -> None:
         settings = self.store.get_settings()
+        if self._run_kind == "calibration" and self._coast_f is not None:
+            self._display_coast = self._coast_f
+            watch = self._coast_watch or {}
+            self._display_rate = watch.get("saved_rate")
         self._coast_watch = None
+        self._pulse_until = None
         self._flush_heater_life()
         self._set_heaters([False] * SLOT_COUNT, release_off_dwell=True)
         self._live_temps = self.source.read_temperatures(SLOT_COUNT)
@@ -762,6 +935,8 @@ class Controller:
         self._cooldown_since_sample = 0.0
         self._cooldown_sensor = None
         self._cooldown_window = []
+        self._display_coast = None
+        self._display_rate = None
         if self._mode == "cooling":
             self._mode = "idle"
 
@@ -889,7 +1064,14 @@ class Controller:
                 "temp_at_open": temp,
                 "opened_elapsed": self._elapsed,
                 "samples": [],
-                "averages": [],
+                "phase": "coasting",
+                "peak_average": None,
+                "peak_elapsed": None,
+                "plateau_anchor": None,
+                "plateau_since": None,
+                "below_since": None,
+                "fall_samples": [],
+                "saved_rate": None,
             }
 
     def _advance_coast(self, settings: Settings) -> None:
@@ -898,6 +1080,11 @@ class Controller:
             return
         found = self._current_control(settings)
         if found is None:
+            if (
+                watch["phase"] == "coasting"
+                and self._elapsed - watch["opened_elapsed"] >= COAST_WATCH_MAX_SECONDS
+            ):
+                self._finish_calibration(settings, rate=None)
             return
         _, temp = found
         samples: list[tuple[float, float]] = watch["samples"]
@@ -906,28 +1093,61 @@ class Controller:
             return
         window_start = self._elapsed - COAST_AVERAGE_SECONDS
         window = [reading for elapsed, reading in samples if elapsed >= window_start]
+        if not window:
+            return
         average = sum(window) / len(window)
-        averages: list[tuple[float, float]] = watch["averages"]
-        averages.append((self._elapsed, average))
-        if self._elapsed - averages[0][0] < COAST_AVERAGE_HOLD_SECONDS:
+        watch["average"] = average
+        if watch["phase"] == "coasting":
+            self._track_peak(watch, average)
+            if self._peak_ready(watch):
+                self._lock_coast(settings, watch)
+                watch["phase"] = "falling"
+                watch["fall_samples"] = [(self._elapsed, average)]
             return
-        hold_start = self._elapsed - COAST_AVERAGE_HOLD_SECONDS
-        recent = [reading for elapsed, reading in averages if elapsed >= hold_start]
-        if max(recent) - min(recent) > COAST_AVERAGE_DRIFT_F:
-            return
-        watch["average"] = sum(recent) / len(recent)
-        self._finish_coast(settings)
+        rate, done = _cooling_progress(watch["fall_samples"], self._elapsed, average)
+        if rate is not None:
+            watch["rate"] = rate
+        if done:
+            self._finish_calibration(settings, rate=rate)
 
-    def _finish_coast(self, settings: Settings) -> None:
-        watch = self._coast_watch
-        self._coast_watch = None
-        if watch is None or self._run_id is None or "average" not in watch:
+    def _track_peak(self, watch: dict, average: float) -> None:
+        peak = watch["peak_average"]
+        if peak is None or average > peak + 0.01:
+            watch["peak_average"] = average
+            watch["peak_elapsed"] = self._elapsed
+            watch["below_since"] = None
+            peak = average
+        if watch["plateau_anchor"] is None:
+            watch["plateau_anchor"] = average
+            watch["plateau_since"] = self._elapsed
+        elif average >= watch["plateau_anchor"] + COAST_PLATEAU_RISE_F:
+            watch["plateau_anchor"] = average
+            watch["plateau_since"] = self._elapsed
+        if average <= peak - COAST_PEAK_DROP_F:
+            if watch["below_since"] is None:
+                watch["below_since"] = self._elapsed
+        else:
+            watch["below_since"] = None
+
+    def _peak_ready(self, watch: dict) -> bool:
+        if watch["peak_average"] is None:
+            return False
+        below = watch["below_since"]
+        if below is not None and self._elapsed - below >= COAST_PEAK_CONFIRM_SECONDS:
+            return True
+        since = watch["plateau_since"]
+        if since is not None and self._elapsed - since >= COAST_PLATEAU_SECONDS:
+            return True
+        return self._elapsed - watch["opened_elapsed"] >= COAST_WATCH_MAX_SECONDS
+
+    def _lock_coast(self, settings: Settings, watch: dict) -> None:
+        if self._run_id is None or watch.get("locked"):
             return
-        average = float(watch["average"])
-        coast = average - watch["temp_at_open"]
-        coast = min(EARLY_CUTOFF_MAX_F, max(0.0, round(coast, 2)))
-        seconds = round(max(0.0, self._elapsed - watch["opened_elapsed"]), 2)
-        settled = average >= settings.target_temp_f - CALIBRATION_LAND_F
+        peak = float(watch["peak_average"])
+        coast = min(EARLY_CUTOFF_MAX_F, max(0.0, round(peak - watch["temp_at_open"], 2)))
+        seconds = round(max(0.0, float(watch["peak_elapsed"]) - watch["opened_elapsed"]), 2)
+        settled = peak >= settings.target_temp_f - CALIBRATION_LAND_F
+        watch["locked"] = True
         self._coast_f = coast
         self._coast_seconds = seconds
         self._calibration_settled = settled
@@ -936,6 +1156,7 @@ class Controller:
             early_cutoff_f=coast,
             learned_coast_f=coast,
             learned_coast_seconds=seconds,
+            learned_cooldown_f_per_min=None,
             charge_gallons=self._charge_gallons,
         )
         self.store.save_settings(learned)
@@ -952,6 +1173,17 @@ class Controller:
             seconds,
             coast,
         )
+
+    def _finish_calibration(self, settings: Settings, rate: float | None) -> None:
+        watch = self._coast_watch
+        if watch is not None:
+            watch["saved_rate"] = None if rate is None else round(rate, 2)
+        if rate is not None and self._run_id is not None:
+            stored = min(COOLDOWN_RATE_MAX, max(0.0, round(rate, 2)))
+            current = self.store.get_settings()
+            self.store.save_settings(replace(current, learned_cooldown_f_per_min=stored))
+            self.store.update_run(self._run_id, cooldown_f_per_min=stored)
+            logger.info("Run %s cooling %s°F/min", self._run_id, stored)
         self._finish_run()
 
     def _clear_coast(self) -> None:
@@ -961,20 +1193,73 @@ class Controller:
         self._coast_f = None
         self._coast_seconds = None
         self._calibration_settled = False
+        self._pulse_until = None
+
+    def _hold_pulse(self, settings: Settings) -> tuple[float, float] | None:
+        """Pulse length and reheat temperature, when a cooling rate can hold the target."""
+
+        coast = settings.learned_coast_f
+        seconds = settings.learned_coast_seconds
+        rate = settings.learned_cooldown_f_per_min
+        if coast is None or seconds is None or rate is None or rate <= 0:
+            return None
+        duration = sustain_pulse_seconds(coast, seconds)
+        if duration is None:
+            return None
+        reheat = reheat_temperature(settings.target_temp_f, rate, duration)
+        cutoff = settings.target_temp_f - settings.early_cutoff_f
+        if reheat <= cutoff:
+            return None
+        return duration, reheat
+
+    def _sustain_states(self, settings: Settings, primary: float, pulse: tuple[float, float]) -> list[bool]:
+        duration, reheat = pulse
+        target = float(settings.target_temp_f)
+        enabled = [settings.heaters[index].enabled for index in range(SLOT_COUNT)]
+        if primary >= target or primary <= target - settings.early_cutoff_f:
+            self._pulse_until = None
+            if primary >= target:
+                return [False] * SLOT_COUNT
+            return [
+                heater_should_be_on(
+                    primary,
+                    settings.target_temp_f,
+                    bool(self._heaters[index]),
+                    early_cutoff_f=settings.early_cutoff_f,
+                )
+                and enabled[index]
+                for index in range(SLOT_COUNT)
+            ]
+        if self._pulse_until is not None and self._elapsed < self._pulse_until:
+            return list(enabled)
+        self._pulse_until = None
+        if primary <= reheat:
+            blocked = any(
+                enabled[index]
+                and not self._heaters[index]
+                and self._heater_off_for[index] < settings.heater_min_off_seconds
+                for index in range(SLOT_COUNT)
+            )
+            if not blocked:
+                self._pulse_until = self._elapsed + duration
+            return list(enabled)
+        return [False] * SLOT_COUNT
 
     def _decide(self, settings: Settings, temps: list[float]) -> list[bool]:
         """Physical heater mask. Index 0 is heater 1. Disabled slots stay off.
 
         The on/off choice itself, including why power is removed before the
-        setpoint, lives in :func:`heater_should_be_on`.
+        setpoint, lives in :func:`heater_should_be_on`. Near the target, a
+        learned cooling rate replaces that deadband with a short pulse.
         """
 
         off = [False] * SLOT_COUNT
         control_indexes = settings.enabled_sensor_indexes()
         if not control_indexes or control_indexes[0] >= len(temps):
             return off
-        # The coast watch is the measurement. Leave the SSR open until the
-        # average settles so a second heat pulse does not interrupt it.
+        # The coast watch is the measurement. Leave the SSR open through the
+        # crest and the cooling-rate watch so a second heat pulse does not
+        # interrupt it.
         if self._run_kind == "calibration" and self._coast_watch is not None:
             return off
         raw = temps[control_indexes[0]]
@@ -989,6 +1274,8 @@ class Controller:
         cutoff = settings.early_cutoff_f
         if self._run_kind == "calibration":
             cutoff = -CALIBRATION_ABOVE_F
+        elif (pulse := self._hold_pulse(settings)) is not None:
+            return self._sustain_states(settings, primary, pulse)
         return [
             heater_should_be_on(
                 primary,
@@ -1052,6 +1339,8 @@ class Controller:
             "early_cutoff_f": settings.early_cutoff_f,
             "learned_coast_f": settings.learned_coast_f,
             "learned_coast_seconds": settings.learned_coast_seconds,
+            "learned_cooldown_f_per_min": settings.learned_cooldown_f_per_min,
+            "calibration_step": self._calibration_lcd().get("step"),
             "charge_gallons": self._charge_gallons
             if self._mode in ("running", "paused") and self._run_kind == "calibration"
             else settings.charge_gallons,
@@ -1077,6 +1366,7 @@ class Controller:
             if self._cabinet_humidity is None
             else round(self._cabinet_humidity, 1),
             "cabinet_limit_f": settings.cabinet_limit_f,
+            "cabinet_enabled": self._hts_enabled(settings),
             "emergency_codes": list(self._emergency),
             "emergency": [{"code": code, "summary": summary(code)} for code in self._emergency],
         }

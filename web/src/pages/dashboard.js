@@ -20,14 +20,24 @@ function coastText(status) {
   const cutoff = Number(status.early_cutoff_f)
   const cutoffLabel = Number.isFinite(cutoff) ? `${cutoff}°F` : '—'
   if (status.run_kind === 'calibration' && (status.mode === 'running' || status.mode === 'paused')) {
-    return 'Heating a little past the target. Calibration ends once the temperature average stops changing.'
+    if (status.calibration_step === 'coasting') {
+      return 'Elements are off. Watching the climb until it crests.'
+    }
+    if (status.calibration_step === 'falling') {
+      return 'Peak saved. Measuring how fast the pot cools.'
+    }
+    return 'Heating a little past the target. Then Brewski watches the climb to its peak and how fast the pot cools.'
   }
   if (status.learned_coast_f == null) {
     return 'Calibrate with water in the pot. Runs stay locked until that measurement is saved.'
   }
   const learned = `${Number(status.learned_coast_f).toFixed(1)}°F`
   const gallons = status.charge_gallons == null ? '' : ` at ${Number(status.charge_gallons)} gal`
-  return `Learned coast ${learned}${gallons}. Cutoff is ${cutoffLabel}.`
+  if (status.learned_cooldown_f_per_min == null) {
+    return `Learned coast ${learned}${gallons}. Cutoff is ${cutoffLabel}. Calibrate again to measure how fast the pot cools.`
+  }
+  const rate = `${Number(status.learned_cooldown_f_per_min).toFixed(1)}°F/min`
+  return `Learned coast ${learned}${gallons}. Cutoff is ${cutoffLabel}. Cooling is ${rate}, so the element pulses back on about 1°F under the target.`
 }
 
 function runBadge(run) {

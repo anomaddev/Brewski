@@ -25,6 +25,7 @@ def test_default_settings_are_two_heaters_and_two_sensors(store):
     assert settings.heater_min_off_seconds == 1.0
     assert settings.early_cutoff_f == 3.0
     assert settings.learned_coast_f is None
+    assert settings.learned_cooldown_f_per_min is None
     assert settings.charge_gallons is None
     assert settings.setup_complete is False
 
@@ -242,6 +243,7 @@ def test_older_databases_keep_counts_and_gain_default_pins(tmp_path):
     assert settings.heater_min_off_seconds == 1.0
     assert settings.early_cutoff_f == 3.0
     assert settings.learned_coast_f is None
+    assert settings.learned_cooldown_f_per_min is None
     assert settings.setup_complete is True
     run = store.get_run(1)
     assert run["kind"] == "run"

@@ -79,9 +79,61 @@ def test_calibration_prompt_and_clock():
     assert prompt[3] == "H1: OFF      H2: OFF"
     assert all(len(line) == COLUMNS for line in prompt)
 
-    running = _screen(calibrating=True)
-    assert running[0] == "Calibrate:  00:00:00"
+    running = _screen(calibrating=True, calibration_step="heating")
+    assert running[0] == "Heating:    00:00:00"
+    assert running[1] == "Target:        165 F"
     assert len(running[0]) == COLUMNS
+
+
+def test_calibration_steps_name_the_climb_the_fall_and_the_result():
+    heating = _screen(calibrating=True, calibration_step="heating", elapsed_seconds=12)
+    assert heating[0] == "Heating:    00:00:12"
+    assert heating[1] == "Target:        165 F"
+    assert heating[3] == "H1: OFF      H2: OFF"
+    assert all(len(line) == COLUMNS for line in heating)
+
+    coasting = _screen(
+        calibrating=True,
+        calibration_step="coasting",
+        calibration_rise_f=12.4,
+        elapsed_seconds=90,
+    )
+    assert coasting[0] == "Coasting:   00:01:30"
+    assert coasting[1] == "Rise:        +12.4 F"
+    assert coasting[2] == "Boiler:      168.5 F"
+    assert all(len(line) == COLUMNS for line in coasting)
+
+    falling = _screen(
+        calibrating=True,
+        calibration_step="falling",
+        calibration_peak_f=15.1,
+        elapsed_seconds=100,
+    )
+    assert falling[0] == "Falling:    00:01:40"
+    assert falling[1] == "Peak:        +15.1 F"
+    rated = _screen(
+        calibrating=True,
+        calibration_step="falling",
+        calibration_peak_f=15.1,
+        calibration_rate_f=2.4,
+    )
+    assert rated[1] == "Rate:      2.4 F/min"
+    assert all(len(line) == COLUMNS for line in rated)
+
+    paused = _screen(mode="paused", calibrating=True, calibration_step="coasting", elapsed_seconds=90)
+    assert paused[0] == "Paused:     00:01:30"
+    assert paused[1] == "Step:       Coasting"
+    assert all(len(line) == COLUMNS for line in paused)
+
+    saved = _screen(mode="cooling", calibration_peak_f=15.1, calibration_rate_f=2.4, elapsed_seconds=12)
+    assert saved[0] == "Cooling:    00:00:12"
+    assert saved[1] == "+15.1 F    2.4 F/min"
+    assert saved[3] == "H1: OFF      H2: OFF"
+    assert all(len(line) == COLUMNS for line in saved)
+
+    coast_only = _screen(mode="cooling", calibration_peak_f=15.1, elapsed_seconds=12)
+    assert coast_only[1] == "Coast:       +15.1 F"
+    assert len(coast_only[1]) == COLUMNS
 
 
 def test_idle_paused_and_cooling():

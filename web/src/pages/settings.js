@@ -21,14 +21,14 @@ export function mountSettings(root) {
           <input name="target_temp_f" id="settings-target" type="number" min="90" max="240" step="1" inputmode="numeric" required />
           <p class="boil-warning" id="target-warning" hidden>Above water's boiling point (212°F).</p>
         </label>
-        <p class="help">The first enabled probe is compared with this. Heaters turn off early, by the cutoff below, and come back on 2°F under that cutoff.</p>
+        <p class="help">The first enabled probe is compared with this. Heaters turn off early, by the cutoff below. Without a measured cooling rate they come back on 2°F under that cutoff. After calibration measures the cooling rate, they pulse on near the target to hold it.</p>
       </fieldset>
       <fieldset>
         <legend>Early cutoff</legend>
         <label class="field target-field-setting">Degrees below target (°F)
           <input name="early_cutoff_f" id="early-cutoff" type="number" min="0" max="20" step="0.5" inputmode="decimal" required />
         </label>
-        <p class="help">The element turns off this many degrees before the target. It stays hot after the SSR opens, and the probe lags the liquid, so cutting power early lets that residual heat finish the rise instead of overshooting. 3°F is a starting point for a typical small still. Use 0 to wait until the probe reaches the target. A calibration run replaces this with the measured coast.</p>
+        <p class="help">The element turns off this many degrees before the target. It stays hot after the SSR opens, and the probe lags the liquid, so cutting power early lets that residual heat finish the rise instead of overshooting. 3°F is a starting point for a typical small still. Use 0 to wait until the probe reaches the target. A calibration run replaces this with the measured coast. When that run also measures a cooling rate, the element pulses back on near the target instead of waiting for the 2°F band under this cutoff.</p>
       </fieldset>
       <fieldset>
         <legend>Cabinet limit</legend>

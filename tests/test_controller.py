@@ -6,6 +6,8 @@ from brewski.controller import (
     Controller,
     ControllerError,
     heater_should_be_on,
+    reheat_temperature,
+    sustain_pulse_seconds,
 )
 from brewski.sources.dummy import DummySource
 from brewski.store import merge_settings
@@ -162,24 +164,45 @@ def test_resume_does_not_wait_out_the_minimum_off_time(store):
     assert source.heaters[:2] == [True, True]
 
 
-def test_calibration_heats_past_the_target_and_ends_when_the_average_settles(store):
-    source = StaticSource([100.0, 90.0])
-    controller = Controller(store, source)
-    controller.start({"kind": "calibration", "charge_gallons": 5, "target_temp_f": 165})
-    assert controller.status()["run_kind"] == "calibration"
-
+def _open_soaked_calibration(controller, source, target=165.0):
+    controller.start({"kind": "calibration", "charge_gallons": 5, "target_temp_f": target})
     controller.tick(30)
-    source.temps = [165.0, 150.0]
+    source.temps = [target, 150.0]
     controller.tick(1)
-    assert source.heaters[:2] == [True, True]
-
-    opened_at = 165.0 + CALIBRATION_ABOVE_F
-    source.temps = [opened_at, 150.0]
+    opened = target + CALIBRATION_ABOVE_F
+    source.temps = [opened, 150.0]
     controller.tick(1)
     assert source.heaters[:2] == [False, False]
+    return opened
 
-    for _ in range(20):
-        source.temps = [opened_at + 1.2, 150.0]
+
+def test_calibration_records_the_crest_and_then_the_cooling_rate(store):
+    source = StaticSource([100.0, 90.0])
+    controller = Controller(store, source)
+    opened = _open_soaked_calibration(controller, source)
+    assert controller.status()["calibration_step"] == "coasting"
+    assert controller._panel_lines(store.get_settings())[0].startswith("Coasting:")
+
+    peak = opened + 15.0
+    for _ in range(15):
+        source.temps = [peak, 150.0]
+        controller.tick(1)
+    assert controller.status()["mode"] == "running"
+    assert store.get_settings().learned_coast_f == 3
+
+    for _ in range(25):
+        source.temps = [peak - 0.6, 150.0]
+        controller.tick(1)
+    assert controller.status()["mode"] == "running"
+    assert controller.status()["calibration_step"] == "falling"
+    settings = store.get_settings()
+    assert settings.learned_coast_f == pytest.approx(15.0, abs=0.15)
+    assert controller._panel_lines(settings)[0].startswith("Falling:")
+
+    temp = peak - 0.6
+    for _ in range(120):
+        temp -= 2.0 / 60.0
+        source.temps = [temp, 150.0]
         controller.tick(1)
         if controller.status()["mode"] != "running":
             break
@@ -187,7 +210,8 @@ def test_calibration_heats_past_the_target_and_ends_when_the_average_settles(sto
     assert controller.status()["mode"] == "cooling"
     assert source.heaters[:2] == [False, False]
     settings = store.get_settings()
-    assert settings.learned_coast_f == pytest.approx(1.2, abs=0.05)
+    assert settings.learned_coast_f == pytest.approx(15.0, abs=0.15)
+    assert settings.learned_cooldown_f_per_min == pytest.approx(2.0, abs=0.4)
     assert settings.early_cutoff_f == pytest.approx(settings.learned_coast_f)
     assert settings.charge_gallons == 5
     listed = controller.runs()
@@ -197,7 +221,65 @@ def test_calibration_heats_past_the_target_and_ends_when_the_average_settles(sto
     assert listed["runs"][0]["status"] == "stopped"
     assert listed["runs"][0]["calibration_settled"] is True
     assert listed["runs"][0]["coast_f"] == pytest.approx(settings.learned_coast_f)
+    assert listed["runs"][0]["cooldown_f_per_min"] == pytest.approx(
+        settings.learned_cooldown_f_per_min
+    )
     assert listed["runs"][0]["charge_gallons"] == 5
+    saved = controller._panel_lines(settings)
+    assert saved[0].startswith("Cooling:")
+    assert "F/min" in saved[1]
+
+
+def test_a_slow_climb_does_not_end_the_coast(store):
+    source = StaticSource([100.0, 90.0])
+    controller = Controller(store, source)
+    opened = _open_soaked_calibration(controller, source)
+    for step in range(1, 41):
+        source.temps = [opened + 0.05 * step, 150.0]
+        controller.tick(1)
+    assert controller.status()["mode"] == "running"
+    assert controller.status()["calibration_step"] == "coasting"
+    assert store.get_settings().learned_coast_f == 3
+
+
+def test_a_cooling_rate_pulses_near_the_target_instead_of_the_deadband(store):
+    store.save_settings(
+        merge_settings(
+            store.get_settings(),
+            {
+                "learned_coast_f": 15,
+                "learned_coast_seconds": 90,
+                "learned_cooldown_f_per_min": 2,
+                "early_cutoff_f": 15,
+                "target_temp_f": 165,
+            },
+        )
+    )
+    source = StaticSource([100.0, 90.0])
+    controller = Controller(store, source)
+    controller.start()
+    controller.tick(2)
+    source.temps = [150.0, 90.0]
+    controller.tick(1)
+    assert source.heaters[:2] == [False, False]
+    controller.tick(1)
+
+    source.temps = [164.5, 90.0]
+    controller.tick(1)
+    assert source.heaters[:2] == [False, False]
+
+    duration = sustain_pulse_seconds(15, 90)
+    reheat = reheat_temperature(165, 2, duration)
+    assert reheat == pytest.approx(163.8, abs=0.1)
+    source.temps = [reheat, 90.0]
+    controller.tick(1)
+    assert source.heaters[:2] == [True, True]
+
+    source.temps = [164.5, 90.0]
+    controller.tick(duration - 0.5)
+    assert source.heaters[:2] == [True, True]
+    controller.tick(1)
+    assert source.heaters[:2] == [False, False]
 
 
 def test_calibration_keeps_running_while_the_average_is_still_changing(store):
@@ -234,6 +316,26 @@ def test_a_smaller_charge_scales_the_remembered_coast(store):
     controller = Controller(store, source)
     controller.start({"kind": "calibration", "charge_gallons": 4})
     assert store.get_settings().early_cutoff_f == pytest.approx(8)
+
+
+def test_a_smaller_charge_scales_the_cooling_rate(store):
+    current = store.get_settings()
+    store.save_settings(
+        merge_settings(
+            current,
+            {
+                "learned_coast_f": 4,
+                "learned_coast_seconds": 12,
+                "learned_cooldown_f_per_min": 2,
+                "charge_gallons": 8,
+            },
+        )
+    )
+    controller = Controller(store, StaticSource([100.0, 90.0]))
+    controller.start({"kind": "calibration", "charge_gallons": 4})
+    settings = store.get_settings()
+    assert settings.early_cutoff_f == pytest.approx(8)
+    assert settings.learned_cooldown_f_per_min == pytest.approx(4)
 
 
 def test_a_short_pulse_does_not_teach_the_coast(store):

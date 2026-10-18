@@ -63,6 +63,7 @@ export function mountRun(root, params) {
       ${run.kind === 'calibration' ? `
       <div class="detail-item"><span>Still size</span><strong>${run.charge_gallons == null ? '—' : `${run.charge_gallons} gal`}</strong></div>
       <div class="detail-item"><span>Coast</span><strong>${run.coast_f == null ? '—' : `${Number(run.coast_f).toFixed(1)}°F over ${Math.round(Number(run.coast_seconds) || 0)}s`}</strong></div>
+      <div class="detail-item"><span>Cooling</span><strong>${run.cooldown_f_per_min == null ? '—' : `${Number(run.cooldown_f_per_min).toFixed(1)}°F/min`}</strong></div>
       <div class="detail-item"><span>Reached target</span><strong>${run.calibration_settled ? 'Yes' : 'No'}</strong></div>
       ` : ''}
       <div class="detail-item"><span>Heaters</span><strong>${heaterList}</strong></div>

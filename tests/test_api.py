@@ -1,5 +1,6 @@
 import pytest
 
+from brewski import __version__
 from brewski.api import create_app
 from brewski.controller import Controller
 from brewski.sources.dummy import DummySource
@@ -10,6 +11,7 @@ def test_status_starts_idle(client):
     status = client.get("/api/status").get_json()
     assert status["mode"] == "idle"
     assert status["source"] == "dummy"
+    assert status["version"] == __version__
     assert status["heater_count"] == 2
     assert status["sensor_count"] == 1
     assert status["heaters_on"] == [False, False]

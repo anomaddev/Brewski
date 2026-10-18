@@ -6,6 +6,7 @@ from pathlib import Path
 
 from flask import Flask, abort, jsonify, request, send_from_directory
 
+from brewski import __version__
 from brewski.controller import Controller, ControllerError
 from brewski.paths import web_dist_dir
 
@@ -25,7 +26,9 @@ def create_app(controller: Controller) -> Flask:
 
     @app.get("/api/status")
     def status():
-        return jsonify(controller.status())
+        payload = controller.status()
+        payload["version"] = __version__
+        return jsonify(payload)
 
     @app.get("/api/settings")
     def get_settings():

@@ -12,7 +12,7 @@ import {
   statusClass,
   statusLabel,
 } from '../format.js'
-import { setSourceBadge } from '../layout.js'
+import { setAppVersion, setSourceBadge } from '../layout.js'
 
 const CHART_WINDOW_MS = 2 * 60 * 60 * 1000
 
@@ -421,6 +421,7 @@ export function mountDashboard(root) {
     if (stopped) return
     const status = await api.status()
     setSourceBadge(status.source)
+    setAppVersion(status.version)
     document.getElementById('elapsed').textContent = formatDuration(status.elapsed_seconds)
     const mode = document.getElementById('system-mode')
     mode.textContent = statusLabel(status.mode)

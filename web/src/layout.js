@@ -18,7 +18,7 @@ export function mountShell(active) {
           <div class="brand">
             <span class="brand-mark" aria-hidden="true">B</span>
             <div>
-              <div class="brand-name">Brewski</div>
+              <div class="brand-name">Brewski <span class="app-version" data-app-version></span></div>
               <div class="brand-sub">Still controller</div>
             </div>
           </div>
@@ -34,7 +34,7 @@ export function mountShell(active) {
           <button class="menu-btn" id="menu-btn" type="button" aria-label="Open menu">
             <span class="menu-icon">☰</span>
           </button>
-          <div class="menu-title">Brewski</div>
+          <div class="menu-title">Brewski <span class="app-version" data-app-version></span></div>
           <div class="source-badge">Dummy source</div>
         </header>
         <div class="status-strip-host" id="status-strip-host"></div>
@@ -67,6 +67,13 @@ export function setSourceBadge(source) {
   const label = source === 'dummy' ? 'Dummy source' : source || 'Controller'
   document.querySelectorAll('.source-badge').forEach((badge) => {
     badge.textContent = label
+  })
+}
+
+export function setAppVersion(version) {
+  const label = version ? `v${version}` : ''
+  document.querySelectorAll('[data-app-version]').forEach((node) => {
+    node.textContent = label
   })
 }
 

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "brewski"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Local web controller for a small still"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -19,6 +19,9 @@ dev = [
 
 [project.scripts]
 brewski = "brewski.cli:main"
+
+[tool.hatch.version]
+path = "src/brewski/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/brewski"]

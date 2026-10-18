@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 
+from brewski import __version__
 from brewski.api import create_app
 from brewski.controller import Controller
 from brewski.paths import data_directory, host_and_port, web_project_dir
@@ -25,6 +26,11 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="brewski",
         description="Web controller for a small still. With no command, start the server.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
     parser.add_argument(
         "command",

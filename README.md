@@ -55,19 +55,22 @@ Run the tests with `pytest`.
 
 ## Install on a Raspberry Pi
 
-Copy this repo onto the Pi, then from that checkout:
+The current controller is on the `redev` branch. Git is not required. On the Pi:
 
 ```bash
-sudo ./deploy/install.sh
+curl -fsSL https://raw.githubusercontent.com/anomaddev/Brewski/redev/deploy/install.sh | sudo bash
 ```
 
-That command installs Python and Node, builds the dashboard, installs Brewski into `/opt/brewski/venv`, and enables a systemd service so the controller starts on every reboot. The service listens on port 8080. The database is `/var/lib/brewski/brewski.db`. Open `http://<pi-address>:8080`.
+That downloads `redev`, installs Python and Node, builds the dashboard, installs Brewski into `/opt/brewski/venv`, and enables a systemd service so the controller starts on every reboot. The service listens on port 8080. The database is `/var/lib/brewski/brewski.db`. Open `http://<pi-address>:8080`.
 
-The service runs as the account that invoked `sudo`, or as `pi` when that account exists and sudo did not record a user. Set `BREWSKI_USER` to choose a different account:
+The service runs as the account that invoked `sudo`, or as `pi` when that account exists and sudo did not record a user. Set `BREWSKI_USER` to choose a different account. Set `BREWSKI_REF` to download a branch other than `redev`:
 
 ```bash
-sudo BREWSKI_USER=still ./deploy/install.sh
+curl -fsSL https://raw.githubusercontent.com/anomaddev/Brewski/redev/deploy/install.sh \
+  | sudo BREWSKI_USER=still bash
 ```
+
+From a checkout that is already on the Pi, `sudo ./deploy/install.sh` installs that checkout and does not contact GitHub.
 
 Running the script again upgrades Brewski and restarts the service. It does not delete the database. Dev mode (`brewski dev`) does not need this install.
 

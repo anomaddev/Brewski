@@ -80,6 +80,13 @@ button { cursor: pointer; }
 }
 .brand-name { font-weight: 700; letter-spacing: -0.03em; font-size: 1.15rem; }
 .brand-sub { color: var(--muted); font-size: 0.78rem; margin-top: 2px; }
+.app-version:not(:empty) {
+  margin-left: 6px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
 
 .rail-nav { display: flex; flex-direction: column; gap: 4px; }
 .sidebar-item {

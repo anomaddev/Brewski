@@ -352,6 +352,15 @@ def restart_service() -> None:
     subprocess.run([systemctl, "restart", "brewski"], check=False)
 
 
+def request_reboot() -> None:
+    """Reboot the Pi. The service account needs passwordless sudo for this."""
+
+    systemctl = shutil.which("systemctl")
+    if systemctl is None:
+        raise OSError("systemctl was not found")
+    subprocess.run(["sudo", "-n", systemctl, "reboot"], check=True)
+
+
 def _check_release(*, opener, revision_path: Path | None, timeout: float) -> ReleaseInfo:
     revision = _read_revision(REVISION_PATH if revision_path is None else revision_path)
     latest, reachable = _fetch_latest(opener, timeout)

@@ -1,19 +1,33 @@
 """Front-panel buttons, LED relays, and the target encoder.
 
 The running controller keeps these open for the life of the process. A
-button already held when the pins open does not count. LED relays are
-active low and stay solid on only while that button will do something.
+button already held when the pins open does not count. LED relays stay
+solid on only while that button will do something.
+
+Stop counts on release. A press that lasts for ``STOP_HOLD_SECONDS`` is a
+hold, and that release is not also a short press.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+from typing import NamedTuple
 
 from brewski.lcd import LED_ACTIVE_HIGH, PromptLeds, panel_pin_factory
 from brewski.store import Settings, default_gpio
 
 logger = logging.getLogger(__name__)
+
+# Long enough that stopping a run does not open the software menu.
+STOP_HOLD_SECONDS = 2.0
+
+
+class PanelEvents(NamedTuple):
+    starts: int
+    stops: int
+    stop_holds: int
+    steps: int
 
 
 class Panel:
@@ -27,9 +41,17 @@ class Panel:
         self._guard = threading.Lock()
         self._start_presses = 0
         self._stop_presses = 0
+        self._stop_holds = 0
+        self._stop_held = False
         self._steps = 0
+        try:
+            stop.hold_time = STOP_HOLD_SECONDS  # type: ignore[attr-defined]
+        except Exception:
+            logger.debug("Stop hold time was left at the button default", exc_info=True)
         start.when_pressed = self._press_start  # type: ignore[attr-defined]
-        stop.when_pressed = self._press_stop  # type: ignore[attr-defined]
+        stop.when_pressed = self._arm_stop  # type: ignore[attr-defined]
+        stop.when_held = self._hold_stop  # type: ignore[attr-defined]
+        stop.when_released = self._release_stop  # type: ignore[attr-defined]
         if encoder is not None:
             encoder.when_rotated_clockwise = self._clockwise  # type: ignore[attr-defined]
             encoder.when_rotated_counter_clockwise = self._counter   # type: ignore[attr-defined]
@@ -39,9 +61,21 @@ class Panel:
         with self._guard:
             self._start_presses += 1
 
-    def _press_stop(self) -> None:
+    def _arm_stop(self) -> None:
         with self._guard:
-            self._stop_presses += 1
+            self._stop_held = False
+
+    def _hold_stop(self) -> None:
+        with self._guard:
+            self._stop_held = True
+            self._stop_holds += 1
+
+    def _release_stop(self) -> None:
+        with self._guard:
+            held = self._stop_held
+            self._stop_held = False
+            if not held:
+                self._stop_presses += 1
 
     def _clockwise(self) -> None:
         self._add_steps(1)
@@ -53,15 +87,21 @@ class Panel:
         with self._guard:
             self._steps += steps
 
-    def take(self) -> tuple[int, int, int]:
-        """Return new start presses, stop presses, and encoder steps, then clear them."""
+    def take(self) -> PanelEvents:
+        """Return new presses, the stop hold, and encoder steps, then clear them."""
 
         with self._guard:
-            start, stop, steps = self._start_presses, self._stop_presses, self._steps
+            events = PanelEvents(
+                self._start_presses,
+                self._stop_presses,
+                self._stop_holds,
+                self._steps,
+            )
             self._start_presses = 0
             self._stop_presses = 0
+            self._stop_holds = 0
             self._steps = 0
-        return start, stop, steps
+        return events
 
     def set_leds(self, start_on: bool, stop_on: bool) -> None:
         self._leds.set(start_on, stop_on)
@@ -102,9 +142,9 @@ def indicator_leds(
         return False, False
     if mode == "running":
         return False, True
-    if mode == "paused":
-        return True, True
-    return True, False
+    # Idle and cooling: Start runs the still, and holding Stop opens the menu.
+    # Paused: Start resumes and Stop stops.
+    return True, True
 
 
 def open_panel(settings: Settings) -> Panel | None:
@@ -125,7 +165,13 @@ def open_panel(settings: Settings) -> Panel | None:
     start = stop = led_start = led_stop = encoder = None
     try:
         start = Button(gpio.button_start, pull_up=True, bounce_time=0.05, pin_factory=factory)
-        stop = Button(gpio.button_stop, pull_up=True, bounce_time=0.05, pin_factory=factory)
+        stop = Button(
+            gpio.button_stop,
+            pull_up=True,
+            bounce_time=0.05,
+            hold_time=STOP_HOLD_SECONDS,
+            pin_factory=factory,
+        )
         led_start = LED(gpio.led_start, active_high=LED_ACTIVE_HIGH, pin_factory=factory)
         led_stop = LED(gpio.led_stop, active_high=LED_ACTIVE_HIGH, pin_factory=factory)
         encoder = RotaryEncoder(

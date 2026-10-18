@@ -18,13 +18,22 @@ import threading
 import time
 from dataclasses import replace
 
+from brewski import __version__
 from brewski.emergency import summary
 from brewski.lcd import NullDisplay, display_key, open_display, status_lines
+from brewski.menu import SoftwareMenu
 from brewski.panel import indicator_leds, open_panel, panel_key
 from brewski.sources.base import HardwareSource
-from brewski.updates import read_status
-from brewski.updates import report as update_report
-from brewski.updates import start_apply_service, write_status
+from brewski.updates import (
+    ReleaseInfo,
+    apply_supported,
+    check_release,
+    read_status,
+    report as update_report,
+    request_reboot,
+    start_apply_service,
+    write_status,
+)
 from brewski.store import (
     EARLY_CUTOFF_MAX_F,
     SLOT_COUNT,
@@ -267,6 +276,10 @@ class Controller:
         self._display_key: tuple[int, int] | None = None
         self._panel: object | None = None
         self._panel_key: tuple[int, ...] | None = None
+        self._menu: SoftwareMenu | None = None
+        self._menu_generation = 0
+        self._menu_dirty = False
+        self._menu_check_thread: threading.Thread | None = None
         self._hold_display = False
         # The dial paints this immediately. It is written to the database
         # once the knob has been still, so the screen is not waiting on disk.
@@ -604,10 +617,15 @@ class Controller:
                 return
             self._hold_display = False
         with self._lock:
+            self._drop_menu_if_blocked()
             settings = self.store.get_settings()
             key = display_key(settings)
-            lines = self._panel_lines(settings) if key is not None else None
-            led_state = indicator_leds(self._mode, emergency=bool(self._emergency))
+            if self._menu is not None and key is not None:
+                lines = self._menu.lines(__version__)
+                led_state = self._menu.leds()
+            else:
+                lines = self._panel_lines(settings) if key is not None else None
+                led_state = indicator_leds(self._mode, emergency=bool(self._emergency))
         self._sync_panel()
         if self._panel is not None:
             self._panel.set_leds(*led_state)  # type: ignore[attr-defined]
@@ -1473,10 +1491,18 @@ class Controller:
         return codes
 
     def _apply_panel(self) -> bool:
+        dismissed = self._dismiss_blocked_menu()
+        painted = self._paint_finished_check()
         panel = self._panel
         if panel is None:
-            return False
-        starts, stops, steps = panel.take()  # type: ignore[attr-defined]
+            return dismissed or painted
+        starts, stops, holds, steps = panel.take()  # type: ignore[attr-defined]
+        if self._menu is not None:
+            return self._apply_menu(starts, stops, steps) or dismissed or painted
+        if holds and self._open_menu():
+            # This batch opened the menu. Do not also move, select, or stop.
+            self._refresh_display()
+            return True
         moved = False
         if steps:
             try:
@@ -1487,14 +1513,14 @@ class Controller:
             try:
                 self.stop()
             except ControllerError:
-                return moved
-            return moved
+                return moved or dismissed or painted
+            return moved or dismissed or painted
         if not starts:
-            return moved
+            return moved or dismissed or painted
         try:
             snapshot = self.status()
             if snapshot["emergency_codes"]:
-                return moved
+                return moved or dismissed or painted
             if snapshot["mode"] == "paused":
                 self.resume()
             elif snapshot["mode"] in ("idle", "cooling"):
@@ -1503,8 +1529,128 @@ class Controller:
                 else:
                     self.start()
         except ControllerError:
-            return moved
-        return moved
+            return moved or dismissed or painted
+        return moved or dismissed or painted
+
+    def _menu_blocked(self) -> bool:
+        """Caller holds ``self._lock``. True when the menu must not stay open."""
+
+        return self._mode not in ("idle", "cooling") or bool(self._emergency)
+
+    def _drop_menu_if_blocked(self) -> None:
+        """Caller holds ``self._lock``."""
+
+        if self._menu is None or not self._menu_blocked():
+            return
+        self._menu = None
+        self._menu_generation += 1
+
+    def _dismiss_blocked_menu(self) -> bool:
+        with self._lock:
+            if self._menu is None or not self._menu_blocked():
+                return False
+            self._drop_menu_if_blocked()
+        self._refresh_display()
+        return True
+
+    def _paint_finished_check(self) -> bool:
+        """Draw a release check that finished on the background thread."""
+
+        with self._lock:
+            if not self._menu_dirty:
+                return False
+            self._menu_dirty = False
+        self._refresh_display()
+        return True
+
+    def _open_menu(self) -> bool:
+        with self._lock:
+            if self._menu_blocked():
+                return False
+            self._menu = SoftwareMenu()
+            self._menu_generation += 1
+        return True
+
+    def _apply_menu(self, starts: int, stops: int, steps: int) -> bool:
+        action: str | None = None
+        generation = self._menu_generation
+        close = False
+        changed = False
+        with self._lock:
+            menu = self._menu
+            if menu is None:
+                return False
+            if stops:
+                if menu.screen == "checking":
+                    self._menu_generation += 1
+                if not menu.back():
+                    self._menu = None
+                    close = True
+                changed = True
+            if not close and steps:
+                changed = menu.move(steps) or changed
+            if not close and starts and not stops:
+                action = menu.select()
+                if action == "check":
+                    self._menu_generation += 1
+                    generation = self._menu_generation
+                changed = True
+        if changed:
+            self._refresh_display()
+        if action == "check":
+            self._start_menu_check(generation)
+        elif action == "apply":
+            self._install_from_menu()
+        elif action == "reboot":
+            self._reboot_from_menu()
+        return changed
+
+    def _start_menu_check(self, generation: int) -> None:
+        thread = threading.Thread(
+            target=self._finish_menu_check,
+            args=(generation,),
+            name="brewski-menu-update",
+            daemon=True,
+        )
+        self._menu_check_thread = thread
+        thread.start()
+
+    def _finish_menu_check(self, generation: int) -> None:
+        try:
+            release = check_release()
+            can_apply = apply_supported()
+        except Exception:
+            logger.exception("Update check failed")
+            release = ReleaseInfo(current=__version__, latest=None, available=False, reachable=False)
+            can_apply = False
+        with self._lock:
+            menu = self._menu
+            if menu is None or generation != self._menu_generation or menu.screen != "checking":
+                return
+            menu.show_release(release, can_apply)
+            self._menu_dirty = True
+
+    def _install_from_menu(self) -> None:
+        try:
+            self.start_update()
+        except ControllerError:
+            logger.warning("Could not start the update from the menu")
+            self._refresh_display()
+            return
+        with self._lock:
+            self._menu = None
+            self._menu_generation += 1
+
+    def _reboot_from_menu(self) -> None:
+        try:
+            request_reboot()
+        except (OSError, subprocess.CalledProcessError):
+            logger.warning("Reboot was refused")
+            with self._lock:
+                menu = self._menu
+                if menu is not None:
+                    menu.fail_reboot()
+            self._refresh_display()
 
     def _sync_panel(self) -> None:
         settings = self.store.get_settings()

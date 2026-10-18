@@ -20,6 +20,7 @@ def test_status_starts_idle(client):
     assert status["run_id"] is None
     assert status["settings_locked"] is False
     assert status["temps_f"][0] == 70
+    assert status["cabinet_enabled"] is True
 
 
 def test_run_start_pause_resume_stop(client, controller):

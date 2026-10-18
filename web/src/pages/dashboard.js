@@ -96,24 +96,9 @@ function tempsFor(sample, run, sensorNames) {
 export function mountDashboard(root) {
   root.innerHTML = `
     <div class="board">
+      <p class="emergency-banner" id="emergency-banner" hidden></p>
+      <div class="stage" id="stage" data-probes="1" data-heaters="2" data-cabinet="on">
       <section class="probe-grid" id="temp-rows" aria-label="Temperatures"></section>
-      <section class="dashboard-card cabinet-card" id="cabinet-card" aria-label="Cabinet safety">
-        <p class="emergency-banner" id="emergency-banner" hidden></p>
-        <div class="cabinet-readout">
-          <div>
-            <span class="eyebrow">Cabinet</span>
-            <p class="cabinet-value" id="cabinet-temp">—</p>
-          </div>
-          <div>
-            <span class="eyebrow">Humidity</span>
-            <p class="cabinet-value" id="cabinet-humidity">—</p>
-          </div>
-          <div>
-            <span class="eyebrow">Limit</span>
-            <p class="cabinet-value" id="cabinet-limit">—</p>
-          </div>
-        </div>
-      </section>
       <section class="dashboard-card console">
         <div class="console-main">
           <div class="run-identity">
@@ -156,9 +141,31 @@ export function mountDashboard(root) {
           <p class="boil-warning" id="target-warning" hidden>Above water's boiling point (212°F).</p>
         </div>
       </section>
-      <section class="heater-band" aria-label="Heaters">
-        <div class="heater-grid" id="heater-rows"></div>
-      </section>
+        <section class="dashboard-card plant-card" id="plant-card" aria-label="Cabinet and heaters">
+          <div class="plant-body">
+            <div class="cabinet-block" id="cabinet-block">
+              <div class="cabinet-readout">
+                <div>
+                  <span class="eyebrow">Cabinet</span>
+                  <p class="cabinet-value" id="cabinet-temp">—</p>
+                </div>
+                <div>
+                  <span class="eyebrow">Humidity</span>
+                  <p class="cabinet-value" id="cabinet-humidity">—</p>
+                </div>
+                <div>
+                  <span class="eyebrow">Limit</span>
+                  <p class="cabinet-value" id="cabinet-limit">—</p>
+                </div>
+              </div>
+            </div>
+            <div class="heater-band" aria-label="Heaters">
+              <span class="eyebrow plant-heaters-label">Heaters</span>
+              <div class="heater-grid" id="heater-rows"></div>
+            </div>
+          </div>
+        </section>
+      </div>
       <section class="dashboard-card chart-card">
         <div class="card-title-with-timer">
           <h2 class="card-title">Temperature over time</h2>
@@ -476,6 +483,16 @@ export function mountDashboard(root) {
     renderHeaters(status)
     renderTemps(status)
     renderCabinet(status)
+    const stage = document.getElementById('stage')
+    const cabinetOn = status.cabinet_enabled !== false
+    stage.dataset.probes = String(Math.max(1, status.sensor_names.length))
+    stage.dataset.heaters = String(Math.max(1, status.heater_names.length))
+    stage.dataset.cabinet = cabinetOn ? 'on' : 'off'
+    document.getElementById('cabinet-block').hidden = !cabinetOn
+    document.getElementById('plant-card').setAttribute(
+      'aria-label',
+      cabinetOn ? 'Cabinet and heaters' : 'Heaters',
+    )
     const target = document.getElementById('target-input')
     if (document.activeElement !== target) target.value = String(Math.round(Number(status.target_temp_f)))
     syncTargetWarning()

@@ -15,17 +15,19 @@ export function mountStatusStrip(host) {
         <span class="status-strip-temps" data-strip="temps"></span>
         <span class="status-strip-emergency" data-strip="emergency" hidden></span>
         <span class="status-strip-side">
-          <span class="status-strip-stat">
-            <span class="status-strip-kicker">Cabinet</span>
-            <strong data-strip="cabinet">—</strong>
-          </span>
-          <span class="status-strip-stat">
-            <span class="status-strip-kicker">Humidity</span>
-            <strong data-strip="humidity">—</strong>
-          </span>
-          <span class="status-strip-stat">
-            <span class="status-strip-kicker">Limit</span>
-            <strong data-strip="limit">—</strong>
+          <span class="status-strip-climate" data-strip="climate">
+            <span class="status-strip-stat">
+              <span class="status-strip-kicker">Cabinet</span>
+              <strong data-strip="cabinet">—</strong>
+            </span>
+            <span class="status-strip-stat">
+              <span class="status-strip-kicker">Humidity</span>
+              <strong data-strip="humidity">—</strong>
+            </span>
+            <span class="status-strip-stat">
+              <span class="status-strip-kicker">Limit</span>
+              <strong data-strip="limit">—</strong>
+            </span>
           </span>
           <span class="status-strip-heaters" data-strip="heaters"></span>
           <span class="status-strip-stat">
@@ -114,6 +116,7 @@ export function mountStatusStrip(host) {
       humidity == null || Number.isNaN(Number(humidity)) ? '—' : `${Math.round(Number(humidity))}%`
     host.querySelector('[data-strip="limit"]').textContent =
       limit == null || Number.isNaN(Number(limit)) ? '—' : `${Math.round(Number(limit))}°F`
+    host.querySelector('[data-strip="climate"]').hidden = status.cabinet_enabled === false
     const codes = status.emergency || []
     const alarm = host.querySelector('[data-strip="emergency"]')
     alarm.hidden = codes.length === 0

@@ -1,7 +1,10 @@
 """v0.6.0: emergency stop, the target dial, and live-source selection."""
 
+import threading
+
 import pytest
 
+from brewski import __version__
 from brewski.cli import _build_runtime
 from brewski.controller import Controller, ControllerError
 from brewski.emergency import CODES, check_code_list
@@ -9,6 +12,7 @@ from brewski.panel import indicator_leds
 from brewski.sources.hts221 import calibration_from_bytes, compensate
 from brewski.sources.max31865 import decode_rtd, temperature_f
 from brewski.store import merge_settings
+from brewski.updates import ReleaseInfo
 
 
 class _Panel:
@@ -17,7 +21,7 @@ class _Panel:
 
     def take(self):
         events = self.events
-        self.events = (0, 0, 0)
+        self.events = (0, 0, 0, 0)
         return events
 
     def set_leds(self, *_args):
@@ -38,15 +42,15 @@ def test_emergency_codes_reject_a_duplicate_or_a_renumbered_id():
 
 
 def test_panel_leds_follow_the_action():
-    assert indicator_leds("idle", emergency=False) == (True, False)
+    assert indicator_leds("idle", emergency=False) == (True, True)
     assert indicator_leds("running", emergency=False) == (False, True)
     assert indicator_leds("paused", emergency=False) == (True, True)
-    assert indicator_leds("cooling", emergency=False) == (True, False)
+    assert indicator_leds("cooling", emergency=False) == (True, True)
     assert indicator_leds("running", emergency=True) == (False, False)
 
 
 def test_encoder_step_shows_on_the_display_before_it_is_saved(controller, store):
-    controller._panel = _Panel((0, 0, 5))
+    controller._panel = _Panel((0, 0, 0, 5))
     assert controller._apply_panel() is True
     assert store.get_settings().target_temp_f == 165
     assert "170 F" in controller._display.lines[1]
@@ -56,17 +60,17 @@ def test_encoder_step_shows_on_the_display_before_it_is_saved(controller, store)
 
 
 def test_encoder_step_saves_the_target(controller, store):
-    controller._panel = _Panel((0, 0, 1))
+    controller._panel = _Panel((0, 0, 0, 1))
     controller.tick(0)
     assert store.get_settings().target_temp_f == 166
 
     store.save_settings(merge_settings(store.get_settings(), {"target_temp_f": 240}))
-    controller._panel = _Panel((0, 0, 1))
+    controller._panel = _Panel((0, 0, 0, 1))
     controller.tick(0)
     assert store.get_settings().target_temp_f == 240
 
     store.save_settings(merge_settings(store.get_settings(), {"target_temp_f": 90}))
-    controller._panel = _Panel((0, 0, -1))
+    controller._panel = _Panel((0, 0, 0, -1))
     controller.tick(0)
     assert store.get_settings().target_temp_f == 90
 
@@ -74,11 +78,11 @@ def test_encoder_step_saves_the_target(controller, store):
 def test_uncalibrated_start_begins_calibration_and_stop_does_nothing_before_that(store, source):
     store.save_settings(merge_settings(store.get_settings(), {"setup_complete": True, "charge_gallons": 5}))
     controller = Controller(store, source)
-    controller._panel = _Panel((0, 1, 0))
+    controller._panel = _Panel((0, 1, 0, 0))
     controller.tick(0)
     assert controller.status()["mode"] == "idle"
 
-    controller._panel = _Panel((1, 0, 0))
+    controller._panel = _Panel((1, 0, 0, 0))
     controller.tick(0)
     status = controller.status()
     assert status["mode"] == "running"
@@ -124,6 +128,7 @@ def test_unanswered_cabinet_sensor_trips_and_a_disabled_one_does_not(controller,
     source.cabinet_temp_f = 190
     controller.tick(1)
     assert controller.status()["emergency_codes"] == []
+    assert controller.status()["cabinet_enabled"] is False
     controller.start()
 
 
@@ -197,3 +202,161 @@ def test_dev_command_still_uses_the_dummy_source(monkeypatch, tmp_path):
     controller, _app = _build_runtime(True)
     assert controller.source.name == "dummy"
     controller.shutdown()
+
+
+def test_stop_hold_opens_the_software_menu_without_changing_the_target(controller, store):
+    controller._panel = _Panel((0, 0, 1, 1))
+    assert controller._apply_panel() is True
+    assert controller._display.lines == [
+        "Software Menu",
+        "> About",
+        "  Check for Update",
+        "  Reboot",
+    ]
+    assert store.get_settings().target_temp_f == 165
+    assert controller.status()["target_temp_f"] == 165
+
+    controller._panel = _Panel((0, 0, 0, 5))
+    controller._apply_panel()
+    assert controller._display.lines[2] == "> Check for Update"
+    assert store.get_settings().target_temp_f == 165
+    assert controller.status()["target_temp_f"] == 165
+
+    controller._panel = _Panel((0, 0, 0, -1))
+    controller._apply_panel()
+    assert controller._display.lines[1] == "> About"
+
+    controller._panel = _Panel((1, 0, 0, 0))
+    controller._apply_panel()
+    assert controller._display.lines == ["About", "Brewski", __version__, "STOP back"]
+
+    controller._panel = _Panel((0, 1, 0, 0))
+    controller._apply_panel()
+    assert controller._display.lines[0] == "Software Menu"
+
+    controller._panel = _Panel((0, 1, 0, 0))
+    controller._apply_panel()
+    assert controller._menu is None
+    assert controller._display.lines[0] == "Idle:"
+
+
+def test_stop_hold_during_a_run_does_not_stop_or_open_the_menu(controller):
+    controller.start()
+    controller._panel = _Panel((0, 0, 1, 0))
+    assert controller._apply_panel() is False
+    assert controller.status()["mode"] == "running"
+    assert controller._menu is None
+
+    controller._panel = _Panel((0, 1, 0, 0))
+    controller._apply_panel()
+    assert controller.status()["mode"] != "running"
+    assert controller._menu is None
+
+
+def test_stop_hold_is_ignored_during_an_emergency(controller):
+    controller._emergency = ["E01"]
+    controller._panel = _Panel((0, 0, 1, 0))
+    assert controller._apply_panel() is False
+    assert controller._menu is None
+
+
+def test_cooling_hold_opens_the_software_menu(controller):
+    controller._mode = "cooling"
+    controller._panel = _Panel((0, 0, 1, 0))
+    assert controller._apply_panel() is True
+    assert controller._display.lines[0] == "Software Menu"
+
+
+def test_software_menu_closes_when_a_run_starts(controller):
+    controller._panel = _Panel((0, 0, 1, 0))
+    controller._apply_panel()
+    controller.start()
+    controller._panel = _Panel((0, 0, 0, 0))
+    controller._apply_panel()
+    assert controller._menu is None
+    assert controller._display.lines[0].startswith("Running:")
+
+
+def _open_update_item(controller):
+    controller._panel = _Panel((0, 0, 1, 0))
+    controller._apply_panel()
+    controller._panel = _Panel((0, 0, 0, 1))
+    controller._apply_panel()
+    controller._panel = _Panel((1, 0, 0, 0))
+    controller._apply_panel()
+
+
+def test_menu_check_shows_an_update_and_start_installs_it(controller, monkeypatch):
+    info = ReleaseInfo(current="0.6.5", latest="0.6.6", available=True, reachable=True)
+    monkeypatch.setattr("brewski.controller.check_release", lambda: info)
+    monkeypatch.setattr("brewski.controller.apply_supported", lambda: True)
+    started = []
+    monkeypatch.setattr(controller, "start_update", lambda: started.append(True) or {})
+    _open_update_item(controller)
+    controller._menu_check_thread.join(2)
+    controller._apply_panel()
+    assert controller._display.lines[1] == "0.6.5 -> 0.6.6"
+    assert controller._display.lines[2] == "START install"
+    controller._panel = _Panel((1, 0, 0, 0))
+    controller._apply_panel()
+    assert started == [True]
+    assert controller._menu is None
+
+
+def test_menu_check_on_a_mac_does_not_offer_install(controller, monkeypatch):
+    info = ReleaseInfo(current="0.6.5", latest="0.6.6", available=True, reachable=True)
+    monkeypatch.setattr("brewski.controller.check_release", lambda: info)
+    monkeypatch.setattr("brewski.controller.apply_supported", lambda: False)
+    _open_update_item(controller)
+    controller._menu_check_thread.join(2)
+    controller._apply_panel()
+    assert controller._display.lines[2] == "Cannot install here"
+    assert controller._display.lines[3] == "STOP back"
+    controller._panel = _Panel((1, 0, 0, 0))
+    controller._apply_panel()
+    assert controller._menu is not None
+    assert controller._menu.screen == "update"
+
+
+def test_menu_check_cancel_drops_a_late_result(controller, monkeypatch):
+    started = threading.Event()
+    gate = threading.Event()
+    info = ReleaseInfo(current="0.6.5", latest=None, available=False, reachable=False)
+
+    def blocked():
+        started.set()
+        assert gate.wait(2)
+        return info
+
+    monkeypatch.setattr("brewski.controller.check_release", blocked)
+    monkeypatch.setattr("brewski.controller.apply_supported", lambda: False)
+    _open_update_item(controller)
+    assert controller._display.lines[1] == "Checking..."
+    assert started.wait(2)
+    controller._panel = _Panel((0, 1, 0, 0))
+    controller._apply_panel()
+    gate.set()
+    controller._menu_check_thread.join(2)
+    assert controller._display.lines[0] == "Software Menu"
+
+
+def test_menu_reboot_confirms_then_reports_a_refusal(controller, monkeypatch):
+    def refuse():
+        raise OSError("nope")
+
+    monkeypatch.setattr("brewski.controller.request_reboot", refuse)
+    controller._panel = _Panel((0, 0, 1, 0))
+    controller._apply_panel()
+    controller._panel = _Panel((0, 0, 0, -1))
+    controller._apply_panel()
+    assert controller._display.lines[3] == "> Reboot"
+    controller._panel = _Panel((1, 0, 0, 0))
+    controller._apply_panel()
+    assert controller._display.lines[:3] == ["Reboot the Pi?", "START reboot", "STOP cancel"]
+    controller._panel = _Panel((1, 0, 0, 0))
+    controller._apply_panel()
+    assert controller._display.lines[0] == "Reboot failed"
+    assert controller._display.lines[1] == "No permission"
+    controller._panel = _Panel((0, 1, 0, 0))
+    controller._apply_panel()
+    assert controller._display.lines[0] == "Software Menu"

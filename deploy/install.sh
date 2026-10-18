@@ -257,6 +257,7 @@ write_sudoers() {
   [[ -n "$systemctl" ]] || die "systemctl was not found."
   cat > /etc/sudoers.d/brewski <<EOF
 ${user} ALL=(root) NOPASSWD: ${systemctl} start --no-block brewski-apply-update.service
+${user} ALL=(root) NOPASSWD: ${systemctl} reboot
 EOF
   chmod 440 /etc/sudoers.d/brewski
   visudo -cf /etc/sudoers.d/brewski >/dev/null

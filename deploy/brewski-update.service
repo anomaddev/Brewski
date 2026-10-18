@@ -1,0 +1,14 @@
+[Unit]
+Description=Update Brewski to the latest GitHub release
+After=network-online.target
+Wants=network-online.target
+Before=brewski.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/brewski/install.sh --boot-update
+TimeoutStartSec=900
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -42,7 +42,7 @@ Any enabled probe after the control probe is logged and charted only. It does no
 
 The LCD is a 20×4 I2C display on the saved SDA and SCL pins, after setup. Saved BCM 2 and 3 use the Pi's hardware bus. The running controller keeps the start and stop buttons, their LED relays, and the target encoder open. An LED is solid on only while that button will do something. The boot update prompt turns both LEDs on and does not blink them.
 
-Holding Stop for 2 seconds while the still is idle or cooling opens a Software Menu on that display: About, Check for Update, and Reboot. The dial moves the highlight, Start chooses it, and Stop goes back. The hold is ignored during a run, a pause, or an emergency, and a short press of Stop still stops a running or paused run. Check for Update uses the same installer as the dashboard. Reboot asks for confirmation, then reboots the Pi. The install grants the service account passwordless `systemctl reboot` for that.
+Holding Stop for 2 seconds while the still is idle or cooling opens a Software Menu on that display: About, Check for Update, and Reboot. The same hold opens it while an emergency code is showing, so the still can be rebooted or updated without the dashboard. The dial moves the highlight, Start chooses it, and Stop goes back. The hold is ignored during a run or a pause, and a short press of Stop still stops a running or paused run. Check for Update uses the same installer as the dashboard. Reboot asks for confirmation, then reboots the Pi. The install grants the service account passwordless `systemctl reboot` for that.
 
 The installer enables SPI and I2C and adds the service user to the `spi`, `i2c`, and `gpio` groups. The Pi may need one reboot before `/dev/spidev0.0` appears.
 

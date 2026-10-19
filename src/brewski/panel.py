@@ -139,6 +139,10 @@ def indicator_leds(
     """Start LED, then stop LED. On only while that button will do something."""
 
     if emergency:
+        # Start stays refused. Stop still stops an open run, and once the
+        # still is idle or cooling a hold opens the software menu.
+        if mode in ("idle", "cooling", "running", "paused"):
+            return False, True
         return False, False
     if mode == "running":
         return False, True

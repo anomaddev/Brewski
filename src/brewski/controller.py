@@ -1535,7 +1535,7 @@ class Controller:
     def _menu_blocked(self) -> bool:
         """Caller holds ``self._lock``. True when the menu must not stay open."""
 
-        return self._mode not in ("idle", "cooling") or bool(self._emergency)
+        return self._mode not in ("idle", "cooling")
 
     def _drop_menu_if_blocked(self) -> None:
         """Caller holds ``self._lock``."""

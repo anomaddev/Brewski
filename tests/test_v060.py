@@ -46,7 +46,10 @@ def test_panel_leds_follow_the_action():
     assert indicator_leds("running", emergency=False) == (False, True)
     assert indicator_leds("paused", emergency=False) == (True, True)
     assert indicator_leds("cooling", emergency=False) == (True, True)
-    assert indicator_leds("running", emergency=True) == (False, False)
+    assert indicator_leds("idle", emergency=True) == (False, True)
+    assert indicator_leds("cooling", emergency=True) == (False, True)
+    assert indicator_leds("running", emergency=True) == (False, True)
+    assert indicator_leds("paused", emergency=True) == (False, True)
 
 
 def test_encoder_step_shows_on_the_display_before_it_is_saved(controller, store):
@@ -253,11 +256,26 @@ def test_stop_hold_during_a_run_does_not_stop_or_open_the_menu(controller):
     assert controller._menu is None
 
 
-def test_stop_hold_is_ignored_during_an_emergency(controller):
+def test_stop_hold_during_an_emergency_opens_the_software_menu(controller):
     controller._emergency = ["E01"]
     controller._panel = _Panel((0, 0, 1, 0))
-    assert controller._apply_panel() is False
+    assert controller._apply_panel() is True
+    assert controller._display.lines[0] == "Software Menu"
+
+    controller._panel = _Panel((0, 1, 0, 0))
+    controller._apply_panel()
     assert controller._menu is None
+    assert controller._display.lines[0].startswith("Emergency:")
+
+
+def test_an_emergency_does_not_close_an_open_software_menu(controller):
+    controller._panel = _Panel((0, 0, 1, 0))
+    controller._apply_panel()
+    controller._emergency = ["E03"]
+    controller._panel = _Panel((0, 0, 0, 0))
+    controller._apply_panel()
+    assert controller._menu is not None
+    assert controller._display.lines[0] == "Software Menu"
 
 
 def test_cooling_hold_opens_the_software_menu(controller):

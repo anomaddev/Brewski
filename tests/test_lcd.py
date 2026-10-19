@@ -111,7 +111,7 @@ def test_calibration_steps_name_the_climb_the_fall_and_the_result():
         calibration_rise_f=12.4,
         elapsed_seconds=90,
     )
-    assert coasting[0] == "Coasting:   00:01:30"
+    assert coasting[0] == "Coast:      00:01:30"
     assert coasting[1] == "Rise:        +12.4 F"
     assert coasting[2] == "Boiler:      168.5 F"
     assert all(len(line) == COLUMNS for line in coasting)
@@ -122,7 +122,7 @@ def test_calibration_steps_name_the_climb_the_fall_and_the_result():
         calibration_peak_f=15.1,
         elapsed_seconds=100,
     )
-    assert falling[0] == "Falling:    00:01:40"
+    assert falling[0] == "Momentum:   00:01:40"
     assert falling[1] == "Peak:        +15.1 F"
     rated = _screen(
         calibrating=True,
@@ -135,7 +135,7 @@ def test_calibration_steps_name_the_climb_the_fall_and_the_result():
 
     paused = _screen(mode="paused", calibrating=True, calibration_step="coasting", elapsed_seconds=90)
     assert paused[0] == "Paused:     00:01:30"
-    assert paused[1] == "Step:       Coasting"
+    assert paused[1] == "Step:          Coast"
     assert all(len(line) == COLUMNS for line in paused)
 
     saved = _screen(mode="cooling", calibration_peak_f=15.1, calibration_rate_f=2.4, elapsed_seconds=12)

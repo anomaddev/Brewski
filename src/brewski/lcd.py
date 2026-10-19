@@ -542,7 +542,18 @@ def status_lines(
 
 
 def _calibration_step_name(step: str | None) -> str:
-    return {"coasting": "Coasting", "falling": "Falling"}.get(step or "", "Heating")
+    return {
+        "settle": "Settle",
+        "cold_start": "Cold Start",
+        "linear": "Heating",
+        "coast": "Coast",
+        "momentum": "Momentum",
+        "approach": "Stage II",
+        "pulses": "Pulses",
+        "hold": "Holding",
+        "coasting": "Coast",
+        "falling": "Momentum",
+    }.get(step or "", "Heating")
 
 
 def _calibration_head(
@@ -553,15 +564,27 @@ def _calibration_head(
     peak_f: float | None,
     rate_f: float | None,
 ) -> list[str]:
-    if step == "coasting":
-        return [_pair("Coasting:", clock), _pair("Rise:", _signed_degrees(rise_f))]
-    if step == "falling":
+    name = _calibration_step_name(step)
+    if step in {"coast", "coasting"}:
+        return [_pair("Coast:", clock), _pair("Rise:", _signed_degrees(rise_f))]
+    if step in {"momentum", "falling"}:
         if rate_f is None:
             detail = _pair("Peak:", _signed_degrees(peak_f))
         else:
             detail = _pair("Rate:", _degrees_per_min(rate_f))
-        return [_pair("Falling:", clock), detail]
-    return [_pair("Heating:", clock), _value_line("Target:", _whole_temp(target_f))]
+        return [_pair("Momentum:", clock), detail]
+    if step == "cold_start":
+        return [_pair("Cold Start:", clock), _value_line("Target:", _whole_temp(target_f))]
+    label = {
+        "settle": "Settle:",
+        "linear": "Heating:",
+        "approach": "Stage II:",
+        "pulses": "Pulses:",
+        "hold": "Holding:",
+    }.get(step or "", "Heating:")
+    if name and step in {"settle", "linear", "approach", "pulses", "hold", "heating", None}:
+        return [_pair(label, clock), _value_line("Target:", _whole_temp(target_f))]
+    return [_pair(label, clock), _value_line("Target:", _whole_temp(target_f))]
 
 
 def _signed_degrees(value: float | None) -> str:

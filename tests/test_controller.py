@@ -1,10 +1,10 @@
 import math
+from dataclasses import replace
 
 import pytest
 
 from brewski.controller import (
     CALIBRATION_TEMP_F,
-    COOLDOWN_STABLE_SECONDS,
     PREDICT_MAX_HORIZON_SECONDS,
     Controller,
     ControllerError,
@@ -218,7 +218,7 @@ def test_time_to_target_includes_the_coast_and_cooldown_waits_for_a_fall():
     cool = seconds_to_cooldown(145.0, rate)
     assert cool is not None
     assert 0 < cool <= PREDICT_MAX_HORIZON_SECONDS
-    assert seconds_to_cooldown(160.0, None, learned_rate_f_per_min=2.0) == pytest.approx((160 - 75) / (2 / 60))
+    assert seconds_to_cooldown(160.0, None, learned_rate_f_per_min=2.0) == pytest.approx((160 - 90) / (2 / 60))
     assert seconds_to_cooldown(160.0, 0.2) is None
 
 
@@ -266,89 +266,116 @@ def test_resume_does_not_wait_out_the_minimum_off_time(store):
     assert source.heaters[:2] == [True, True]
 
 
-def _open_soaked_calibration(controller, source):
-    """Open the SSR at 120°F minus the learned coast, on a flat slope."""
+def _heating_temp(elapsed: float) -> float:
+    """Cold-start parabola for 20s of heat, then a straight 0.4°F/s climb."""
 
-    controller.start({"kind": "calibration", "charge_gallons": 5, "target_temp_f": 190})
-    _soak_sheath(controller)
-    held = CALIBRATION_TEMP_F - 3.1
-    for _ in range(16):
-        source.temps = [held, 150.0]
+    if elapsed <= 3:
+        return 70.0
+    heat = elapsed - 3.0
+    if heat <= 20:
+        return 70.0 + 0.01 * heat * heat
+    return 74.0 + 0.4 * (heat - 20.0)
+
+
+def _drive(controller, source, profile, limit: int, step: str) -> dict:
+    for _ in range(limit):
+        status = controller.status()
+        if status["calibration_step"] == step:
+            return status
+        source.temps = [profile(status["elapsed_seconds"] + 1), 70.0]
         controller.tick(1)
-    assert source.heaters[:2] == [True, True]
-    opened = CALIBRATION_TEMP_F - 3.0
-    source.temps = [opened, 150.0]
-    controller.tick(1)
-    assert source.heaters[:2] == [False, False]
-    return opened
+    raise AssertionError(controller.status()["calibration_step"])
 
 
-def test_calibration_records_the_crest_and_then_the_cooling_rate(store):
-    source = StaticSource([100.0, 90.0])
+def test_calibration_records_the_parabola_and_then_the_cooling_rate(store):
+    source = StaticSource([70.0, 70.0])
     controller = Controller(store, source)
-    opened = _open_soaked_calibration(controller, source)
+    controller.start({"kind": "calibration", "charge_gallons": 5, "target_temp_f": 190})
     assert store.get_settings().target_temp_f == 165
     assert controller.status()["target_temp_f"] == CALIBRATION_TEMP_F
-    assert store.get_run(controller.status()["run_id"])["target_temp_f"] == CALIBRATION_TEMP_F
-    assert controller.status()["calibration_step"] == "coasting"
-    assert controller._panel_lines(store.get_settings())[0].startswith("Coasting:")
-
-    peak = opened + 15.0
-    for _ in range(15):
-        source.temps = [peak, 150.0]
-        controller.tick(1)
-    assert controller.status()["mode"] == "running"
-    assert store.get_settings().learned_coast_f == 3
-
-    for _ in range(25):
-        source.temps = [peak - 0.6, 150.0]
-        controller.tick(1)
-    assert controller.status()["mode"] == "running"
-    assert controller.status()["calibration_step"] == "falling"
-    settings = store.get_settings()
-    assert settings.learned_coast_f == pytest.approx(15.0, abs=0.15)
-    assert controller._panel_lines(settings)[0].startswith("Falling:")
-
-    temp = peak - 0.6
-    for _ in range(120):
-        temp -= 2.0 / 60.0
-        source.temps = [temp, 150.0]
-        controller.tick(1)
-        if controller.status()["mode"] != "running":
-            break
-
-    assert controller.status()["mode"] == "cooling"
+    assert controller.status()["calibration_step"] == "settle"
     assert source.heaters[:2] == [False, False]
+
+    cold = _drive(controller, source, _heating_temp, 10, "cold_start")
+    assert cold["elapsed_seconds"] == pytest.approx(3)
+    assert source.heaters[:2] == [True, True]
+    paused = controller.pause()
+    controller.tick(5)
+    assert controller.status()["elapsed_seconds"] == paused["elapsed_seconds"]
+    assert source.heaters[:2] == [False, False]
+    controller.resume()
+    assert controller.status()["calibration_step"] == "cold_start"
+
+    _drive(controller, source, _heating_temp, 80, "linear")
+    assert controller._panel_lines(store.get_settings())[0].startswith("Heating:")
+    coast = _drive(controller, source, _heating_temp, 40, "coast")
+    assert source.heaters[:2] == [False, False]
+    assert controller._panel_lines(store.get_settings())[0].startswith("Coast:")
+    opened = coast["elapsed_seconds"]
+    base = _heating_temp(opened)
+
+    def coasting(elapsed: float) -> float:
+        age = elapsed - opened
+        if age <= 12:
+            return base + 0.2 * age
+        return base + 0.2 * 12 - 1.2
+
+    momentum = _drive(controller, source, coasting, 140, "momentum")
+    assert controller._panel_lines(store.get_settings())[0].startswith("Momentum:")
     settings = store.get_settings()
-    assert settings.learned_coast_f == pytest.approx(15.0, abs=0.15)
+    assert settings.learned_coast_f == pytest.approx(1.58, abs=0.3)
+    assert settings.learned_coast_seconds > 0
+    model = settings.thermal_model
+    assert model["cold_start_quad"] == pytest.approx(0.01, abs=0.003)
+    assert model["linear_rate_f_per_sec"] == pytest.approx(0.4, abs=0.05)
+    assert model["coast_quad"] < 0
+
+    fallen = source.temps[0]
+
+    def cooling(elapsed: float) -> float:
+        return fallen - (2.0 / 60.0) * (elapsed - momentum["elapsed_seconds"])
+
+    approach = _drive(controller, source, cooling, 150, "approach")
+    assert approach["calibration_step"] == "approach"
+    settings = store.get_settings()
     assert settings.learned_cooldown_f_per_min == pytest.approx(2.0, abs=0.4)
     assert settings.charge_gallons == 5
+    run = store.get_run(approach["run_id"])
+    assert [mark["name"] for mark in run["marks"]] == [
+        "Start",
+        "Cold Start",
+        "Heating",
+        "Momentum",
+        "Stage II",
+    ]
+    assert all(item["grok"] is None and item["accepted"] is False for item in run["analysis"])
+
+    source.temps = [80.0, 70.0]
+    controller.stop()
     listed = controller.runs()
     assert listed["stats"]["total_runs"] == 0
     assert listed["stats"]["calibration_runs"] == 1
     assert listed["runs"][0]["kind"] == "calibration"
     assert listed["runs"][0]["status"] == "stopped"
-    assert listed["runs"][0]["calibration_settled"] is True
+    assert listed["runs"][0]["calibration_settled"] is False
     assert listed["runs"][0]["coast_f"] == pytest.approx(settings.learned_coast_f)
-    assert listed["runs"][0]["cooldown_f_per_min"] == pytest.approx(
-        settings.learned_cooldown_f_per_min
-    )
     assert listed["runs"][0]["charge_gallons"] == 5
-    saved = controller._panel_lines(settings)
-    assert saved[0].startswith("Cooling:")
-    assert "F/min" in saved[1]
+    assert controller.status()["mode"] == "idle"
 
 
 def test_a_slow_climb_does_not_end_the_coast(store):
-    source = StaticSource([100.0, 90.0])
+    source = StaticSource([70.0, 70.0])
     controller = Controller(store, source)
-    opened = _open_soaked_calibration(controller, source)
+    controller.start({"kind": "calibration"})
+    coast = _drive(controller, source, _heating_temp, 120, "coast")
+    opened = coast["elapsed_seconds"]
+    base = source.temps[0]
     for step in range(1, 41):
-        source.temps = [opened + 0.05 * step, 150.0]
+        source.temps = [base + 0.05 * step, 70.0]
         controller.tick(1)
+        assert controller.status()["elapsed_seconds"] > opened
     assert controller.status()["mode"] == "running"
-    assert controller.status()["calibration_step"] == "coasting"
-    assert store.get_settings().learned_coast_f == 3
+    assert controller.status()["calibration_step"] == "coast"
 
 
 def test_a_cooling_rate_pulses_near_the_target_instead_of_the_deadband(store):
@@ -617,7 +644,7 @@ def test_calibration_counts_toward_element_hours_but_not_run_totals(store):
     history = controller.runs()
     assert history["stats"]["total_runs"] == 0
     assert history["stats"]["heater_on_seconds"] == pytest.approx([0, 0])
-    assert history["stats"]["heater_life_seconds"] == pytest.approx([8, 8])
+    assert history["stats"]["heater_life_seconds"] == pytest.approx([5, 5])
 
 
 def test_a_disabled_heater_stays_off_and_the_second_probe_can_control(store):
@@ -680,11 +707,10 @@ def test_restart_marks_an_open_run_stopped(store):
     assert saved["ended_at"]
 
 
-def test_a_run_that_never_reaches_target_has_no_cooldown(store):
-    source = StaticSource([100.0, 90.0])
+def test_a_run_that_stops_at_or_under_90_has_no_cooldown(store):
+    source = StaticSource([80.0, 70.0])
     controller = Controller(store, source)
     controller.start()
-    source.temps = [140.0, 110.0]
     controller.tick(2)
     status = controller.stop()
     assert status["mode"] == "idle"
@@ -692,7 +718,18 @@ def test_a_run_that_never_reaches_target_has_no_cooldown(store):
     assert controller.runs()["stats"]["average_cooldown_seconds"] is None
 
 
-def test_cooldown_runs_from_target_until_the_temperature_settles(store):
+def test_a_run_that_never_reaches_target_still_cools_when_it_is_hot(store):
+    source = StaticSource([140.0, 110.0])
+    controller = Controller(store, source)
+    controller.start()
+    controller.tick(2)
+    status = controller.stop()
+    assert status["mode"] == "cooling"
+    assert status["cooldown_run_id"] is not None
+    assert controller.runs()["stats"]["average_cooldown_seconds"] is None
+
+
+def test_cooldown_runs_until_the_probe_falls_under_90(store):
     source = StaticSource([100.0, 90.0])
     controller = Controller(store, source)
     controller.start()
@@ -708,23 +745,19 @@ def test_cooldown_runs_from_target_until_the_temperature_settles(store):
     controller.tick(60)
     assert controller.status()["mode"] == "cooling"
 
-    source.temps = [110.0, 100.0]
-    controller.tick(COOLDOWN_STABLE_SECONDS)
-    assert controller.status()["mode"] == "cooling"
+    source.temps = [89.0, 80.0]
     controller.tick(1)
     assert controller.status()["mode"] == "idle"
 
     saved = store.get_run(run_id)
     assert saved["cooldown_status"] == "complete"
-    assert saved["cooldown_seconds"] == pytest.approx(30 + 60 + COOLDOWN_STABLE_SECONDS + 1)
+    assert saved["cooldown_seconds"] == pytest.approx(30 + 60 + 1)
     assert saved["cooldown_baseline_f"] == 165
     assert any(sample["phase"] == "cooldown" for sample in saved["samples"])
-    assert controller.runs()["stats"]["average_cooldown_seconds"] == pytest.approx(
-        30 + 60 + COOLDOWN_STABLE_SECONDS + 1
-    )
+    assert controller.runs()["stats"]["average_cooldown_seconds"] == pytest.approx(30 + 60 + 1)
 
 
-def test_a_swing_wider_than_2f_keeps_the_cooldown_open(store):
+def test_staying_hot_keeps_the_cooldown_open(store):
     source = StaticSource([165.0, 150.0])
     controller = Controller(store, source)
     controller.start()
@@ -732,13 +765,9 @@ def test_a_swing_wider_than_2f_keeps_the_cooldown_open(store):
     controller.stop()
     source.temps = [100.0, 90.0]
     controller.tick(30)
-    source.temps = [103.0, 90.0]
-    controller.tick(1)
-    source.temps = [100.0, 90.0]
-    controller.tick(COOLDOWN_STABLE_SECONDS)
+    source.temps = [120.0, 90.0]
+    controller.tick(30)
     assert controller.status()["mode"] == "cooling"
-    controller.tick(1)
-    assert controller.status()["mode"] == "idle"
 
 
 def test_starting_again_leaves_an_unfinished_cooldown_out_of_the_average(store):
@@ -750,7 +779,7 @@ def test_starting_again_leaves_an_unfinished_cooldown_out_of_the_average(store):
     controller.tick(3)
     controller.start()
     saved = store.get_run(run_id)
-    assert saved["cooldown_status"] == "abandoned"
+    assert saved["cooldown_status"] == "interrupted"
     assert controller.status()["mode"] == "running"
     assert controller.runs()["stats"]["average_cooldown_seconds"] is None
 
@@ -767,3 +796,72 @@ def test_cooldown_resumes_after_a_restart(store):
     assert resumed.status()["mode"] == "cooling"
     assert resumed.status()["cooldown_run_id"] == run_id
     assert resumed.status()["elapsed_seconds"] == pytest.approx(14)
+
+
+def test_a_restart_already_under_90_closes_the_cooldown(store):
+    source = StaticSource([165.0, 150.0])
+    first = Controller(store, source)
+    first.start()
+    first.tick(1)
+    run_id = first.stop()["cooldown_run_id"]
+
+    resumed = Controller(store, StaticSource([80.0, 70.0]))
+    assert resumed.status()["mode"] == "idle"
+    assert store.get_run(run_id)["cooldown_status"] == "complete"
+
+
+def test_a_ready_model_shuts_off_when_the_predicted_crest_reaches_the_target(store):
+    current = store.get_settings()
+    store.save_settings(
+        replace(
+            current,
+            thermal_model={
+                "cold_start_seconds": 20,
+                "cold_start_quad": 0.01,
+                "linear_rate_f_per_sec": 0.4,
+                "coast_rise_f": 4,
+                "coast_seconds": 20,
+                "coast_quad": -4 / 400,
+                "cooldown_f_per_min": 1,
+            },
+        )
+    )
+    source = StaticSource([100.0, 90.0])
+    controller = Controller(store, source)
+    controller.start()
+    _soak_sheath(controller)
+    source.temps = [160.0, 90.0]
+    controller.tick(1)
+    assert source.heaters[:2] == [True, True]
+    source.temps = [161.0, 90.0]
+    controller.tick(1)
+    assert source.heaters[:2] == [False, False]
+
+
+def test_grok_can_replace_a_stage_slope_when_it_agrees(store, monkeypatch):
+    monkeypatch.setenv("GROK_API_KEY", "test-key")
+    monkeypatch.setenv("BREWSKI_ANALYSIS_INLINE", "1")
+    monkeypatch.setattr("brewski.analysis.analyze_rate", lambda samples, kind: 0.41)
+    monkeypatch.setattr(
+        "brewski.analysis.analyze_model",
+        lambda samples, local: {
+            "linear_rate_f_per_sec": local["linear_rate_f_per_sec"],
+            "coast_rise_f": (local.get("coast_rise_f") or 0) + 0.2,
+            "cooldown_f_per_min": local.get("cooldown_f_per_min") or 2,
+        },
+    )
+    source = StaticSource([70.0, 70.0])
+    controller = Controller(store, source)
+    controller.start({"kind": "calibration"})
+    _drive(controller, source, _heating_temp, 80, "linear")
+    _drive(controller, source, _heating_temp, 40, "coast")
+    model = store.get_settings().thermal_model
+    assert model["linear_rate_f_per_sec"] == pytest.approx(0.41)
+    source.temps = [80.0, 70.0]
+    controller.stop()
+    revised = store.get_settings().thermal_model
+    assert revised["linear_rate_f_per_sec"] == pytest.approx(0.41)
+    assert revised["coast_rise_f"] is None
+    kinds = {item["kind"]: item["accepted"] for item in controller.runs()["runs"][0]["analysis"]}
+    assert kinds["linear"] is True
+    assert kinds["full"] is True

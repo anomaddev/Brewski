@@ -31,13 +31,20 @@ function coastText(status) {
   const eta = forecastText(status)
   const withEta = (text) => (eta ? `${text} ${eta}` : text)
   if (status.run_kind === 'calibration' && (status.mode === 'running' || status.mode === 'paused')) {
-    if (status.calibration_step === 'coasting') {
-      return withEta('Elements are off. Watching the climb until it crests.')
+    const crest =
+      status.predicted_crest_f == null ? '' : ` Predicted crest ${Number(status.predicted_crest_f).toFixed(1)}°F.`
+    const steps = {
+      settle: 'Settling with the elements off.',
+      cold_start: 'Cold start. The temperature is still bending upward.',
+      linear: 'Heating in a straight line.',
+      coast: 'Elements are off. The climb is coasting on a downward curve.',
+      momentum: 'Peak saved. Measuring how fast the pot cools.',
+      approach: 'Heading for about 140°F so the crest can land under 150°F.',
+      pulses: 'Short pulses, each one predicted to crest at or under 150°F.',
+      hold: 'Holding 150°F.',
     }
-    if (status.calibration_step === 'falling') {
-      return withEta('Peak saved. Measuring how fast the pot cools.')
-    }
-    return withEta('Heating toward 120°F. The elements turn off early so the crest can land there, then Brewski watches that climb and how fast the pot cools.')
+    const line = steps[status.calibration_step] || 'Calibrating toward 150°F.'
+    return withEta(`${line}${crest}`)
   }
   if (status.learned_coast_f == null) {
     return withEta('Calibrate with water in the pot. Runs stay locked until that measurement is saved.')
@@ -49,7 +56,7 @@ function coastText(status) {
   }
   const rate = `${Number(status.learned_cooldown_f_per_min).toFixed(1)}°F/min`
   return withEta(
-    `Learned coast ${learned}${gallons}. Cooling is ${rate}, so the element pulses back on about 1°F under the target.`,
+    `Learned coast ${learned}${gallons}. Cooling is ${rate}. A full model turns the element off when the predicted crest reaches the target.`,
   )
 }
 
@@ -88,10 +95,17 @@ function markersFor(runs, cutoff, now) {
   const markers = []
   for (const run of runs) {
     const start = Date.parse(run.started_at)
-    if (start >= cutoff && start <= now) markers.push({ at: start, kind: 'start' })
-    if (!run.ended_at) continue
+    if (start >= cutoff && start <= now) markers.push({ at: start, kind: 'start', label: 'Start' })
+    const named = Array.isArray(run.marks) ? run.marks : []
+    const hasCooldown = named.some((mark) => mark.name === 'Cooldown')
+    for (const mark of named) {
+      if (mark.name === 'Start') continue
+      const at = start + Number(mark.elapsed_seconds) * 1000
+      if (at >= cutoff && at <= now) markers.push({ at, kind: 'mark', label: mark.name })
+    }
+    if (!run.ended_at || hasCooldown) continue
     const end = Date.parse(run.ended_at)
-    if (end >= cutoff && end <= now) markers.push({ at: end, kind: 'stop' })
+    if (end >= cutoff && end <= now) markers.push({ at: end, kind: 'stop', label: 'Stop' })
   }
   return markers
 }
@@ -507,7 +521,7 @@ export function mountDashboard(root) {
       cabinetOn ? 'Cabinet and heaters' : 'Heaters',
     )
     const target = document.getElementById('target-input')
-    // Status reports 120°F while calibrating. That is the aim, not the setpoint.
+    // Status reports 150°F while calibrating. That is the aim, not the setpoint.
     if (status.run_kind !== 'calibration' && document.activeElement !== target) {
       target.value = String(Math.round(Number(status.target_temp_f)))
     }

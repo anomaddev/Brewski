@@ -336,7 +336,7 @@ def _open_update_item(controller):
 
 def test_menu_check_shows_an_update_and_start_installs_it(controller, monkeypatch):
     info = ReleaseInfo(current="0.6.5", latest="0.6.6", available=True, reachable=True)
-    monkeypatch.setattr("brewski.controller.check_release", lambda: info)
+    monkeypatch.setattr("brewski.controller.check_release", lambda **_kwargs: info)
     monkeypatch.setattr("brewski.controller.apply_supported", lambda: True)
     started = []
     monkeypatch.setattr(controller, "start_update", lambda: started.append(True) or {})
@@ -353,7 +353,7 @@ def test_menu_check_shows_an_update_and_start_installs_it(controller, monkeypatc
 
 def test_menu_check_on_a_mac_does_not_offer_install(controller, monkeypatch):
     info = ReleaseInfo(current="0.6.5", latest="0.6.6", available=True, reachable=True)
-    monkeypatch.setattr("brewski.controller.check_release", lambda: info)
+    monkeypatch.setattr("brewski.controller.check_release", lambda **_kwargs: info)
     monkeypatch.setattr("brewski.controller.apply_supported", lambda: False)
     _open_update_item(controller)
     controller._menu_check_thread.join(2)
@@ -371,7 +371,7 @@ def test_menu_check_cancel_drops_a_late_result(controller, monkeypatch):
     gate = threading.Event()
     info = ReleaseInfo(current="0.6.5", latest=None, available=False, reachable=False)
 
-    def blocked():
+    def blocked(**_kwargs):
         started.set()
         assert gate.wait(2)
         return info

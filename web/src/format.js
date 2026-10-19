@@ -57,7 +57,7 @@ export function statusLabel(status) {
 
 export function formatCooldown(status, seconds) {
   if (status === 'complete' || status === 'open') return formatDuration(seconds)
-  if (status === 'abandoned') return 'Incomplete'
+  if (status === 'abandoned' || status === 'interrupted') return 'Incomplete'
   return '—'
 }
 

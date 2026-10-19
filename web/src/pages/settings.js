@@ -26,9 +26,9 @@ export function mountSettings(root) {
                 lead: 'Compared with the first enabled probe.',
                 rows: [
                   ['Range', '90–240°F'],
-                  ['Shutoff', 'Measured coast, sooner if the rise is fast'],
+                  ['Shutoff', 'Predicted crest, or the measured coast'],
                   ['No cool rate', 'Back on 2°F under that coast'],
-                  ['After cal.', 'Pulses near the target'],
+                  ['After cal.', 'Short pulses up to the target'],
                 ],
               },
               `<label class="field target-field-setting">Temperature (°F)

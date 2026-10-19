@@ -11,6 +11,7 @@ Chart.defaults.font.family = "Inter, ui-sans-serif, system-ui, -apple-system, 'S
 const NARROW = '(max-width: 800px)'
 const START_LINE = '#34d399'
 const STOP_LINE = '#f87171'
+const MARK_LINE = '#c4b5fd'
 const OFF_GAP_MS = 30000
 const OFF_LABEL = '#93a0b5'
 
@@ -37,22 +38,24 @@ const runMarkersPlugin = {
     ctx.beginPath()
     ctx.rect(area.left, area.top, area.right - area.left, area.bottom - area.top)
     ctx.clip()
-    for (const marker of markers) {
+    markers.forEach((marker, index) => {
       const x = xScale.getPixelForValue(marker.at)
       if (!Number.isFinite(x) || x < area.left || x > area.right) return
       const start = marker.kind === 'start'
+      const stop = marker.kind === 'stop'
+      const color = start ? START_LINE : stop ? STOP_LINE : MARK_LINE
       ctx.beginPath()
-      ctx.strokeStyle = start ? START_LINE : STOP_LINE
+      ctx.strokeStyle = color
       ctx.lineWidth = 1.5
       ctx.setLineDash([4, 3])
       ctx.moveTo(x, area.top)
       ctx.lineTo(x, area.bottom)
       ctx.stroke()
       ctx.setLineDash([])
-      ctx.fillStyle = start ? START_LINE : STOP_LINE
+      ctx.fillStyle = color
       ctx.font = "11px Inter, ui-sans-serif, system-ui, sans-serif"
       ctx.textBaseline = 'top'
-      const label = start ? 'Start' : 'Stop'
+      const label = marker.label || (start ? 'Start' : 'Stop')
       const width = ctx.measureText(label).width
       const placeLeft = start
       ctx.textAlign = placeLeft ? 'right' : 'left'
@@ -65,8 +68,8 @@ const runMarkersPlugin = {
         ctx.textAlign = 'right'
         textX = Math.max(x - 6, area.left + width + 2)
       }
-      ctx.fillText(label, textX, area.top + 4)
-    }
+      ctx.fillText(label, textX, area.top + 4 + (index % 4) * 14)
+    })
     ctx.restore()
   },
 }

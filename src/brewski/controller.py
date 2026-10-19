@@ -2,10 +2,12 @@
 
 The loop is hardware-agnostic. It reads a :class:`HardwareSource`, decides
 whether the heaters should be on, and appends samples while a run is going.
-The first enabled probe is the one compared with the target. Heaters turn
-off before that target by the coast measured in calibration, and sooner
-when the pot is rising faster than that measurement, so heat still stored
-in the element can finish the rise. Disabled heaters stay off. The installed service drives the SSRs,
+The first enabled probe is the one compared with the target. Once a
+calibration has saved a heating model, heaters turn off when the predicted
+crest reaches the target. Until then they turn off by the measured coast,
+and sooner when the pot is rising faster than that measurement, so heat
+still stored in the element can finish the rise. Disabled heaters stay off.
+The installed service drives the SSRs,
 the MAX31865 probes, and the HTS221. After setup, this loop also drives
 the I2C LCD, the panel buttons, the LED relays, and the target encoder.
 """
@@ -19,7 +21,8 @@ import threading
 import time
 from dataclasses import replace
 
-from brewski import __version__
+from brewski import __version__, analysis
+from brewski.calibration import MARK_START, CalibrationSession
 from brewski.emergency import summary
 from brewski.lcd import Display, NullDisplay, display_key, open_display, startup_lines, status_lines
 from brewski.menu import SoftwareMenu
@@ -52,26 +55,33 @@ from brewski.store import (
     shape_changed,
     utc_now,
 )
+from brewski.thermal import (
+    CALIBRATION_TEMP_F,
+    GROK_RATE_BAND_F_PER_MIN,
+    GROK_RATE_BAND_F_PER_SEC,
+    GROK_RISE_BAND_F,
+    SAFE_TEMP_F,
+    ThermalModel,
+    accept_grok,
+    apply_grok_value,
+    hold_should_heat,
+    model_from_dict,
+    scale_model,
+    seconds_to_landing,
+)
 
 logger = logging.getLogger(__name__)
 
 # Width of the hysteresis band. The element turns back on only after the
 # probe falls this far below the early-cutoff temperature.
 DEADBAND_F = 2.0
-# A cooldown runs from the first time the control probe reaches the target
-# until the temperature stops moving. After the run is stopped, that lower
-# stop is a 5 minute stretch where the probe stays inside a 2°F band.
-COOLDOWN_BAND_F = 2.0
-COOLDOWN_STABLE_SECONDS = 5 * 60
+# After a run, cooldown stays open while the control probe is above 90°F.
 SAMPLE_INTERVAL_SECONDS = 5.0
 # Ignore a stalled clock that tries to replay more than an hour in one tick.
 MAX_TICK_SECONDS = 3600.0
 # A calibration only trusts a coast after the element has been on long enough
 # to be hot. Shorter pulses still have a cold sheath and teach the wrong number.
 COAST_SOAK_SECONDS = 30.0
-# Calibration always aims here. The temperature chosen for a real run is not
-# part of the measurement, and this number is not written over that setpoint.
-CALIBRATION_TEMP_F = 120.0
 # After that soaked shutoff, the coast is the rise in a rolling average of the
 # control probe, measured at the crest. A slow climb is still climbing.
 COAST_AVERAGE_SECONDS = 10.0
@@ -118,10 +128,7 @@ COAST_TAU_SLOW_FRACTION = 0.85
 # is not yet the straight-line rate. At SOAK_FULL the full coast applies.
 SOAK_RAMP_MIN = 0.2
 SOAK_FULL = 0.9
-# Cooldown is time to get this close to a nominal room temperature. Reaching
-# the room itself would take forever under Newton's law of cooling.
-PREDICT_AMBIENT_F = 70.0
-PREDICT_AMBIENT_BAND_F = 5.0
+# A falling pot is reported against the safe-to-handle line, not room temperature.
 
 
 def scaled_cutoff(
@@ -503,34 +510,32 @@ def seconds_to_cooldown(
     *,
     learned_rate_f_per_min: float | None = None,
 ) -> float | None:
-    """Seconds for a falling pot to get within a few degrees of room temperature.
+    """Seconds for the probe to fall under 90°F.
 
-    The live slope gives the cooling constant ``k = -rate / (temp - ambient)``.
-    Time to ``ambient + PREDICT_AMBIENT_BAND_F`` is ``ln((temp - ambient) / band) / k``.
-    Before the window is full, a learned °F/min is a linear stand-in over that
-    same drop. A rise or a flat line returns None.
+    A live falling slope is used as a straight line. A rise is not a cooldown.
+    A flat window, or a window that is still too short, uses the learned
+    °F/min from calibration.
     """
 
-    goal = PREDICT_AMBIENT_F + PREDICT_AMBIENT_BAND_F
-    if temp_f <= goal:
+    if temp_f <= SAFE_TEMP_F:
         return 0.0
     if rate_f_per_sec is not None and rate_f_per_sec <= -PREDICT_MIN_RATE_F_PER_SEC:
-        above = temp_f - PREDICT_AMBIENT_F
-        if above <= PREDICT_AMBIENT_BAND_F:
-            return 0.0
-        k = -rate_f_per_sec / above
-        if k <= 0:
-            return None
-        seconds = math.log(above / PREDICT_AMBIENT_BAND_F) / k
+        seconds = (temp_f - SAFE_TEMP_F) / -rate_f_per_sec
         return min(PREDICT_MAX_HORIZON_SECONDS, max(0.0, seconds))
-    # A live rise or a flat window is not a cooldown. The learned rate is only
-    # a stand-in before the window is long enough to have a slope at all.
-    if rate_f_per_sec is not None:
+    if rate_f_per_sec is not None and rate_f_per_sec >= PREDICT_MIN_RATE_F_PER_SEC:
         return None
     if learned_rate_f_per_min is not None and learned_rate_f_per_min > 0:
-        seconds = (temp_f - goal) / (learned_rate_f_per_min / 60.0)
+        seconds = (temp_f - SAFE_TEMP_F) / (learned_rate_f_per_min / 60.0)
         return min(PREDICT_MAX_HORIZON_SECONDS, max(0.0, seconds))
     return None
+
+
+def _grok_band(field_name: str) -> float:
+    if field_name == "coast_rise_f":
+        return GROK_RISE_BAND_F
+    if field_name == "cooldown_f_per_min":
+        return GROK_RATE_BAND_F_PER_MIN
+    return GROK_RATE_BAND_F_PER_SEC
 
 
 def _forecast_seconds(value: float | None) -> float | None:
@@ -626,7 +631,9 @@ class Controller:
         self._cooldown_window: list[tuple[float, float]] = []
         self._run_kind = "run"
         self._charge_gallons: float | None = None
-        self._coast_watch: dict | None = None
+        self._session: CalibrationSession | None = None
+        self._run_model: ThermalModel | None = None
+        self._analysis_inbox: list[tuple[dict, object]] = []
         self._coast_f: float | None = None
         self._coast_seconds: float | None = None
         self._calibration_settled = False
@@ -676,6 +683,10 @@ class Controller:
         self._sample_climate()
         self._emergency = self._emergency_codes(self.store.get_settings())
         self._set_heaters([False] * SLOT_COUNT if self._emergency else self._heaters)
+        if self._mode == "cooling":
+            temp = self._cooldown_temp()
+            if temp is not None and temp < SAFE_TEMP_F:
+                self._complete_cooldown(self.store.get_settings())
 
     def start_loop(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -901,21 +912,11 @@ class Controller:
             if kind == "calibration" and gallons is None:
                 gallons = settings.charge_gallons
             if kind == "calibration":
-                updates: dict = {}
-                scaled = scaled_cutoff(settings.learned_coast_f, settings.charge_gallons, gallons)
-                if scaled is not None:
-                    updates["learned_coast_f"] = scaled
-                scaled_cool = scaled_rate(
-                    settings.learned_cooldown_f_per_min, settings.charge_gallons, gallons
-                )
-                if scaled_cool is not None:
-                    updates["learned_cooldown_f_per_min"] = scaled_cool
-                if updates:
-                    settings = replace(settings, **updates)
-                    self.store.save_settings(settings)
+                settings = self._scale_charge(settings, gallons)
             self._run_kind = kind
             self._charge_gallons = gallons
-            self._coast_watch = None
+            self._session = CalibrationSession() if kind == "calibration" else None
+            self._run_model = None if kind == "calibration" else model_from_dict(settings.thermal_model)
             self._coast_f = None
             self._coast_seconds = None
             self._calibration_settled = False
@@ -932,7 +933,8 @@ class Controller:
                 self._set_heaters([False] * SLOT_COUNT, release_off_dwell=True)
                 raise ControllerError("Emergency stop is active", 409)
             # Running before the first heater command so a calibration aims at
-            # 120°F on that command, not at the saved run setpoint.
+            # 150°F on that command, not at the saved run setpoint. The first
+            # three seconds stay off; that settle is the Cold Start line.
             self._mode = "running"
             self._elapsed = 0.0
             self._since_sample = 0.0
@@ -942,6 +944,8 @@ class Controller:
                 run_settings = replace(settings, target_temp_f=int(CALIBRATION_TEMP_F))
             run = self.store.create_run(run_settings, kind=kind, charge_gallons=gallons)
             self._run_id = int(run["id"])
+            if kind == "calibration":
+                self._add_mark(MARK_START)
             self._record_sample(settings)
             logger.info("Run %s started at %s°F", self._run_id, self._aim_temperature(settings))
             return self._status()
@@ -1046,24 +1050,15 @@ class Controller:
 
         if self._mode == "cooling" and self._display_coast is not None:
             return {"peak": self._display_coast, "rate": self._display_rate}
-        if self._run_kind != "calibration" or self._mode not in ("running", "paused"):
+        session = self._session
+        if session is None or self._run_kind != "calibration" or self._mode not in ("running", "paused"):
             return {}
-        watch = self._coast_watch
-        if watch is None:
-            return {"step": "heating"}
-        opened = float(watch["temp_at_open"])
-        peak_average = watch.get("peak_average")
-        if watch.get("phase") == "falling":
-            peak = self._coast_f
-            if peak is None and peak_average is not None:
-                peak = peak_average - opened
-            return {"step": "falling", "peak": peak, "rate": watch.get("rate")}
-        rise = None
-        if peak_average is not None:
-            rise = peak_average - opened
-        elif watch["samples"]:
-            rise = float(watch["samples"][-1][1]) - opened
-        return {"step": "coasting", "rise": rise}
+        return {
+            "step": session.phase,
+            "rise": session.live_rise,
+            "peak": session.model.coast_rise_f,
+            "rate": session.live_rate if session.live_rate is not None else session.model.cooldown_f_per_min,
+        }
 
     def _panel_lines(self, settings: Settings) -> list[str]:
         probes: list[tuple[str, float | None]] = []
@@ -1146,6 +1141,7 @@ class Controller:
                 self._stop_loop.wait(0.02)
 
     def _tick(self, dt: float) -> None:
+        self._drain_analysis()
         settings = self.store.get_settings()
         stepper = getattr(self.source, "step", None)
         if stepper is not None:
@@ -1172,10 +1168,10 @@ class Controller:
             return
         self._elapsed += dt
         self._note_heater_dwell(dt)
-        self._command_heaters(settings)
+        self._advance_calibration(settings)
         if self._mode != "running":
             return
-        self._advance_coast(settings)
+        self._command_heaters(settings)
         if self._mode != "running":
             return
         self._advance_cooldown_clock(dt, settings)
@@ -1187,11 +1183,21 @@ class Controller:
 
     def _finish_run(self) -> None:
         settings = self.store.get_settings()
-        if self._run_kind == "calibration" and self._coast_f is not None:
+        session = self._session
+        if session is not None:
+            if session.model.coast_rise_f is not None or session.model.linear_rate_f_per_sec is not None:
+                self._commit_model(settings)
+            self._display_coast = session.model.coast_rise_f
+            self._display_rate = session.model.cooldown_f_per_min
+            self._calibration_settled = session.reached_target
+            # The revision is for the next run. Detach this session first so
+            # a live heater decision cannot pick the revised numbers up.
+            self._session = None
+            self._queue_full_analysis(session)
+        elif self._run_kind == "calibration" and self._coast_f is not None:
             self._display_coast = self._coast_f
-            watch = self._coast_watch or {}
-            self._display_rate = watch.get("saved_rate")
-        self._coast_watch = None
+        self._session = None
+        self._run_model = None
         self._pulse_until = None
         self._hold_ready = False
         self._flush_heater_life()
@@ -1218,12 +1224,10 @@ class Controller:
         if self._cooldown_run_id is None:
             self._advance_cooldown_clock(0, settings)
         if self._cooldown_run_id is None:
+            self._open_cooldown_if_hot(settings)
+        if self._cooldown_run_id is None:
             return
         self._mode = "cooling"
-        self._cooldown_window = []
-        current = self._cooldown_temp()
-        if current is not None:
-            self._push_cooldown_temp(current)
         self._record_cooldown_sample(settings)
         self._persist_cooldown()
         logger.info("Run %s cooling; cooldown clock at %ss", run_id, round(self._cooldown_elapsed, 1))
@@ -1287,30 +1291,37 @@ class Controller:
         self._cooldown_elapsed += dt
         self._cooldown_since_sample += dt
         current = self._cooldown_temp()
-        if current is not None:
-            self._push_cooldown_temp(current)
-            if self._cooldown_settled():
-                self._complete_cooldown(settings)
-                return
+        if current is not None and current < SAFE_TEMP_F:
+            self._complete_cooldown(settings)
+            return
         while self._cooldown_since_sample >= SAMPLE_INTERVAL_SECONDS:
             self._cooldown_since_sample -= SAMPLE_INTERVAL_SECONDS
             self._record_cooldown_sample(settings)
         self._persist_cooldown()
 
-    def _push_cooldown_temp(self, temp: float) -> None:
-        self._cooldown_window.append((self._cooldown_elapsed, temp))
-        cutoff = self._cooldown_elapsed - COOLDOWN_STABLE_SECONDS
-        while len(self._cooldown_window) >= 2 and self._cooldown_window[1][0] <= cutoff:
-            self._cooldown_window.pop(0)
+    def _open_cooldown_if_hot(self, settings: Settings) -> None:
+        """Start a cooldown when a run stops above 90°F without having reached its aim."""
 
-    def _cooldown_settled(self) -> bool:
-        window = self._cooldown_window
-        if len(window) < 2:
-            return False
-        if window[-1][0] - window[0][0] < COOLDOWN_STABLE_SECONDS:
-            return False
-        temps = [temp for _, temp in window]
-        return max(temps) - min(temps) <= COOLDOWN_BAND_F
+        if self._run_id is None or self._cooldown_run_id is not None:
+            return
+        found = self._current_control(settings)
+        if found is None:
+            return
+        index, temp = found
+        if temp <= SAFE_TEMP_F:
+            return
+        self._cooldown_run_id = self._run_id
+        self._cooldown_sensor = index
+        self._cooldown_elapsed = 0.0
+        self._cooldown_since_sample = 0.0
+        self.store.update_run(
+            self._run_id,
+            cooldown_status="open",
+            cooldown_seconds=0,
+            cooldown_baseline_f=round(temp, 2),
+            cooldown_sensor_index=index,
+        )
+        logger.info("Run %s cooling from %s°F", self._run_id, round(temp, 1))
 
     def _complete_cooldown(self, settings: Settings) -> None:
         run_id = self._cooldown_run_id
@@ -1332,10 +1343,10 @@ class Controller:
         run_id = self._cooldown_run_id
         self.store.update_run(
             run_id,
-            cooldown_status="abandoned",
+            cooldown_status="interrupted",
             cooldown_seconds=round(self._cooldown_elapsed, 2),
         )
-        logger.info("Run %s cooldown abandoned at %ss", run_id, round(self._cooldown_elapsed, 1))
+        logger.info("Run %s cooldown interrupted at %ss", run_id, round(self._cooldown_elapsed, 1))
         self._clear_cooldown()
 
     def _persist_cooldown(self) -> None:
@@ -1428,8 +1439,6 @@ class Controller:
         dwell and open the SSR immediately.
         """
 
-        before = list(self._heaters)
-        on_for = list(self._heater_on_for)
         desired = self._decide(settings, self._live_temps)
         min_on = settings.heater_min_on_seconds
         min_off = settings.heater_min_off_seconds
@@ -1454,7 +1463,6 @@ class Controller:
             states.append(bool(desired[index]))
         self._set_heaters(states)
         self._note_coast_curve(settings)
-        self._note_coast_open(settings, before, on_for)
 
     def _set_heaters(self, states: list[bool], *, release_off_dwell: bool = False) -> None:
         requested = [bool(on) for on in states[:SLOT_COUNT]]
@@ -1480,160 +1488,295 @@ class Controller:
                     self._heater_off_for[index] = math.inf if release_off_dwell else 0.0
         self.source.set_heaters(self._heaters)
 
-    def _note_coast_open(self, settings: Settings, before: list[bool], on_for: list[float]) -> None:
-        """Start the coast watch when a soaked calibration opens the SSR."""
+    def _scale_charge(self, settings: Settings, gallons: float | None) -> Settings:
+        """Scale a remembered model when this calibration uses a different volume."""
 
-        if self._run_kind != "calibration" or self._mode != "running":
-            return
-        was_on = any(
-            before[index] and settings.heaters[index].enabled for index in range(SLOT_COUNT)
+        updates: dict = {}
+        scaled = scaled_cutoff(settings.learned_coast_f, settings.charge_gallons, gallons)
+        if scaled is not None:
+            updates["learned_coast_f"] = scaled
+        scaled_cool = scaled_rate(
+            settings.learned_cooldown_f_per_min, settings.charge_gallons, gallons
         )
-        now_on = any(
-            self._heaters[index] and settings.heaters[index].enabled for index in range(SLOT_COUNT)
-        )
-        if was_on and not now_on:
-            soaked = max(
-                (on_for[index] for index in range(SLOT_COUNT) if before[index]),
-                default=0.0,
-            )
-            found = self._current_control(settings)
-            if soaked < COAST_SOAK_SECONDS or found is None:
-                return
-            _, temp = found
-            self._coast_watch = {
-                "temp_at_open": temp,
-                "opened_elapsed": self._elapsed,
-                "samples": [],
-                "phase": "coasting",
-                "peak_average": None,
-                "peak_elapsed": None,
-                "plateau_anchor": None,
-                "plateau_since": None,
-                "below_since": None,
-                "fall_samples": [],
-                "saved_rate": None,
-                "predicted_f": self._last_shutoff_coast,
-                "rate_f_per_sec": self._last_shutoff_rate,
-            }
+        if scaled_cool is not None:
+            updates["learned_cooldown_f_per_min"] = scaled_cool
+        grown = scale_model(model_from_dict(settings.thermal_model), settings.charge_gallons, gallons)
+        if grown.to_dict() != model_from_dict(settings.thermal_model).to_dict():
+            updates["thermal_model"] = grown.to_dict()
+            if grown.coast_rise_f is not None:
+                updates["learned_coast_f"] = min(EARLY_CUTOFF_MAX_F, max(0.0, grown.coast_rise_f))
+            if grown.coast_seconds is not None:
+                updates["learned_coast_seconds"] = grown.coast_seconds
+            if grown.cooldown_f_per_min is not None:
+                updates["learned_cooldown_f_per_min"] = grown.cooldown_f_per_min
+        if not updates:
+            return settings
+        settings = replace(settings, **updates)
+        self.store.save_settings(settings)
+        return settings
 
-    def _advance_coast(self, settings: Settings) -> None:
-        watch = self._coast_watch
-        if watch is None:
+    def _advance_calibration(self, settings: Settings) -> None:
+        """Move the calibration one reading, then let the heater command follow."""
+
+        session = self._session
+        if session is None or self._run_kind != "calibration" or self._mode != "running":
             return
         found = self._current_control(settings)
         if found is None:
-            if (
-                watch["phase"] == "coasting"
-                and self._elapsed - watch["opened_elapsed"] >= COAST_WATCH_MAX_SECONDS
-            ):
-                self._finish_calibration(settings, rate=None)
             return
-        _, temp = found
-        samples: list[tuple[float, float]] = watch["samples"]
-        samples.append((self._elapsed, temp))
-        if self._elapsed - samples[0][0] < COAST_AVERAGE_SECONDS:
-            return
-        window_start = self._elapsed - COAST_AVERAGE_SECONDS
-        window = [reading for elapsed, reading in samples if elapsed >= window_start]
-        if not window:
-            return
-        average = sum(window) / len(window)
-        watch["average"] = average
-        if watch["phase"] == "coasting":
-            self._track_peak(watch, average)
-            if self._peak_ready(watch):
-                self._lock_coast(settings, watch)
-                watch["phase"] = "falling"
-                watch["fall_samples"] = [(self._elapsed, average)]
-            return
-        rate, done = _cooling_progress(watch["fall_samples"], self._elapsed, average)
-        if rate is not None:
-            watch["rate"] = rate
-        if done:
-            self._finish_calibration(settings, rate=rate)
-
-    def _track_peak(self, watch: dict, average: float) -> None:
-        peak = watch["peak_average"]
-        if peak is None or average > peak + 0.01:
-            watch["peak_average"] = average
-            watch["peak_elapsed"] = self._elapsed
-            watch["below_since"] = None
-            peak = average
-        if watch["plateau_anchor"] is None:
-            watch["plateau_anchor"] = average
-            watch["plateau_since"] = self._elapsed
-        elif average >= watch["plateau_anchor"] + COAST_PLATEAU_RISE_F:
-            watch["plateau_anchor"] = average
-            watch["plateau_since"] = self._elapsed
-        if average <= peak - COAST_PEAK_DROP_F:
-            if watch["below_since"] is None:
-                watch["below_since"] = self._elapsed
-        else:
-            watch["below_since"] = None
-
-    def _peak_ready(self, watch: dict) -> bool:
-        if watch["peak_average"] is None:
-            return False
-        below = watch["below_since"]
-        if below is not None and self._elapsed - below >= COAST_PEAK_CONFIRM_SECONDS:
-            return True
-        since = watch["plateau_since"]
-        if since is not None and self._elapsed - since >= COAST_PLATEAU_SECONDS:
-            return True
-        return self._elapsed - watch["opened_elapsed"] >= COAST_WATCH_MAX_SECONDS
-
-    def _lock_coast(self, settings: Settings, watch: dict) -> None:
-        if self._run_id is None or watch.get("locked"):
-            return
-        peak = float(watch["peak_average"])
-        aim = CALIBRATION_TEMP_F
-        observed = round(max(0.0, float(watch["peak_elapsed"]) - watch["opened_elapsed"]), 2)
-        coast, seconds = tune_coast(
-            settings.learned_coast_f,
-            settings.learned_coast_seconds,
-            float(watch.get("predicted_f") or 0.0),
-            watch.get("rate_f_per_sec"),
-            peak - aim,
-            observed,
-            coast_tau_seconds(watch["samples"]),
+        session.observe(
+            self._elapsed,
+            found[1],
+            self._pulse_on_seconds(settings),
+            settings.heater_min_on_seconds,
         )
-        settled = peak >= aim - CALIBRATION_LAND_F
-        watch["locked"] = True
-        self._coast_f = coast
-        self._coast_seconds = seconds
-        self._calibration_settled = settled
+        for name in session.pending_marks:
+            self._add_mark(name)
+        for item in session.pending_analysis:
+            self._queue_analysis(item)
+        if session.reached_target:
+            self._calibration_settled = True
+        if session.commit:
+            self._commit_model(settings)
+        if session.finished:
+            self._finish_run()
+
+    def _pulse_on_seconds(self, settings: Settings) -> float:
+        """How long the enabled elements that are on have been on."""
+
+        ons = [
+            self._heater_on_for[index]
+            for index in range(SLOT_COUNT)
+            if settings.heaters[index].enabled and self._heaters[index]
+        ]
+        if not ons:
+            return 0.0
+        return max(ons)
+
+    def _add_mark(self, name: str) -> None:
+        if self._run_id is None:
+            return
+        self.store.add_mark(self._run_id, name, self._elapsed)
+
+    def _commit_model(self, settings: Settings) -> None:
+        """Write the model learned so far. Missing stages do not erase a previous one."""
+
+        session = self._session
+        if session is None:
+            return
+        model = session.model
+        current = self.store.get_settings()
+        coast = current.learned_coast_f
+        seconds = current.learned_coast_seconds
+        rate = current.learned_cooldown_f_per_min
+        if model.coast_rise_f is not None:
+            coast = round(max(0.0, model.coast_rise_f), 2)
+            self._coast_f = coast
+        if model.coast_seconds is not None:
+            seconds = round(max(0.0, model.coast_seconds), 2)
+            self._coast_seconds = seconds
+        if model.cooldown_f_per_min is not None:
+            rate = round(min(COOLDOWN_RATE_MAX, max(0.0, model.cooldown_f_per_min)), 2)
         learned = replace(
-            settings,
+            current,
             learned_coast_f=coast,
             learned_coast_seconds=seconds,
-            learned_cooldown_f_per_min=None,
-            charge_gallons=self._charge_gallons,
+            learned_cooldown_f_per_min=rate,
+            charge_gallons=self._charge_gallons if self._charge_gallons is not None else current.charge_gallons,
+            thermal_model=model.to_dict(),
         )
         self.store.save_settings(learned)
-        self.store.update_run(
-            self._run_id,
-            coast_f=coast,
-            coast_seconds=seconds,
-            calibration_settled=1 if settled else 0,
-        )
-        logger.info("Run %s coast %s°F over %ss", self._run_id, coast, seconds)
+        if self._run_id is not None:
+            import json
 
-    def _finish_calibration(self, settings: Settings, rate: float | None) -> None:
-        watch = self._coast_watch
-        if watch is not None:
-            watch["saved_rate"] = None if rate is None else round(rate, 2)
-        if rate is not None and self._run_id is not None:
-            stored = min(COOLDOWN_RATE_MAX, max(0.0, round(rate, 2)))
-            current = self.store.get_settings()
-            self.store.save_settings(replace(current, learned_cooldown_f_per_min=stored))
-            self.store.update_run(self._run_id, cooldown_f_per_min=stored)
-            logger.info("Run %s cooling %s°F/min", self._run_id, stored)
-        self._finish_run()
+            self.store.update_run(
+                self._run_id,
+                coast_f=coast,
+                coast_seconds=seconds,
+                cooldown_f_per_min=rate,
+                calibration_settled=1 if self._calibration_settled else 0,
+                thermal_model=json.dumps(model.to_dict()),
+            )
+        logger.info(
+            "Run %s model coast %s°F over %ss, linear %s°F/s, cool %s°F/min",
+            self._run_id,
+            coast,
+            seconds,
+            model.linear_rate_f_per_sec,
+            rate,
+        )
+
+    def _queue_analysis(self, item: dict) -> None:
+        """Ask Grok about one stage. The loop keeps the local fit until it answers."""
+
+        run_id = self._run_id
+        if run_id is None:
+            return
+        kind = str(item.get("kind") or "")
+        local = item.get("local")
+        if not analysis.api_key():
+            self._record_analysis(run_id, kind, local, None, False)
+            return
+        samples = item.get("samples") or []
+
+        def finish(value: object) -> None:
+            self._accept_analysis(run_id, item, value)
+
+        if analysis.inline_analysis():
+            finish(analysis.analyze_rate(samples, kind))
+            return
+
+        def work() -> None:
+            value = analysis.analyze_rate(samples, kind)
+            with self._lock:
+                self._analysis_inbox.append(({"run_id": run_id, **item}, value))
+
+        threading.Thread(target=work, name="brewski-analysis", daemon=True).start()
+
+    def _queue_full_analysis(self, session: CalibrationSession) -> None:
+        """One pass over the finished calibration, applied to the next run's model."""
+
+        run_id = self._run_id
+        if run_id is None or not analysis.api_key():
+            if run_id is not None:
+                self._record_analysis(run_id, "full", None, None, False)
+            return
+        samples = [[round(stamp, 2), round(reading, 3)] for stamp, reading in session.samples]
+        local = session.model.to_dict()
+
+        def finish(value: object) -> None:
+            self._revise_saved_model(run_id, local, value if isinstance(value, dict) else None)
+
+        if analysis.inline_analysis():
+            finish(analysis.analyze_model(samples, local))
+            return
+
+        def work() -> None:
+            value = analysis.analyze_model(samples, local)
+            with self._lock:
+                self._analysis_inbox.append(
+                    ({"run_id": run_id, "kind": "full", "local_model": local}, value)
+                )
+
+        threading.Thread(target=work, name="brewski-analysis", daemon=True).start()
+
+    def _drain_analysis(self) -> None:
+        inbox = self._analysis_inbox
+        if not inbox:
+            return
+        self._analysis_inbox = []
+        for item, value in inbox:
+            kind = str(item.get("kind") or "")
+            run_id = item.get("run_id")
+            if kind == "full":
+                self._revise_saved_model(
+                    int(run_id) if run_id is not None else None,
+                    item.get("local_model") if isinstance(item.get("local_model"), dict) else {},
+                    value if isinstance(value, dict) else None,
+                )
+                continue
+            if run_id is None:
+                continue
+            self._accept_analysis(int(run_id), item, value)
+
+    def _accept_analysis(self, run_id: int, item: dict, value: object) -> None:
+        local = item.get("local")
+        local_f = float(local) if isinstance(local, (int, float)) else None
+        remote = float(value) if isinstance(value, (int, float)) else None
+        field = str(item.get("field") or "")
+        band = _grok_band(field)
+        accepted = accept_grok(local_f, remote, band=band)
+        session = self._session
+        heaters_on = self._elements_on(self.store.get_settings())
+        if (
+            accepted
+            and remote is not None
+            and session is not None
+            and self._run_id == run_id
+            and not (session.phase in {"pulses", "hold"} and heaters_on)
+        ):
+            apply_grok_value(session.model, field, remote)
+            self._commit_model(self.store.get_settings())
+        elif accepted and remote is not None and session is not None and session.phase in {"pulses", "hold"} and heaters_on:
+            with_value = dict(item)
+            with_value["run_id"] = run_id
+            self._analysis_inbox.append((with_value, remote))
+            return
+        self._record_analysis(run_id, str(item.get("kind") or ""), local_f, remote, accepted)
+
+    def _revise_saved_model(self, run_id: int | None, local: dict, revised: dict | None) -> None:
+        """A finished calibration may update the model the next run will load."""
+
+        if run_id is None:
+            return
+        if not revised:
+            self._record_analysis(run_id, "full", None, None, False)
+            return
+        current = self.store.get_settings()
+        model = model_from_dict(current.thermal_model)
+        accepted_any = False
+        checks = (
+            ("linear_rate_f_per_sec", "linear_rate_f_per_sec", GROK_RATE_BAND_F_PER_SEC),
+            ("coast_rise_f", "coast_rise_f", GROK_RISE_BAND_F),
+            ("cooldown_f_per_min", "cooldown_f_per_min", GROK_RATE_BAND_F_PER_MIN),
+        )
+        for key, _field, band in checks:
+            local_value = local.get(key)
+            remote_value = revised.get(key)
+            local_f = float(local_value) if isinstance(local_value, (int, float)) else None
+            remote_f = float(remote_value) if isinstance(remote_value, (int, float)) else None
+            if not accept_grok(local_f, remote_f, band=band) or remote_f is None:
+                continue
+            accepted_any = True
+            if key == "linear_rate_f_per_sec":
+                model.linear_rate_f_per_sec = round(max(0.0, remote_f), 5)
+            elif key == "coast_rise_f":
+                model.coast_rise_f = round(max(0.0, remote_f), 2)
+                if model.coast_seconds and model.coast_seconds > 0:
+                    model.coast_quad = round(-model.coast_rise_f / (model.coast_seconds ** 2), 6)
+            else:
+                model.cooldown_f_per_min = round(min(COOLDOWN_RATE_MAX, max(0.0, remote_f)), 2)
+        self._record_analysis(run_id, "full", None, None, accepted_any)
+        if not accepted_any:
+            return
+        if self._session is not None and self._run_id == run_id:
+            return
+        learned = replace(
+            current,
+            thermal_model=model.to_dict(),
+            learned_coast_f=model.coast_rise_f if model.coast_rise_f is not None else current.learned_coast_f,
+            learned_coast_seconds=model.coast_seconds
+            if model.coast_seconds is not None
+            else current.learned_coast_seconds,
+            learned_cooldown_f_per_min=model.cooldown_f_per_min
+            if model.cooldown_f_per_min is not None
+            else current.learned_cooldown_f_per_min,
+        )
+        self.store.save_settings(learned)
+
+    def _record_analysis(
+        self,
+        run_id: int,
+        kind: str,
+        local: float | None,
+        remote: float | None,
+        accepted: bool,
+    ) -> None:
+        self.store.append_analysis(
+            run_id,
+            {
+                "kind": kind,
+                "local": local,
+                "grok": remote,
+                "accepted": accepted,
+            },
+        )
 
     def _clear_coast(self) -> None:
         self._run_kind = "run"
         self._charge_gallons = None
-        self._coast_watch = None
+        self._session = None
+        self._run_model = None
         self._coast_f = None
         self._coast_seconds = None
         self._calibration_settled = False
@@ -1723,12 +1866,7 @@ class Controller:
     def _coast_time_constant(self, settings: Settings) -> float | None:
         """Fitted decay from this shutoff, or the learned duration when it has not bent yet."""
 
-        samples: list[tuple[float, float]] = []
-        watch = self._coast_watch
-        if watch is not None and watch.get("samples"):
-            samples = watch["samples"]
-        elif self._coast_curve:
-            samples = self._coast_curve
+        samples: list[tuple[float, float]] = list(self._coast_curve)
         fitted = coast_tau_seconds(samples) if len(samples) >= PREDICT_MIN_SAMPLES * 2 else None
         if fitted is not None:
             return fitted
@@ -1737,10 +1875,24 @@ class Controller:
             return None
         return float(learned)
 
+    def _lookahead_model(self) -> ThermalModel | None:
+        """The parabola model, once Stage I has finished or a run loaded one."""
+
+        if self._run_model is not None and self._run_model.ready():
+            return self._run_model
+        session = self._session
+        if (
+            session is not None
+            and session.model.ready()
+            and session.phase in {"approach", "pulses", "hold"}
+        ):
+            return session.model
+        return None
+
     def _aim_temperature(self, settings: Settings) -> float:
         """Temperature the heaters are aiming at.
 
-        A calibration always aims at 120°F. The dial and the saved setpoint
+        A calibration always aims at 150°F. The dial and the saved setpoint
         still belong to the next real run.
         """
 
@@ -1762,6 +1914,20 @@ class Controller:
         aim = self._aim_temperature(settings)
         heating = self._elements_on(settings)
         rising = rate is not None and rate >= PREDICT_MIN_RATE_F_PER_SEC and temp < aim
+        lookahead = self._lookahead_model()
+        if lookahead is not None and (heating or rising):
+            seconds = seconds_to_landing(
+                temp,
+                aim,
+                self._pulse_on_seconds(settings),
+                lookahead,
+                heating=heating,
+                horizon=PREDICT_MAX_HORIZON_SECONDS,
+            )
+            return {
+                "seconds_to_target": _forecast_seconds(seconds),
+                "seconds_to_cooldown": None,
+            }
         if heating or rising:
             if heating:
                 use_rate = rate
@@ -1902,24 +2068,29 @@ class Controller:
         control_indexes = settings.enabled_sensor_indexes()
         if not control_indexes or control_indexes[0] >= len(temps):
             return off
-        # The coast watch is the measurement. Leave the SSR open through the
-        # crest and the cooling-rate watch so a second heat pulse does not
-        # interrupt it.
-        if self._run_kind == "calibration" and self._coast_watch is not None:
-            return off
+        if self._session is not None and self._run_kind == "calibration":
+            heat = bool(self._session.heat) and not self._session.finished
+            return [
+                heat and settings.heaters[index].enabled for index in range(SLOT_COUNT)
+            ]
         raw = temps[control_indexes[0]]
         if raw is None:
             return off
         primary = float(raw)
+        model = self._run_model
+        if model is not None and model.ready():
+            heat = hold_should_heat(
+                primary,
+                float(self._target_value(settings)),
+                self._pulse_on_seconds(settings),
+                model,
+                settings.heater_min_on_seconds,
+            )
+            return [heat and settings.heaters[index].enabled for index in range(SLOT_COUNT)]
         current = list(self._heaters[:SLOT_COUNT])
         while len(current) < SLOT_COUNT:
             current.append(False)
-        # Calibration uses the same early cutoff as a run, aimed at 120°F.
-        # It does not pulse: a pulse would heat through the landing.
-        if self._run_kind == "calibration":
-            cutoff = self._shutoff_coast(settings)
-            target = CALIBRATION_TEMP_F
-        elif (pulse := self._hold_pulse(settings)) is not None:
+        if (pulse := self._hold_pulse(settings)) is not None:
             return self._sustain_states(settings, primary, pulse)
         else:
             cutoff = self._shutoff_coast(settings)
@@ -1943,12 +2114,14 @@ class Controller:
         heaters = [False] * SLOT_COUNT
         for index, on in enumerate(self._heaters[:SLOT_COUNT]):
             heaters[index] = bool(on) and settings.heaters[index].enabled
+        phase = self._session.phase if self._session is not None else "run"
         self.store.add_sample(
             run_id=self._run_id,
             elapsed_seconds=round(self._elapsed, 2),
             temps_f=temps,
             heaters_on=heaters,
             target_temp_f=self._aim_temperature(settings),
+            phase=phase,
         )
         self._log_forecast(settings)
 
@@ -1990,6 +2163,9 @@ class Controller:
             "learned_coast_seconds": settings.learned_coast_seconds,
             "learned_cooldown_f_per_min": settings.learned_cooldown_f_per_min,
             "calibration_step": self._calibration_lcd().get("step"),
+            "predicted_crest_f": None
+            if self._session is None or self._session.predicted_crest is None
+            else round(self._session.predicted_crest, 1),
             "charge_gallons": self._charge_gallons
             if self._mode in ("running", "paused") and self._run_kind == "calibration"
             else settings.charge_gallons,

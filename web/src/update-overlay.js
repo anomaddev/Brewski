@@ -1,6 +1,7 @@
 import { api } from './api.js'
 
 const ACTIVE = new Set(['downloading', 'building', 'installing'])
+let carried = null
 const BANDS = {
   starting: [4, 10],
   downloading: [12, 38],
@@ -38,6 +39,7 @@ export function mountUpdateOverlay() {
     host.querySelector('#updating-actions').hidden = !failed
     host.querySelector('.update-bar').hidden = mode === 'reboot' || failed
     if (!failed && mode !== 'reboot') moveBar()
+    remember()
   }
 
   function moveBar() {
@@ -60,6 +62,36 @@ export function mountUpdateOverlay() {
       phaseAt = performance.now()
     }
     mode = nextMode
+    remember()
+  }
+
+  function remember() {
+    carried = {
+      open: shown,
+      committed,
+      mode,
+      phase,
+      phaseAt,
+      lostContact,
+      completeAt,
+      latest,
+      detail: host.querySelector('#updating-detail')?.textContent || '',
+      versionText: host.querySelector('#updating-version')?.textContent || '',
+    }
+  }
+
+  function restore() {
+    if (!carried?.open && carried?.mode !== 'reboot') return
+    const saved = carried
+    show(saved.mode || 'update')
+    committed = Boolean(saved.committed)
+    lostContact = Boolean(saved.lostContact)
+    completeAt = saved.completeAt || 0
+    latest = saved.latest || ''
+    phase = saved.phase || 'starting'
+    phaseAt = saved.phaseAt || performance.now()
+    if (saved.detail) paint(phase, saved.detail, saved.versionText || '')
+    else remember()
   }
 
   function dismiss() {
@@ -75,6 +107,7 @@ export function mountUpdateOverlay() {
     shown = false
     host.innerHTML = ''
     document.body.classList.remove('update-open')
+    carried = null
   }
 
   function fail(message) {
@@ -151,21 +184,25 @@ export function mountUpdateOverlay() {
   window.addEventListener('brewski-update-cancel', onCancel)
   window.addEventListener('brewski-rebooting', onRebooting)
   const timer = setInterval(() => {
-    if (shown) poll().catch(() => {})
+    poll().catch(() => {})
   }, 1000)
   const barTimer = setInterval(() => {
     if (shown && mode !== 'reboot') moveBar()
   }, 250)
+  restore()
   poll().catch(() => {})
 
   return () => {
+    if (shown) remember()
     stopped = true
     clearInterval(timer)
     clearInterval(barTimer)
     window.removeEventListener('brewski-updating', onUpdating)
     window.removeEventListener('brewski-update-cancel', onCancel)
     window.removeEventListener('brewski-rebooting', onRebooting)
-    hide()
+    shown = false
+    host.innerHTML = ''
+    document.body.classList.remove('update-open')
   }
 }
 

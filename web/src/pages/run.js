@@ -3,6 +3,41 @@ import { createTempChart, setChartPoints } from '../chart.js'
 import { activeSlots, escapeHtml, formatCooldown, formatDuration, formatTarget, formatTemp, formatWhen, statusClass, statusLabel } from '../format.js'
 import { setSourceBadge } from '../layout.js'
 
+function modelDetail(run) {
+  const model = run.thermal_model
+  if (!model || model.linear_rate_f_per_sec == null) return ''
+  const rate = `${Number(model.linear_rate_f_per_sec).toFixed(3)}°F/s`
+  const coast = model.coast_rise_f == null ? '' : `, coast ${Number(model.coast_rise_f).toFixed(1)}°F`
+  return `<div class="detail-item"><span>Model</span><strong>${rate}${coast}</strong></div>`
+}
+
+function markersForRun(samples, run) {
+  if (!samples.length) return []
+  const indexFor = (elapsed) => {
+    let best = 0
+    let bestGap = Infinity
+    samples.forEach((sample, index) => {
+      const gap = Math.abs(Number(sample.elapsed_seconds) - Number(elapsed))
+      if (gap < bestGap) {
+        bestGap = gap
+        best = index
+      }
+    })
+    return best
+  }
+  const markers = [{ at: indexFor(0), kind: 'start', label: 'Start' }]
+  const marks = Array.isArray(run.marks) ? run.marks : []
+  const hasCooldown = marks.some((mark) => mark.name === 'Cooldown')
+  for (const mark of marks) {
+    if (mark.name === 'Start') continue
+    markers.push({ at: indexFor(mark.elapsed_seconds), kind: 'mark', label: mark.name })
+  }
+  if (run.ended_at && !hasCooldown) {
+    markers.push({ at: indexFor(run.elapsed_seconds), kind: 'stop', label: 'Stop' })
+  }
+  return markers
+}
+
 export function mountRun(root, params) {
   root.innerHTML = `
     <div class="history-page">
@@ -64,6 +99,7 @@ export function mountRun(root, params) {
       <div class="detail-item"><span>Still size</span><strong>${run.charge_gallons == null ? '—' : `${run.charge_gallons} gal`}</strong></div>
       <div class="detail-item"><span>Coast</span><strong>${run.coast_f == null ? '—' : `${Number(run.coast_f).toFixed(1)}°F over ${Math.round(Number(run.coast_seconds) || 0)}s`}</strong></div>
       <div class="detail-item"><span>Cooling</span><strong>${run.cooldown_f_per_min == null ? '—' : `${Number(run.cooldown_f_per_min).toFixed(1)}°F/min`}</strong></div>
+      ${modelDetail(run)}
       <div class="detail-item"><span>Reached target</span><strong>${run.calibration_settled ? 'Yes' : 'No'}</strong></div>
       ` : ''}
       <div class="detail-item"><span>Heaters</span><strong>${heaterList}</strong></div>
@@ -108,6 +144,7 @@ export function mountRun(root, params) {
         target: sample.target_temp_f,
       })),
       sensorSlots.map((slot) => slot.name),
+      markersForRun(readings, run),
     )
   }
 

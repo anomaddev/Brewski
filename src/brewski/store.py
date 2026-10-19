@@ -74,7 +74,8 @@ CREATE TABLE IF NOT EXISTS settings (
     sensors TEXT,
     setup_complete INTEGER NOT NULL DEFAULT 0,
     gpio TEXT,
-    update_source TEXT NOT NULL DEFAULT 'main'
+    update_source TEXT NOT NULL DEFAULT 'main',
+    thermal_model TEXT
 );
 
 CREATE TABLE IF NOT EXISTS runs (
@@ -100,8 +101,20 @@ CREATE TABLE IF NOT EXISTS runs (
     cooldown_seconds REAL,
     cooldown_baseline_f REAL,
     cooldown_sensor_index INTEGER,
-    cooldown_ended_at TEXT
+    cooldown_ended_at TEXT,
+    thermal_model TEXT,
+    analysis TEXT
 );
+
+CREATE TABLE IF NOT EXISTS run_marks (
+    id INTEGER PRIMARY KEY,
+    run_id INTEGER NOT NULL REFERENCES runs(id),
+    name TEXT NOT NULL,
+    elapsed_seconds REAL NOT NULL,
+    recorded_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS run_marks_run_id ON run_marks(run_id, id);
 
 CREATE TABLE IF NOT EXISTS samples (
     id INTEGER PRIMARY KEY,
@@ -258,6 +271,7 @@ class Settings:
     setup_complete: bool = False
     gpio: GpioConfig | None = None
     update_source: str = DEFAULT_UPDATE_SOURCE
+    thermal_model: dict | None = None
 
     @property
     def heater_count(self) -> int:
@@ -302,6 +316,7 @@ class Settings:
             "sensor_count": self.sensor_count,
             "heater_names": self.heater_names,
             "sensor_names": self.sensor_names,
+            "thermal_model": self.thermal_model,
         }
 
 
@@ -388,6 +403,7 @@ def parse_settings(data: dict) -> Settings:
         setup_complete=_flag(data.get("setup_complete")),
         gpio=gpio,
         update_source=_update_source(data.get("update_source")),
+        thermal_model=_thermal_document(data.get("thermal_model")),
     )
 
 
@@ -435,6 +451,7 @@ class Store:
         """
 
         with self._connect() as connection:
+            connection.execute("DELETE FROM run_marks")
             connection.execute("DELETE FROM samples")
             connection.execute("DELETE FROM runs")
             connection.execute("DELETE FROM settings")
@@ -495,7 +512,7 @@ class Store:
                     learned_coast_f = ?, learned_coast_seconds = ?, learned_cooldown_f_per_min = ?,
                     charge_gallons = ?,
                     heaters = ?, sensors = ?, setup_complete = ?, gpio = ?,
-                    update_source = ?
+                    update_source = ?, thermal_model = ?
                 WHERE id = 1
                 """,
                 _settings_values(settings),
@@ -551,6 +568,8 @@ class Store:
             "coast_seconds",
             "cooldown_f_per_min",
             "calibration_settled",
+            "thermal_model",
+            "analysis",
         )
         keys = [key for key in allowed if key in fields]
         if not keys:
@@ -607,6 +626,7 @@ class Store:
         sample_dicts = [_sample_dict(sample) for sample in samples]
         run["heater_on_seconds"] = heater_on_seconds(sample_dicts, run["elapsed_seconds"])
         run["samples"] = sample_dicts
+        run["marks"] = self._marks_for(run_id)
         return run
 
     def claim_open_cooldown(self) -> dict | None:
@@ -630,6 +650,54 @@ class Store:
                 )
         return self.get_run(keep_id)
 
+    def add_mark(self, run_id: int, name: str, elapsed_seconds: float) -> None:
+        """Record one named chart line. A second write of the same name is ignored."""
+
+        with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT 1 FROM run_marks WHERE run_id = ? AND name = ?",
+                (run_id, name),
+            ).fetchone()
+            if existing is not None:
+                return
+            connection.execute(
+                """
+                INSERT INTO run_marks (run_id, name, elapsed_seconds, recorded_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (run_id, name, round(float(elapsed_seconds), 2), utc_now()),
+            )
+
+    def append_analysis(self, run_id: int, entry: dict) -> None:
+        """Append one Grok comparison. The local fit is kept when Grok is absent."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT analysis FROM runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                return
+            items = _json_list(row["analysis"])
+            items.append(entry)
+            connection.execute(
+                "UPDATE runs SET analysis = ? WHERE id = ?",
+                (json.dumps(items), run_id),
+            )
+
+    def _marks_for(self, run_id: int) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT name, elapsed_seconds, recorded_at
+                FROM run_marks
+                WHERE run_id = ?
+                ORDER BY id
+                """,
+                (run_id,),
+            ).fetchall()
+        return [_mark_dict(row) for row in rows]
+
     def list_runs(
         self,
         live_run: dict | None = None,
@@ -642,14 +710,25 @@ class Store:
             sample_rows = connection.execute(
                 "SELECT * FROM samples ORDER BY run_id, elapsed_seconds, id"
             ).fetchall()
+            mark_rows = connection.execute(
+                """
+                SELECT run_id, name, elapsed_seconds, recorded_at
+                FROM run_marks
+                ORDER BY run_id, id
+                """
+            ).fetchall()
 
         samples_by_run: dict[int, list[dict]] = {}
         for row in sample_rows:
             samples_by_run.setdefault(int(row["run_id"]), []).append(_sample_dict(row))
+        marks_by_run: dict[int, list[dict]] = {}
+        for row in mark_rows:
+            marks_by_run.setdefault(int(row["run_id"]), []).append(_mark_dict(row))
 
         runs = []
         for row in run_rows:
             run = _run_dict(row)
+            run["marks"] = marks_by_run.get(run["id"], [])
             if live_run is not None and live_run["id"] == run["id"]:
                 run["elapsed_seconds"] = round(float(live_run["elapsed_seconds"]), 2)
                 run["status"] = live_run["status"]
@@ -716,8 +795,8 @@ class Store:
                 target_temp_f, heater_min_on_seconds, heater_min_off_seconds,
                 cabinet_limit_f, learned_coast_f, learned_coast_seconds,
                 learned_cooldown_f_per_min, charge_gallons, heaters, sensors, setup_complete, gpio,
-                update_source
-            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                update_source, thermal_model
+            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             _settings_values(settings),
         )
@@ -776,6 +855,9 @@ def _run_dict(row: sqlite3.Row) -> dict:
         "calibration_settled": bool(row["calibration_settled"])
         if "calibration_settled" in row.keys() and row["calibration_settled"]
         else False,
+        "thermal_model": _json_object(row["thermal_model"]) if "thermal_model" in row.keys() else None,
+        "analysis": _json_list(row["analysis"]) if "analysis" in row.keys() else [],
+        "marks": [],
     }
 
 
@@ -816,6 +898,9 @@ def _migrate(connection: sqlite3.Connection) -> None:
     _add_column(connection, "runs", "coast_seconds", "REAL")
     _add_column(connection, "runs", "cooldown_f_per_min", "REAL")
     _add_column(connection, "runs", "calibration_settled", "INTEGER")
+    _add_column(connection, "settings", "thermal_model")
+    _add_column(connection, "runs", "thermal_model")
+    _add_column(connection, "runs", "analysis")
     if _table_exists(connection, "samples"):
         _add_column(connection, "samples", "phase")
     settings_columns = {row[1] for row in connection.execute("PRAGMA table_info(settings)")}
@@ -918,6 +1003,48 @@ def _add_column(
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
 
 
+def _mark_dict(row: sqlite3.Row) -> dict:
+    return {
+        "name": row["name"],
+        "elapsed_seconds": round(float(row["elapsed_seconds"]), 2),
+        "recorded_at": row["recorded_at"],
+    }
+
+
+def _json_object(value: object) -> dict | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
+
+
+def _json_list(value: object) -> list:
+    if isinstance(value, list):
+        return list(value)
+    if not isinstance(value, str) or not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return parsed
+
+
+def _thermal_document(value: object) -> dict | None:
+    return _json_object(value)
+
+
 def _optional_float(row: sqlite3.Row, column: str) -> float | None:
     if column not in row.keys() or row[column] is None:
         return None
@@ -949,6 +1076,7 @@ def _settings_values(settings: Settings) -> tuple:
         1 if settings.setup_complete else 0,
         json.dumps((settings.gpio or default_gpio()).to_dict()),
         settings.update_source,
+        None if settings.thermal_model is None else json.dumps(settings.thermal_model),
     )
 
 
@@ -978,6 +1106,7 @@ def _settings_from_row(row: sqlite3.Row) -> Settings:
         setup_complete=_stored_flag(row, "setup_complete"),
         gpio=gpio,
         update_source=_stored_update_source(row),
+        thermal_model=_json_object(row["thermal_model"]) if "thermal_model" in row.keys() else None,
     )
 
 

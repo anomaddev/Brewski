@@ -96,7 +96,11 @@ export function mountUpdateOverlay() {
       if (shown && (committed || mode === 'reboot')) {
         lostContact = true
         const detail = host.querySelector('#updating-detail')
-        if (detail) detail.textContent = 'Reconnecting'
+        if (detail) {
+          detail.textContent = mode !== 'reboot' && phase === 'complete'
+            ? 'Waiting for restart'
+            : 'Reconnecting'
+        }
       }
       return
     }
@@ -119,7 +123,7 @@ export function mountUpdateOverlay() {
     if (update.phase === 'complete' && committed) {
       latest = update.latest || latest
       show('update')
-      paint('complete', 'Starting', versionLine(update.latest, update.current))
+      paint('complete', 'Waiting for restart', versionLine(update.latest, update.current))
       if (sameVersion(status?.version, update.latest) || performance.now() - completeAt > 15000) {
         window.location.reload()
       }
@@ -197,7 +201,7 @@ function phaseText(phaseName) {
   if (phaseName === 'downloading') return 'Downloading'
   if (phaseName === 'building') return 'Building the dashboard'
   if (phaseName === 'installing') return 'Installing'
-  if (phaseName === 'complete') return 'Starting'
+  if (phaseName === 'complete') return 'Waiting for restart'
   if (phaseName === 'failed') return 'Update failed'
   return 'Starting the update'
 }

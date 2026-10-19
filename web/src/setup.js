@@ -237,9 +237,11 @@ function openSetup(host, settings) {
   }
 
   async function watchUpdate(latest, phaseEl, errorEl) {
+    let seen = ''
     while (!left) {
       try {
         const [update, status] = await Promise.all([api.updateStatus(), api.status()])
+        seen = update.phase
         phaseEl.textContent = phaseText(update.phase)
         if (update.phase === 'failed') {
           errorEl.hidden = false
@@ -255,7 +257,7 @@ function openSetup(host, settings) {
           return
         }
       } catch {
-        phaseEl.textContent = 'Reconnecting'
+        phaseEl.textContent = seen === 'complete' ? 'Waiting for restart' : 'Reconnecting'
       }
       await delay(1000)
     }
@@ -289,7 +291,7 @@ function phaseText(phase) {
   if (phase === 'downloading') return 'Downloading'
   if (phase === 'building') return 'Building the dashboard'
   if (phase === 'installing') return 'Installing'
-  if (phase === 'complete') return 'Starting'
+  if (phase === 'complete') return 'Waiting for restart'
   if (phase === 'failed') return 'Update failed'
   return 'Starting the update'
 }

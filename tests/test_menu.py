@@ -1,6 +1,6 @@
 """Software menu screens, and a Stop hold versus a short press."""
 
-from brewski.menu import SoftwareMenu, menu_title, scroll_hint
+from brewski.menu import ITEMS, VISIBLE, SoftwareMenu, menu_title, scroll_hint
 from brewski.panel import HOLD_RELEASE_OFF_SECONDS, STOP_HOLD_SECONDS, Panel
 from brewski.updates import ReleaseInfo
 
@@ -266,7 +266,11 @@ def test_software_menu_lines_and_leds():
     assert menu.lines("0.6.5")[3] == "> Check for Update"
     menu.index = 0
     menu.top = 0
-    assert menu.move(-1) is True
+    assert menu.move(-1) is False
+    assert menu.lines("0.6.5")[1] == "> About"
+    menu.index = len(ITEMS) - 1
+    menu.top = len(ITEMS) - VISIBLE
+    assert menu.move(1) is False
     assert menu.lines("0.6.5")[3] == "> Reboot"
     assert menu.lines("0.6.5")[0] == menu_title("^")
     menu.select()
@@ -277,7 +281,20 @@ def test_software_menu_lines_and_leds():
 
     menu.index = 0
     menu.select()
-    assert menu.lines("9.9.9") == ["About", "Brewski", "9.9.9", "STOP back"]
+    assert menu.lines("9.9.9") == ["About", "Brewski", "Release 9.9.9", "STOP back"]
+    installed = "abc1234" + "a" * 33
+    assert menu.lines("9.9.9", update_source="beta", revision=installed) == [
+        "About",
+        "Brewski",
+        "Commit abc1234",
+        "STOP back",
+    ]
+    assert menu.lines("9.9.9", update_source="beta", revision="v9.9.9") == [
+        "About",
+        "Brewski",
+        "Release 9.9.9",
+        "STOP back",
+    ]
     assert menu.leds() == (False, True)
     assert menu.select() is None
 
@@ -333,11 +350,11 @@ def test_the_menu_scrolls_when_the_highlight_leaves_the_window():
         "  Check for Update",
         "> Reboot",
     ]
-    menu.move(1)
+    assert menu.move(1) is False
     opened = menu.lines("0.6.5")
-    assert opened[1] == "> About"
-    assert opened[0].endswith("v")
-    assert "Reboot" not in opened[1:]
+    assert opened[3] == "> Reboot"
+    assert opened[0] == menu_title("^")
+    assert "About" not in opened[1:]
     assert scroll_hint(1, 3, 5) == "^v"
     assert scroll_hint(0, 3, 3) == ""
 

@@ -30,6 +30,7 @@ from brewski.updates import (
     ReleaseInfo,
     apply_supported,
     check_release,
+    installed_revision,
     read_status,
     report as update_report,
     request_reboot,
@@ -807,7 +808,14 @@ class Controller:
                     except Exception:
                         logger.exception("Could not read the network address")
                         address, hostname = "No address", "—"
-                lines = self._menu.lines(__version__, address=address, hostname=hostname)
+                revision = installed_revision() if self._menu.screen == "about" else None
+                lines = self._menu.lines(
+                    __version__,
+                    address=address,
+                    hostname=hostname,
+                    update_source=settings.update_source,
+                    revision=revision,
+                )
                 led_state = self._menu.leds()
             else:
                 lines = self._panel_lines(settings) if key is not None else None
@@ -1699,6 +1707,7 @@ class Controller:
             "cabinet_enabled": self._hts_enabled(settings),
             "emergency_codes": list(self._emergency),
             "emergency": [{"code": code, "summary": summary(code)} for code in self._emergency],
+            "update_source": settings.update_source,
         }
 
 

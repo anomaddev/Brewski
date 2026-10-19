@@ -9,6 +9,7 @@ from flask import Flask, abort, jsonify, request, send_from_directory
 from brewski import __version__
 from brewski.controller import Controller, ControllerError
 from brewski.paths import web_dist_dir
+from brewski.updates import about_identity, installed_revision
 
 
 def create_app(controller: Controller) -> Flask:
@@ -27,7 +28,14 @@ def create_app(controller: Controller) -> Flask:
     @app.get("/api/status")
     def status():
         payload = controller.status()
+        label, value = about_identity(
+            str(payload.get("update_source") or "main"),
+            __version__,
+            installed_revision(),
+        )
         payload["version"] = __version__
+        payload["about_label"] = label
+        payload["about_value"] = value
         return jsonify(payload)
 
     @app.get("/api/settings")

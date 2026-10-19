@@ -7,7 +7,7 @@ target dial moves the highlight, Start chooses the line, and Stop goes back.
 from __future__ import annotations
 
 from brewski.lcd import COLUMNS, _pair, clip_line
-from brewski.updates import ReleaseInfo, offer_ends
+from brewski.updates import ReleaseInfo, about_identity, offer_ends
 
 # The panel is four rows. The title stays put and the list under it scrolls.
 VISIBLE = 3
@@ -36,7 +36,15 @@ class SoftwareMenu:
 
         if self.screen != "list" or not steps:
             return False
-        self.index = (self.index + int(steps)) % len(ITEMS)
+        count = len(ITEMS)
+        index = self.index + int(steps)
+        if index < 0:
+            index = 0
+        elif index >= count:
+            index = count - 1
+        if index == self.index:
+            return False
+        self.index = index
         self._reveal()
         return True
 
@@ -101,9 +109,17 @@ class SoftwareMenu:
         )
         return start_on, True
 
-    def lines(self, version: str, *, address: str = "", hostname: str = "") -> list[str]:
+    def lines(
+        self,
+        version: str,
+        *,
+        address: str = "",
+        hostname: str = "",
+        update_source: str = "main",
+        revision: str | None = None,
+    ) -> list[str]:
         if self.screen == "about":
-            rows = ["About", "Brewski", version, "STOP back"]
+            rows = ["About", "Brewski", about_line(update_source, version, revision), "STOP back"]
         elif self.screen == "networking":
             rows = network_lines(address, hostname)
         elif self.screen == "checking":
@@ -157,7 +173,8 @@ class SoftwareMenu:
         if release is None or not release.reachable:
             return ["Check for Update", "GitHub unreachable", "", "STOP back"]
         if not release.available:
-            return ["Check for Update", "Up to date", release.current or version, "STOP back"]
+            left, _right = offer_ends(release)
+            return ["Check for Update", "Up to date", left or version, "STOP back"]
         left, right = offer_ends(release)
         if not left:
             left = version
@@ -187,6 +204,15 @@ def menu_title(hint: str) -> str:
     if gap < 1:
         return clip_line(f"{left} {hint}")
     return f"{left}{' ' * gap}{hint}"
+
+
+def about_line(source: str, version: str, revision: str | None = None) -> str:
+    """One LCD row: the commit on beta, or the release on main."""
+
+    label, value = about_identity(source, version, revision)
+    if not value:
+        return label
+    return f"{label} {value}"
 
 
 def network_lines(address: str, hostname: str) -> list[str]:

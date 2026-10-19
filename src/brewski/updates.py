@@ -385,13 +385,33 @@ def request_reboot() -> None:
     subprocess.run(["sudo", "-n", systemctl, "reboot"], check=True)
 
 
+def installed_revision(path: Path | None = None) -> str | None:
+    """Release tag or commit the installer recorded. A dev checkout has neither."""
+
+    return _read_revision(REVISION_PATH if path is None else path)
+
+
+def about_identity(source: str, version: str, revision: str | None = None) -> tuple[str, str]:
+    """Label and value for About.
+
+    Beta names the installed commit. Main names the release. A beta setting
+    with no commit recorded, such as a checkout that has not updated yet,
+    still names the release.
+    """
+
+    if source == "beta" and revision is not None and _is_commit_sha(revision):
+        return "Commit", revision[:7]
+    text = (version or "").strip()
+    if text[:1] in {"v", "V"}:
+        text = text[1:]
+    return "Release", text
+
+
 def offer_ends(release: ReleaseInfo) -> tuple[str, str]:
     """Installed identity, then the offered release or commit, for one LCD line."""
 
-    left = release.current
-    if release.source == "beta" and _is_commit_sha(release.revision):
-        left = release.revision[:7]
-    return left, release.latest or ""
+    _label, value = about_identity(release.source, release.current, release.revision)
+    return value, release.latest or ""
 
 
 def progress_label(release: ReleaseInfo) -> str:

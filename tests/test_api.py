@@ -13,6 +13,9 @@ def test_status_starts_idle(client):
     assert status["mode"] == "idle"
     assert status["source"] == "dummy"
     assert status["version"] == __version__
+    assert status["update_source"] == "main"
+    assert status["about_label"] == "Release"
+    assert status["about_value"] == __version__
     assert status["heater_count"] == 2
     assert status["sensor_count"] == 1
     assert status["heaters_on"] == [False, False]
@@ -21,6 +24,17 @@ def test_status_starts_idle(client):
     assert status["settings_locked"] is False
     assert status["temps_f"][0] == 70
     assert status["cabinet_enabled"] is True
+
+
+def test_status_names_the_installed_commit_when_beta_is_selected(client, controller, monkeypatch):
+    sha = "abc1234" + "d" * 33
+    monkeypatch.setattr("brewski.api.installed_revision", lambda: sha)
+    controller.update_settings({"update_source": "beta"})
+    status = client.get("/api/status").get_json()
+    assert status["update_source"] == "beta"
+    assert status["about_label"] == "Commit"
+    assert status["about_value"] == "abc1234"
+    assert status["version"] == __version__
 
 
 def test_run_start_pause_resume_stop(client, controller):

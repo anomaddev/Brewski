@@ -99,7 +99,7 @@ export function mountSettings(root) {
           <section class="dashboard-card settings-card" aria-labelledby="system-title">
             <h2 class="card-title" id="system-title">System</h2>
             <dl class="about-list">
-              <div><dt>Version</dt><dd data-about-version>—</dd></div>
+              <div><dt data-about-kind>Release</dt><dd data-about-version>—</dd></div>
               <div><dt>Controller</dt><dd data-about-source>—</dd></div>
             </dl>
             <p class="about-line">Local web controller for this still.</p>
@@ -129,7 +129,9 @@ export function mountSettings(root) {
                 ['Hours', 'Time powered, including calibration'],
               ],
             })}</h3>
-            ${deviceSection('heater', 'Heater')}
+            <div class="device-row">
+              ${deviceSection('heater', 'Heater')}
+            </div>
             <p class="form-error device-guard" id="heater-guard" data-message="One heater must stay enabled."></p>
           </section>
           <section class="device-column">
@@ -144,7 +146,9 @@ export function mountSettings(root) {
                 ['Chip select', 'BCM 17 and 8'],
               ],
             })}</h3>
-            ${deviceSection('sensor', 'Probe')}
+            <div class="device-row">
+              ${deviceSection('sensor', 'Probe')}
+            </div>
             <p class="form-error device-guard" id="sensor-guard" data-message="One temperature probe must stay enabled."></p>
           </section>
         </div>
@@ -390,6 +394,7 @@ export function mountSettings(root) {
       fill(saved)
       savedEl.textContent = 'Saved'
       savedEl.hidden = false
+      refreshLock().catch(() => {})
     } catch (error) {
       errorEl.hidden = false
       errorEl.textContent = error.message
@@ -472,8 +477,15 @@ export function mountSettings(root) {
 
   function renderAbout(status) {
     const version = form.querySelector('[data-about-version]')
+    const kind = form.querySelector('[data-about-kind]')
     const source = form.querySelector('[data-about-source]')
-    if (version) version.textContent = status.version ? `v${status.version}` : '—'
+    const commit = status.about_label === 'Commit'
+    if (kind) kind.textContent = commit ? 'Commit' : 'Release'
+    if (version) {
+      const raw = status.about_value || status.version || ''
+      if (!raw) version.textContent = '—'
+      else version.textContent = commit ? raw : `v${String(raw).replace(/^v/i, '')}`
+    }
     if (source) {
       source.textContent = status.source === 'dummy' ? 'Dummy source' : status.source === 'pi' ? 'Pi' : (status.source || '—')
     }
@@ -513,11 +525,14 @@ export function mountSettings(root) {
 function describeUpdate(update) {
   if (!update.reachable) return 'GitHub could not be reached.'
   const current = stripVersion(update.current)
-  if (!update.available) return `Up to date. This still is running ${current}.`
+  if (!update.available) {
+    const running = update.source === 'beta' && update.latest ? update.latest : current
+    return `Up to date. This still is running ${running}.`
+  }
   const latest = stripVersion(update.latest)
   const offer = update.source === 'beta'
     ? `Beta commit ${latest} is available.`
-    : `Version ${latest} is available.`
+    : `Release ${latest} is available.`
   return update.apply_supported ? offer : `${offer} Update from the Pi.`
 }
 

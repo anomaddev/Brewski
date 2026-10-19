@@ -787,17 +787,22 @@ tr[data-href] { cursor: pointer; }
 .settings-card fieldset { border: none; margin: 0 0 22px; padding: 0; }
 .settings-card legend { font-weight: 720; margin-bottom: 10px; }
 .device-columns {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  column-gap: 22px;
-  row-gap: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
   margin-bottom: 22px;
 }
 .device-column {
-  display: grid;
-  grid-template-rows: subgrid;
-  grid-row: span 4;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   min-width: 0;
+}
+.device-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 22px;
+  align-items: stretch;
 }
 .column-title {
   margin: 0;
@@ -805,10 +810,11 @@ tr[data-href] { cursor: pointer; }
   font-weight: 720;
   letter-spacing: -0.02em;
 }
+.device-column > .column-title,
 .device-column > .help { margin: 0; }
-.device-column > .device { margin-top: 0; }
+.device-row > .device { margin-top: 0; }
 .device-column > .device-guard { margin: 0; }
-.device-column > .device-guard:not(:empty) { margin-top: 10px; }
+.device-column > .device-guard:empty { display: none; }
 .settings-card .target-field-setting input {
   width: 7.5rem;
   text-align: right;
@@ -1023,6 +1029,7 @@ tr[data-href] { cursor: pointer; }
 .settings-page .settings-card > .card-title.wiring-title,
 .settings-page .settings-card > .card-title.devices-title { margin-bottom: 16px; }
 .settings-page .column-title { margin-bottom: 4px; }
+.settings-page .device-column > .column-title { margin-bottom: 0; }
 .settings-page .panel-pins { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .settings-card > .card-title.with-tip,
 .column-title,
@@ -1396,7 +1403,8 @@ tr[data-href] { cursor: pointer; }
   .setup-actions { flex-direction: column-reverse; }
   .setup-actions .action-btn,
   .setup-back { width: 100%; min-height: 48px; }
-  .overview-stats, .detail-grid, .device-columns, .settings-top { grid-template-columns: 1fr; }
+  .overview-stats, .detail-grid, .settings-top { grid-template-columns: 1fr; }
+  .device-row { grid-template-columns: 1fr; }
   .setting-row { grid-template-columns: 1fr; gap: 10px; }
   .settings-page .panel-pins { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .source-choice { width: 100%; }
@@ -1409,7 +1417,6 @@ tr[data-href] { cursor: pointer; }
     bottom: calc(12px + env(safe-area-inset-bottom));
   }
   .settings-footer .action-btn { width: auto; min-width: 0; min-height: 44px; }
-  .device-column { display: flex; flex-direction: column; grid-row: auto; gap: 16px; }
   .settings-card .choice-row { flex-wrap: wrap; width: 100%; }
   .settings-card .choice-row label {
     flex: 1 1 9.5rem;

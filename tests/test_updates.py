@@ -7,6 +7,7 @@ from brewski.store import Store, merge_settings
 from brewski.menu import SoftwareMenu
 from brewski.updates import (
     ReleaseInfo,
+    about_identity,
     check_release,
     is_newer,
     offer_ends,
@@ -137,6 +138,15 @@ def test_beta_offers_a_new_commit_and_stays_quiet_when_it_is_installed(tmp_path)
     assert offline.available is False
 
 
+def test_about_names_the_commit_on_beta_and_the_release_on_main():
+    installed = "abc1234" + "a" * 33
+    assert about_identity("main", "0.6.25", installed) == ("Release", "0.6.25")
+    assert about_identity("main", "v0.6.25", None) == ("Release", "0.6.25")
+    assert about_identity("beta", "0.6.25", installed) == ("Commit", "abc1234")
+    assert about_identity("beta", "0.6.25", "v0.6.25") == ("Release", "0.6.25")
+    assert about_identity("beta", "0.6.25", None) == ("Release", "0.6.25")
+
+
 def test_beta_menu_shows_the_commit_arrow():
     menu = SoftwareMenu()
     installed = "abc1234" + "a" * 33
@@ -154,6 +164,18 @@ def test_beta_menu_shows_the_commit_arrow():
         True,
     )
     assert menu.lines("0.6.23")[1] == "abc1234 -> def5678"
+    menu.show_release(
+        ReleaseInfo(
+            current="0.6.23",
+            latest=installed[:7],
+            available=False,
+            reachable=True,
+            revision=installed,
+            source="beta",
+        ),
+        False,
+    )
+    assert menu.lines("0.6.23") == ["Check for Update", "Up to date", "abc1234", "STOP back"]
 
 
 def test_boot_does_not_check_before_setup(tmp_path, monkeypatch):

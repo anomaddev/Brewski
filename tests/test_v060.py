@@ -241,7 +241,7 @@ def test_stop_hold_opens_the_software_menu_without_changing_the_target(controlle
 
     controller._panel = _Panel((1, 0, 0, 0))
     controller._apply_panel()
-    assert controller._display.lines == ["About", "Brewski", __version__, "STOP back"]
+    assert controller._display.lines == ["About", "Brewski", f"Release {__version__}", "STOP back"]
 
     controller._panel = _Panel((0, 1, 0, 0))
     controller._apply_panel()
@@ -256,6 +256,19 @@ def test_stop_hold_opens_the_software_menu_without_changing_the_target(controlle
     controller._apply_panel()
     assert controller._menu is not None
     assert controller._display.lines[0].startswith("Software Menu")
+
+
+def test_about_shows_the_commit_when_beta_is_installed(controller, store, monkeypatch):
+    store.save_settings(merge_settings(store.get_settings(), {"update_source": "beta"}))
+    monkeypatch.setattr(
+        "brewski.controller.installed_revision",
+        lambda: "abc1234" + "d" * 33,
+    )
+    controller._panel = _Panel((0, 0, 1, 1))
+    controller._apply_panel()
+    controller._panel = _Panel((1, 0, 0, 0))
+    controller._apply_panel()
+    assert controller._display.lines == ["About", "Brewski", "Commit abc1234", "STOP back"]
 
 
 def test_stop_hold_during_a_run_does_not_stop_or_open_the_menu(controller):
@@ -399,7 +412,7 @@ def test_menu_reboot_confirms_then_reports_a_refusal(controller, monkeypatch):
     monkeypatch.setattr("brewski.controller.request_reboot", refuse)
     controller._panel = _Panel((0, 0, 1, 0))
     controller._apply_panel()
-    controller._panel = _Panel((0, 0, 0, -1))
+    controller._panel = _Panel((0, 0, 0, 3))
     controller._apply_panel()
     assert controller._display.lines[3] == "> Reboot"
     controller._panel = _Panel((1, 0, 0, 0))

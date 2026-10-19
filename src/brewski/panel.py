@@ -14,16 +14,15 @@ import threading
 import time
 from typing import NamedTuple
 
-from brewski.lcd import LED_ACTIVE_HIGH, PromptLeds, panel_pin_factory
+from brewski.lcd import BUTTON_BOUNCE_SECONDS, LED_ACTIVE_HIGH, PromptLeds, panel_pin_factory
 from brewski.store import Settings, default_gpio
 
 logger = logging.getLogger(__name__)
 
 # Long enough that stopping a run does not open the software menu.
+# Change this to retune every long press. The pin numbers live on the
+# saved GPIO settings, not here.
 STOP_HOLD_SECONDS = 4.0
-# gpiozero's longer debounce was swallowing the release of a quick tap, so
-# the press never became a click. Contact bounce is over in a few milliseconds.
-BUTTON_BOUNCE_SECONDS = 0.01
 # Ignore a second edge this soon after the last one. A real tap is longer.
 EDGE_GAP_SECONDS = 0.012
 # After the finger lifts, keep the acknowledgement lamp off long enough to see.
@@ -40,10 +39,15 @@ class PanelEvents(NamedTuple):
 class Panel:
     """Presses and encoder steps collected outside the controller lock.
 
-    Start counts on the way down, so a quick tap is not waiting on a release
-    the debounce might drop. Stop counts on the way up, unless it was still
-    down at the hold time. ``take`` also watches the pin, so a release that
-    never produces a callback still completes the press.
+    Start has no long-press command, so it counts once on the way down.
+    Stop uses gpiozero's ``was_held`` check. The hold callback fires when
+    the button has been down for ``STOP_HOLD_SECONDS``. The release then
+    looks at ``was_held``: a hold is not also a short press. ``take`` still
+    watches the pin, so a release the debounce dropped still finishes.
+
+    While Stop is held, its lamp stays dark. The lamp comes on in the hold
+    callback, at the moment the press is long enough, and goes out again
+    when the button is released.
     """
 
     def __init__(self, start: object, stop: object, leds: PromptLeds, encoder: object | None) -> None:
@@ -67,20 +71,31 @@ class Panel:
         self._painted: tuple[bool, bool] | None = None
         self._release_dark_until = 0.0
         self._bind_button(start, self._start_down, self._start_up)
-        self._bind_button(stop, self._stop_down, self._stop_up)
+        self._bind_button(stop, self._stop_down, self._stop_up, on_held=self._stop_held)
         if encoder is not None:
             encoder.when_rotated_clockwise = self._clockwise  # type: ignore[attr-defined]
             encoder.when_rotated_counter_clockwise = self._counter  # type: ignore[attr-defined]
         self.set_leds(False, False)
 
-    def _bind_button(self, button: object, on_down: object, on_up: object) -> None:
+    def _bind_button(
+        self,
+        button: object,
+        on_down: object,
+        on_up: object,
+        on_held: object | None = None,
+    ) -> None:
         try:
             button.bounce_time = BUTTON_BOUNCE_SECONDS  # type: ignore[attr-defined]
-            button.when_held = None  # type: ignore[attr-defined]
+            if on_held is not None:
+                button.hold_time = STOP_HOLD_SECONDS  # type: ignore[attr-defined]
+                button.hold_repeat = False  # type: ignore[attr-defined]
         except Exception:
-            logger.debug("Button debounce was left at the device default", exc_info=True)
+            logger.exception("Button timing could not be configured")
         button.when_pressed = on_down  # type: ignore[attr-defined]
         button.when_released = on_up  # type: ignore[attr-defined]
+        # None leaves Start with no hold action. Stop's callback is what
+        # lights the lamp at the threshold.
+        button.when_held = on_held  # type: ignore[attr-defined]
 
     def _start_down(self) -> None:
         with self._guard:
@@ -99,6 +114,24 @@ class Panel:
         with self._guard:
             self._end_stop(time.monotonic())
             self._paint_leds(time.monotonic())
+
+    def _stop_held(self) -> None:
+        """gpiozero calls this once, when Stop has been down long enough."""
+
+        with self._guard:
+            # A hold that shows up after the finger has lifted is a leftover
+            # edge. Counting it would open the menu on the way out of a tap.
+            if _is_pressed(self._stop_button) is False:
+                return
+            if self._stop_wait_release or self._stop_hold_sent:
+                return
+            now = time.monotonic()
+            if self._stop_down_at is None:
+                self._stop_down_at = now
+            self._stop_hold_sent = True
+            self._stop_holds += 1
+            self._release_dark_until = 0.0
+            self._paint_leds(now)
 
     def _begin_start(self, now: float) -> None:
         """Caller holds ``self._guard``."""
@@ -146,7 +179,10 @@ class Panel:
         self._stop_wait_release = False
         if waiting or down_at is None:
             return
-        if sent or now - down_at >= STOP_HOLD_SECONDS:
+        # was_held is gpiozero's own record that this gesture already reached
+        # the hold time. That release must not also count as a short press.
+        held = sent or _was_held(self._stop_button) or now - down_at >= STOP_HOLD_SECONDS
+        if held:
             if not sent:
                 self._stop_holds += 1
             self._release_dark_until = now + HOLD_RELEASE_OFF_SECONDS
@@ -272,6 +308,12 @@ def _is_pressed(button: object) -> bool | None:
     return bool(pressed)
 
 
+def _was_held(button: object) -> bool:
+    """True when gpiozero already classified this gesture as a hold."""
+
+    return bool(getattr(button, "was_held", False))
+
+
 def indicator_leds(
     mode: str,
     *,
@@ -309,8 +351,20 @@ def open_panel(settings: Settings) -> Panel | None:
         return None
     start = stop = led_start = led_stop = encoder = None
     try:
-        start = Button(gpio.button_start, pull_up=True, bounce_time=BUTTON_BOUNCE_SECONDS, pin_factory=factory)
-        stop = Button(gpio.button_stop, pull_up=True, bounce_time=BUTTON_BOUNCE_SECONDS, pin_factory=factory)
+        start = Button(
+            gpio.button_start,
+            pull_up=True,
+            bounce_time=BUTTON_BOUNCE_SECONDS,
+            pin_factory=factory,
+        )
+        stop = Button(
+            gpio.button_stop,
+            pull_up=True,
+            bounce_time=BUTTON_BOUNCE_SECONDS,
+            hold_time=STOP_HOLD_SECONDS,
+            hold_repeat=False,
+            pin_factory=factory,
+        )
         led_start = LED(gpio.led_start, active_high=LED_ACTIVE_HIGH, pin_factory=factory)
         led_stop = LED(gpio.led_stop, active_high=LED_ACTIVE_HIGH, pin_factory=factory)
         encoder = RotaryEncoder(

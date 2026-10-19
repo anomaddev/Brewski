@@ -31,6 +31,11 @@ BACKPACK_ADDRESSES = (0x27, 0x3F)
 # LED relay modules, on the saved LED pins, not the button pins. Those
 # boards energize when the pin is low, so "on" has to drive the pin low.
 LED_ACTIVE_HIGH = False
+# Momentary buttons are wired from the GPIO pin to ground and read with the
+# Pi's internal pull-up, so a press is low. bounce_time drops the extra edges
+# from the contact. A 0.1µF ceramic capacitor across the switch contacts
+# rejects the rest of the bounce if a switch is still noisy.
+BUTTON_BOUNCE_SECONDS = 0.05
 _SYSTEM_LGPIO = "/usr/lib/python3/dist-packages"
 
 _logged: set[str] = set()
@@ -257,13 +262,13 @@ def open_buttons(settings: Settings) -> ButtonReader | None:
         start = Button(
             gpio.button_start,
             pull_up=True,
-            bounce_time=0.05,
+            bounce_time=BUTTON_BOUNCE_SECONDS,
             pin_factory=factory,
         )
         stop = Button(
             gpio.button_stop,
             pull_up=True,
-            bounce_time=0.05,
+            bounce_time=BUTTON_BOUNCE_SECONDS,
             pin_factory=factory,
         )
         return ButtonReader(start, stop)

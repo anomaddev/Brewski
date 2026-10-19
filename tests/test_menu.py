@@ -63,6 +63,41 @@ def test_a_quick_start_counts_once_on_the_way_down(monkeypatch):
     assert panel.take() == (1, 0, 0, 0)
 
 
+def test_the_hold_callback_lights_the_lamp_before_the_next_poll(monkeypatch):
+    panel, stop, leds = _panel()
+    now = {"t": 1_000.0}
+    monkeypatch.setattr("brewski.panel.time.monotonic", lambda: now["t"])
+    panel.set_leds(True, True)
+    stop.is_pressed = True
+    stop.was_held = False
+    stop.when_pressed()
+    assert leds.state == (True, False)
+    stop.was_held = True
+    stop.when_held()
+    assert leds.state == (True, True)
+    assert panel.take() == (0, 0, 1, 0)
+    stop.is_pressed = False
+    stop.when_released()
+    assert leds.state == (True, False)
+    assert panel.take() == (0, 0, 0, 0)
+
+
+def test_a_hold_that_arrives_after_release_is_ignored(monkeypatch):
+    panel, stop, _leds = _panel()
+    now = {"t": 1_000.0}
+    monkeypatch.setattr("brewski.panel.time.monotonic", lambda: now["t"])
+    stop.is_pressed = True
+    stop.was_held = False
+    stop.when_pressed()
+    now["t"] += 0.2
+    stop.is_pressed = False
+    stop.when_released()
+    assert panel.take() == (0, 1, 0, 0)
+    stop.was_held = True
+    stop.when_held()
+    assert panel.take() == (0, 0, 0, 0)
+
+
 def test_the_hold_lamp_comes_on_and_goes_out_with_the_button(monkeypatch):
     panel, stop, leds = _panel()
     now = {"t": 1_000.0}

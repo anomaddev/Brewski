@@ -20,7 +20,7 @@ from brewski.store import Settings, default_gpio
 logger = logging.getLogger(__name__)
 
 # Long enough that stopping a run does not open the software menu.
-STOP_HOLD_SECONDS = 2.0
+STOP_HOLD_SECONDS = 4.0
 
 
 class PanelEvents(NamedTuple):

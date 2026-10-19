@@ -40,8 +40,9 @@ class Panel:
     buttons share a ground, so an edge on one pin is ignored while the
     other press is already real.
 
-    While Stop is held, its lamp stays dark. The lamp comes on when the
-    hold timer fires, and goes out again when the button is released.
+    While Stop is held, the Start lamp stays dark. The Stop lamp stays
+    dark too until the hold timer fires, then comes on, and goes out
+    again when the button is released.
     ``take`` still watches the pins, so a release the debounce dropped
     still finishes.
     """
@@ -157,6 +158,10 @@ class Panel:
         """Caller holds ``self._guard``. Only the lamp that changed is written."""
 
         start, stop = self._desired_leds
+        # The finger is still down. Leave Start dark for the whole press.
+        # Driving that pin while Stop changes was lighting the Start lamp.
+        if self._stop_forced is not None:
+            start = False
         if self._stop_forced == "off":
             stop = False
         elif self._stop_forced == "on":

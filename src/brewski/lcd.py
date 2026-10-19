@@ -242,12 +242,13 @@ class PromptLeds:
         if shown == previous:
             return
         self._shown = shown
-        # Write only the lamp that changed. Restating the other pin makes
-        # that relay click, so a Stop press was lighting the Start lamp.
-        if previous is None or previous[0] != shown[0]:
-            _drive_led(self._start, shown[0])
+        # Write only the lamp that changed. Restating a pin makes that relay
+        # click. Stop is written first so a later Start write is the level
+        # that stays on the pin.
         if previous is None or previous[1] != shown[1]:
             _drive_led(self._stop, shown[1])
+        if previous is None or previous[0] != shown[0]:
+            _drive_led(self._start, shown[0])
 
     def close(self) -> None:
         for led in (self._start, self._stop):

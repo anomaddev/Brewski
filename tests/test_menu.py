@@ -50,7 +50,7 @@ def test_a_stop_spike_does_not_count_or_block_start(monkeypatch):
     panel.set_leds(True, True)
     stop.is_pressed = True
     stop.when_pressed()
-    assert leds.state == (True, False)
+    assert leds.state == (False, False)
     now["t"] += 0.02
     stop.is_pressed = False
     stop.when_released()
@@ -193,9 +193,9 @@ def test_the_hold_timer_lights_the_lamp_before_the_next_poll(monkeypatch):
     panel.set_leds(True, True)
     stop.is_pressed = True
     stop.when_pressed()
-    assert leds.state == (True, False)
+    assert leds.state == (False, False)
     panel._gestures.fire(panel._gestures.stop.generation)
-    assert leds.state == (True, True)
+    assert leds.state == (False, True)
     assert panel.take() == (0, 0, 1, 0)
     stop.is_pressed = False
     stop.when_released()
@@ -226,10 +226,10 @@ def test_the_hold_lamp_comes_on_and_goes_out_with_the_button(monkeypatch):
     panel.set_leds(True, True)
     stop.is_pressed = True
     stop.when_pressed()
-    assert leds.state == (True, False)
+    assert leds.state == (False, False)
     now["t"] += STOP_HOLD_SECONDS
     assert panel.take() == (0, 0, 1, 0)
-    assert leds.state == (True, True)
+    assert leds.state == (False, True)
     stop.is_pressed = False
     stop.when_released()
     assert leds.state == (True, False)

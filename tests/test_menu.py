@@ -28,11 +28,39 @@ def _panel():
     return panel, stop, leds
 
 
-def test_a_stop_release_is_a_short_press():
+def test_a_stop_release_is_a_short_press(monkeypatch):
     panel, stop, _leds = _panel()
+    now = {"t": 1_000.0}
+    monkeypatch.setattr("brewski.panel.time.monotonic", lambda: now["t"])
+    stop.is_pressed = True
     stop.when_pressed()
+    now["t"] += 0.06
+    stop.is_pressed = False
     stop.when_released()
     assert panel.take() == (0, 1, 0, 0)
+
+
+def test_a_stop_spike_does_not_count_or_block_start(monkeypatch):
+    now = {"t": 1_000.0}
+    monkeypatch.setattr("brewski.panel.time.monotonic", lambda: now["t"])
+    start = _Button()
+    stop = _Button()
+    leds = _Leds()
+    panel = Panel(start, stop, leds, None)
+    panel.set_leds(True, True)
+    stop.is_pressed = True
+    stop.when_pressed()
+    assert leds.state == (True, False)
+    now["t"] += 0.02
+    stop.is_pressed = False
+    stop.when_released()
+    assert leds.state == (True, True)
+    start.is_pressed = True
+    start.when_pressed()
+    now["t"] += 0.06
+    start.is_pressed = False
+    start.when_released()
+    assert panel.take() == (1, 0, 0, 0)
 
 
 def test_a_quick_stop_counts_when_the_release_callback_is_missed(monkeypatch):
@@ -42,7 +70,7 @@ def test_a_quick_stop_counts_when_the_release_callback_is_missed(monkeypatch):
     stop.is_pressed = True
     stop.when_pressed()
     stop.is_pressed = False
-    now["t"] += 0.05
+    now["t"] += 0.06
     assert panel.take() == (0, 1, 0, 0)
 
 
@@ -55,12 +83,14 @@ def test_a_quick_start_counts_once_on_the_way_up(monkeypatch):
     start.when_pressed()
     start.when_pressed()
     assert panel.take() == (0, 0, 0, 0)
+    now["t"] += 0.06
     start.is_pressed = False
     start.when_released()
     assert panel.take() == (1, 0, 0, 0)
     now["t"] += 0.05
     start.is_pressed = True
     start.when_pressed()
+    now["t"] += 0.06
     start.is_pressed = False
     start.when_released()
     assert panel.take() == (1, 0, 0, 0)

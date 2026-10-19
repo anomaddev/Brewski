@@ -25,7 +25,15 @@ from brewski.sources.hts221 import (
     calibration_from_bytes,
     compensate,
 )
-from brewski.sources.max31865 import NOMINAL_OHMS, config_byte, decode_rtd, hardware_spi, temperature_f
+from brewski.sources.max31865 import (
+    NOMINAL_OHMS,
+    config_byte,
+    config_write,
+    conversion_faulted,
+    decode_rtd,
+    hardware_spi,
+    temperature_f,
+)
 from brewski.store import SLOT_COUNT, Settings, Store, default_gpio
 
 logger = logging.getLogger(__name__)
@@ -251,27 +259,47 @@ class PiSource:
         if cs_pin is None or cs_pin not in self._cs or self._spi is None:
             return None
         cs = self._cs[cs_pin]
+        config = config_byte(wires)
         try:
-            config = config_byte(wires)
             if self._configured.get(cs_pin) != config:
-                _transfer(self._spi, cs, [0x80, config])
+                # Bias has to be on before the clear, or the power-up
+                # undervoltage fault latches again during the first conversion.
+                self._arm_probe(cs, wires)
                 self._configured[cs_pin] = config
-                time.sleep(_CONVERT_SECONDS)
-            data = _transfer(self._spi, cs, [0x01, 0x00, 0x00])
-            fault = _transfer(self._spi, cs, [0x07, 0x00])
+            data, fault = _read_frame(self._spi, cs)
         except Exception:
             logger.exception("MAX31865 read failed on BCM %s", cs_pin)
             return None
-        if len(data) < 3 or len(fault) < 2:
-            return None
-        raw, fault_bit = decode_rtd(data[1], data[2])
-        if fault_bit or (fault[1] & 0xFC):
-            return None
+        if _frame_faulted(data, fault):
+            try:
+                _transfer(self._spi, cs, [0x80, config_write(wires)])
+                time.sleep(_CONVERT_SECONDS)
+                data, fault = _read_frame(self._spi, cs)
+            except Exception:
+                logger.exception("MAX31865 fault clear failed on BCM %s", cs_pin)
+                return None
+            if _frame_faulted(data, fault):
+                logger.warning(
+                    "MAX31865 on BCM %s stayed faulted after a clear (register %s)",
+                    cs_pin,
+                    hex(fault[1]) if len(fault) > 1 else None,
+                )
+                return None
+        raw, _fault_bit = decode_rtd(data[1], data[2])
         nominal = NOMINAL_OHMS.get(rtd, NOMINAL_OHMS["pt100"])
         try:
             return temperature_f(raw, ref_ohms, nominal)
         except (ValueError, ZeroDivisionError):
             return None
+
+    def _arm_probe(self, cs: object, wires: int) -> None:
+        """Turn bias on, then clear a fault that latched on that first conversion."""
+
+        write = config_write(wires)
+        _transfer(self._spi, cs, [0x80, write])
+        time.sleep(_CONVERT_SECONDS)
+        _transfer(self._spi, cs, [0x80, write])
+        time.sleep(_CONVERT_SECONDS)
 
 
 def _hts_enabled(settings: Settings) -> bool:
@@ -285,6 +313,18 @@ def _transfer(spi: object, cs: object, payload: list[int]) -> list[int]:
         return list(spi.xfer2(payload))  # type: ignore[attr-defined]
     finally:
         cs.off()  # type: ignore[attr-defined]
+
+
+def _read_frame(spi: object, cs: object) -> tuple[list[int], list[int]]:
+    data = _transfer(spi, cs, [0x01, 0x00, 0x00])
+    fault = _transfer(spi, cs, [0x07, 0x00])
+    return data, fault
+
+
+def _frame_faulted(data: list[int], fault: list[int]) -> bool:
+    if len(data) < 3 or len(fault) < 2:
+        return True
+    return conversion_faulted(data[1], data[2], fault[1])
 
 
 def _read_word(bus: object, register: int) -> int:

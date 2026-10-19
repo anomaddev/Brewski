@@ -10,7 +10,7 @@ from brewski.controller import Controller, ControllerError
 from brewski.emergency import CODES, check_code_list
 from brewski.panel import indicator_leds
 from brewski.sources.hts221 import calibration_from_bytes, compensate
-from brewski.sources.max31865 import decode_rtd, temperature_f
+from brewski.sources.max31865 import config_write, conversion_faulted, decode_rtd, temperature_f
 from brewski.store import merge_settings
 from brewski.updates import ReleaseInfo
 
@@ -154,6 +154,16 @@ def test_max31865_and_hts221_conversions():
     reading, fault = decode_rtd(0x3A, 0x01)
     assert fault is True
     assert reading == 0x1D00
+
+
+def test_latched_max31865_fault_is_not_a_temperature():
+    # Boiler capture: fault bit set and fault register 0x04 (undervoltage).
+    # The same RTD code with that latch cleared is a real reading.
+    assert conversion_faulted(0x41, 0xCB, 0x04) is True
+    assert conversion_faulted(0x41, 0xC8, 0x00) is False
+    assert temperature_f(decode_rtd(0x41, 0xC8)[0], 430, 100) == pytest.approx(80.51, abs=0.05)
+    assert config_write(2) == 0xC2
+    assert config_write(3) == 0xD2
 
     block = bytearray(16)
     block[1] = 200

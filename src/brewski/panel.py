@@ -14,7 +14,7 @@ import threading
 import time
 from typing import NamedTuple
 
-from brewski.lcd import BUTTON_BOUNCE_SECONDS, LED_ACTIVE_HIGH, PromptLeds, panel_pin_factory
+from brewski.lcd import LED_ACTIVE_HIGH, PromptLeds, panel_pin_factory
 from brewski.press import STOP_HOLD_SECONDS, PressPair
 from brewski.store import Settings, default_gpio
 
@@ -71,10 +71,16 @@ class Panel:
         self.set_leds(False, False)
 
     def _bind_button(self, button: object, on_down: object, on_up: object) -> None:
-        try:
-            button.bounce_time = BUTTON_BOUNCE_SECONDS  # type: ignore[attr-defined]
-        except Exception:
-            logger.exception("Button timing could not be configured")
+        # gpiozero's bounce timer drops edges. With no capacitor on the
+        # switch, that sticks the pin after the first spike. PressPair does
+        # the debounce. hold_time is ours too; gpiozero's thread stays off.
+        for name in ("bounce_time", "hold_time"):
+            if not hasattr(button, name):
+                continue
+            try:
+                setattr(button, name, None)
+            except Exception:
+                logger.exception("Button timing could not be configured")
         button.when_pressed = on_down  # type: ignore[attr-defined]
         button.when_released = on_up  # type: ignore[attr-defined]
 
@@ -145,7 +151,7 @@ class Panel:
         elif event == "hold-release":
             self._stop_forced = None
             self._release_dark_until = now + HOLD_RELEASE_OFF_SECONDS
-        elif event in ("tap", "release"):
+        elif event in ("tap", "release", "bounce"):
             self._stop_forced = None
 
     def _paint_leds(self, now: float) -> None:
@@ -232,13 +238,15 @@ def open_panel(settings: Settings) -> Panel | None:
         start = Button(
             gpio.button_start,
             pull_up=True,
-            bounce_time=BUTTON_BOUNCE_SECONDS,
+            bounce_time=None,
+            hold_time=None,
             pin_factory=factory,
         )
         stop = Button(
             gpio.button_stop,
             pull_up=True,
-            bounce_time=BUTTON_BOUNCE_SECONDS,
+            bounce_time=None,
+            hold_time=None,
             pin_factory=factory,
         )
         led_start = LED(gpio.led_start, active_high=LED_ACTIVE_HIGH, pin_factory=factory)

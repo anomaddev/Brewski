@@ -5,8 +5,9 @@ I2C controller is ``/dev/i2c-1`` on BCM 2 (SDA) and BCM 3 (SCL). Any other
 saved pair is left unused. The backpack address is probed, not stored.
 
 The button pins and the LED relay pins are different. Each button is wired
-from its GPIO to ground and is read with the internal pull-up. Each LED is
-switched by its own relay.
+from its GPIO to ground. A 10 kΩ resistor from 3.3 V holds the pin high, and
+the internal pull-up stays on, so a press is low. Each LED is switched by
+its own relay.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Protocol
 
-from brewski.press import PressPair
+from brewski.press import PRESS_BOUNCE_SECONDS, PressPair
 from brewski.store import Settings, default_gpio
 
 logger = logging.getLogger(__name__)
@@ -33,11 +34,11 @@ BACKPACK_ADDRESSES = (0x27, 0x3F)
 # LED relay modules, on the saved LED pins, not the button pins. Those
 # boards energize when the pin is low, so "on" has to drive the pin low.
 LED_ACTIVE_HIGH = False
-# Momentary buttons are wired from the GPIO pin to ground and read with the
-# Pi's internal pull-up, so a press is low. bounce_time drops the extra edges
-# from the contact. A 0.1µF ceramic capacitor across the switch contacts
-# rejects the rest of the bounce if a switch is still noisy.
-BUTTON_BOUNCE_SECONDS = 0.05
+# Momentary buttons are wired from the GPIO pin to ground. A 10 kΩ from 3.3 V
+# to the pin holds it high, and the internal pull-up stays on, so a press is
+# low. There is no capacitor. gpiozero's bounce timer is left off; PressPair
+# ignores a spike shorter than PRESS_BOUNCE_SECONDS.
+BUTTON_BOUNCE_SECONDS = PRESS_BOUNCE_SECONDS
 _SYSTEM_LGPIO = "/usr/lib/python3/dist-packages"
 
 _logged: set[str] = set()
@@ -125,7 +126,7 @@ class HardwareDisplay:
 
 
 class ButtonReader:
-    """Start and stop buttons wired to ground, using the Pi's internal pull-ups.
+    """Start and stop buttons wired to ground, held high by a 10 kΩ to 3.3 V.
 
     The first completed tap wins. A button already held when the prompt opens
     does not count, so a stuck switch cannot accept the update by itself.
@@ -290,13 +291,15 @@ def open_buttons(settings: Settings) -> ButtonReader | None:
         start = Button(
             gpio.button_start,
             pull_up=True,
-            bounce_time=BUTTON_BOUNCE_SECONDS,
+            bounce_time=None,
+            hold_time=None,
             pin_factory=factory,
         )
         stop = Button(
             gpio.button_stop,
             pull_up=True,
-            bounce_time=BUTTON_BOUNCE_SECONDS,
+            bounce_time=None,
+            hold_time=None,
             pin_factory=factory,
         )
         return ButtonReader(start, stop)

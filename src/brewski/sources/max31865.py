@@ -21,6 +21,10 @@ NOMINAL_OHMS = {"pt100": 100.0, "pt1000": 1000.0}
 # VBIAS and automatic conversion. Bit 4 selects 3-wire mode.
 CONFIG_BIAS_AUTO = 0xC0
 CONFIG_3WIRE = 0x10
+# Config D1 clears latched fault bits. It is write-only and drops itself.
+FAULT_STATUS_CLEAR = 0x02
+# Fault-status D1 and D0 are unused. The bits above them are real faults.
+FAULT_STATUS_MASK = 0xFC
 
 
 def config_byte(wires: int) -> int:
@@ -28,6 +32,19 @@ def config_byte(wires: int) -> int:
     if int(wires) == 3:
         value |= CONFIG_3WIRE
     return value
+
+
+def config_write(wires: int) -> int:
+    """Config byte that also clears a latched fault."""
+
+    return config_byte(wires) | FAULT_STATUS_CLEAR
+
+
+def conversion_faulted(msb: int, lsb: int, fault_register: int) -> bool:
+    """True when the RTD fault bit or a latched fault-status bit is set."""
+
+    _raw, fault_bit = decode_rtd(msb, lsb)
+    return fault_bit or bool(int(fault_register) & FAULT_STATUS_MASK)
 
 
 def decode_rtd(msb: int, lsb: int) -> tuple[int, bool]:

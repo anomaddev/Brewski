@@ -17,6 +17,10 @@ import time
 STOP_HOLD_SECONDS = 4.0
 # A second pin that moves with this one is the shared ground, not a second finger.
 CROSSTALK_SECONDS = 0.08
+# There is no capacitor on the button. A spike shorter than this is contact
+# bounce or cable noise, not a finger. It must not count, and it must not
+# block the other button.
+PRESS_BOUNCE_SECONDS = 0.05
 
 
 class Press:
@@ -188,6 +192,12 @@ class PressPair:
                 press.holds += 1
                 press.counted = True
             return "hold-release" if name == "stop" else None
+        # A spike used to count as Stop, then sit in the crosstalk window and
+        # reject Start for the next 80 ms. With the pin chattering, Start
+        # never got through.
+        if duration < PRESS_BOUNCE_SECONDS:
+            press.ended_at = 0.0
+            return "bounce" if name == "stop" else None
         # The pin that lets go while the other is still down is the blip.
         # A short tap still counts when it outlasts that blip.
         suppress = other_down or (overlapped and other_counted)

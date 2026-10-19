@@ -106,6 +106,9 @@ def test_shape_is_locked_during_a_run_but_target_can_change(client, controller):
     changed = client.put("/api/settings", json={"target_temp_f": 180})
     assert changed.status_code == 200
     assert changed.get_json()["target_temp_f"] == 180
+    changed_source = client.put("/api/settings", json={"update_source": "beta"})
+    assert changed_source.status_code == 200
+    assert changed_source.get_json()["update_source"] == "beta"
 
     controller.tick(5)
     run_id = client.get("/api/status").get_json()["run_id"]
@@ -153,6 +156,7 @@ def test_reset_clears_runs_and_restores_defaults(client, controller):
     assert reset.get_json()["heater_min_on_seconds"] == 1.0
     assert reset.get_json()["heater_min_off_seconds"] == 1.0
     assert reset.get_json()["early_cutoff_f"] == 3.0
+    assert reset.get_json()["update_source"] == "main"
     assert reset.get_json()["heater_names"] == ["Heater 1", "Heater 2"]
     assert reset.get_json()["sensor_names"] == ["Boiler", "Column"]
     assert [heater["gpio"] for heater in reset.get_json()["heaters"]] == [12, 16]

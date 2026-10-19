@@ -192,12 +192,15 @@ function openSetup(host, settings) {
     const latest = stripVersion(update.latest)
     const current = stripVersion(update.current)
     const canApply = update.apply_supported === true
+    const offer = update.source === 'beta'
+      ? `Setup is saved. Beta commit ${escapeHtml(latest)} is available. This still is running ${escapeHtml(current)}.`
+      : `Setup is saved. Version ${escapeHtml(latest)} is available. This still is running ${escapeHtml(current)}.`
     host.innerHTML = `
       <div class="setup-overlay" role="dialog" aria-modal="true" aria-labelledby="update-title">
         <div class="setup-card">
           <p class="eyebrow">Get started</p>
           <h1 id="update-title">Update available</h1>
-          <p class="setup-lead">Setup is saved. Version ${escapeHtml(latest)} is available. This still is running ${escapeHtml(current)}.</p>
+          <p class="setup-lead">${offer}</p>
           <p class="setup-progress" id="update-phase">${canApply ? '' : 'This session cannot install a release. Update from the Pi.'}</p>
           <p class="form-error" id="update-error" hidden></p>
           <div class="setup-actions">

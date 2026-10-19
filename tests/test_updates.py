@@ -4,10 +4,13 @@ import urllib.error
 from brewski import __version__
 from brewski.lcd import NullDisplay
 from brewski.store import Store, merge_settings
+from brewski.menu import SoftwareMenu
 from brewski.updates import (
     ReleaseInfo,
     check_release,
     is_newer,
+    offer_ends,
+    progress_label,
     run_boot_update,
     wait_for_choice,
 )
@@ -73,6 +76,84 @@ def test_release_check_without_a_network(tmp_path):
     offline = check_release(opener=_opener(500, {}), revision_path=tmp_path / "other")
     assert offline.reachable is False
     assert offline.available is False
+
+
+def test_main_offers_the_release_when_the_install_is_a_commit(tmp_path):
+    revision = tmp_path / "revision"
+    revision.write_text(f"{'a' * 40}\n")
+    info = check_release(
+        opener=_opener(200, {"tag_name": "v0.1.0"}),
+        revision_path=revision,
+        source="main",
+    )
+    assert info.available is True
+    assert info.ref == "v0.1.0"
+    assert info.source == "main"
+    assert offer_ends(info) == (__version__, "v0.1.0")
+
+
+def test_beta_offers_a_new_commit_and_stays_quiet_when_it_is_installed(tmp_path):
+    installed = "a" * 40
+    offered = "b" * 40
+    revision = tmp_path / "revision"
+    newer = check_release(
+        opener=_opener(200, {"sha": offered}),
+        revision_path=revision,
+        source="beta",
+    )
+    assert newer.available is True
+    assert newer.latest == offered[:7]
+    assert newer.ref == offered
+    assert newer.source == "beta"
+    assert offer_ends(newer) == (__version__, offered[:7])
+    assert progress_label(newer) == f"{__version__} -> {offered[:7]}"
+
+    revision.write_text(f"{offered}\n")
+    same = check_release(
+        opener=_opener(200, {"sha": offered}),
+        revision_path=revision,
+        source="beta",
+    )
+    assert same.available is False
+    assert same.reachable is True
+
+    revision.write_text(f"{installed}\n")
+    moved = check_release(
+        opener=_opener(200, {"sha": offered}),
+        revision_path=revision,
+        source="beta",
+    )
+    assert moved.available is True
+    assert offer_ends(moved) == (installed[:7], offered[:7])
+    assert progress_label(moved) == f"{installed[:7]} -> {offered[:7]}"
+
+    missing = check_release(opener=_opener(404, {}), revision_path=tmp_path / "gone", source="beta")
+    assert missing.reachable is True
+    assert missing.latest is None
+    assert missing.available is False
+
+    offline = check_release(opener=_opener(500, {}), revision_path=tmp_path / "down", source="beta")
+    assert offline.reachable is False
+    assert offline.available is False
+
+
+def test_beta_menu_shows_the_commit_arrow():
+    menu = SoftwareMenu()
+    installed = "abc1234" + "a" * 33
+    offered = "def5678" + "b" * 33
+    menu.show_release(
+        ReleaseInfo(
+            current="0.6.23",
+            latest=offered[:7],
+            available=True,
+            reachable=True,
+            revision=installed,
+            ref=offered,
+            source="beta",
+        ),
+        True,
+    )
+    assert menu.lines("0.6.23")[1] == "abc1234 -> def5678"
 
 
 def test_boot_does_not_check_before_setup(tmp_path, monkeypatch):

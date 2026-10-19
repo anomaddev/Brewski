@@ -8,82 +8,188 @@ const SLOTS = [0, 1]
 
 export function mountSettings(root) {
   root.innerHTML = `
-    <form class="dashboard-card settings-card" id="settings-form">
-      <div class="card-title-with-timer">
-        <h2 class="card-title">Settings</h2>
-      </div>
+    <form class="settings-page" id="settings-form">
+      <header class="settings-head">
+        <h1>Settings</h1>
+      </header>
       <p class="lock-banner" id="lock-banner" hidden>
-        Heater, probe, and GPIO setup is locked while a run is open. The target, the cabinet limit, the early cutoff, and the minimum on and off times can still be changed.
+        Heater, probe, and GPIO setup is locked while a run is open. The target, the cabinet limit, the early cutoff, the minimum on and off times, and the update source can still be changed.
       </p>
-      <fieldset>
-        <legend>Default Target</legend>
-        <label class="field target-field-setting">Temperature (°F)
-          <input name="target_temp_f" id="settings-target" type="number" min="90" max="240" step="1" inputmode="numeric" required />
-          <p class="boil-warning" id="target-warning" hidden>Above water's boiling point (212°F).</p>
-        </label>
-        <p class="help">The first enabled probe is compared with this. Heaters turn off early, by the cutoff below. Without a measured cooling rate they come back on 2°F under that cutoff. After calibration measures the cooling rate, they pulse on near the target to hold it.</p>
-      </fieldset>
-      <fieldset>
-        <legend>Early cutoff</legend>
-        <label class="field target-field-setting">Degrees below target (°F)
-          <input name="early_cutoff_f" id="early-cutoff" type="number" min="0" max="20" step="0.5" inputmode="decimal" required />
-        </label>
-        <p class="help">The element turns off this many degrees before the target. It stays hot after the SSR opens, and the probe lags the liquid, so cutting power early lets that residual heat finish the rise instead of overshooting. 3°F is a starting point for a typical small still. Use 0 to wait until the probe reaches the target. A calibration run replaces this with the measured coast. When that run also measures a cooling rate, the element pulses back on near the target instead of waiting for the 2°F band under this cutoff.</p>
-      </fieldset>
-      <fieldset>
-        <legend>Cabinet limit</legend>
-        <label class="field target-field-setting">Maximum cabinet temperature (°F)
-          <input name="cabinet_limit_f" id="cabinet-limit" type="number" min="100" max="200" step="1" inputmode="numeric" required />
-        </label>
-        <p class="help">The HTS221 watches the cabinet. Above this temperature every heater turns off and Start stays refused until the cabinet cools back to the limit. 170°F is the default. Humidity is shown and does not trip the stop. Disabling the HTS221 turns this interlock off.</p>
-      </fieldset>
-      <fieldset>
-        <legend>Minimum on time</legend>
-        <label class="field target-field-setting">Seconds
-          <input name="heater_min_on_seconds" id="heater-min-on" type="number" min="0.5" max="60" step="0.1" inputmode="decimal" required />
-        </label>
-        <p class="help">Once a heater turns on, it stays on at least this long before the controller can turn it off. Pause and Stop still turn the heaters off immediately.</p>
-      </fieldset>
-      <fieldset>
-        <legend>Minimum off time</legend>
-        <label class="field target-field-setting">Seconds
-          <input name="heater_min_off_seconds" id="heater-min-off" type="number" min="0.5" max="60" step="0.1" inputmode="decimal" required />
-        </label>
-        <p class="help">Once a heater turns off, it stays off at least this long. This keeps a zero-crossing SSR from chattering. 0.5–2 seconds is enough. Pause and Stop still turn the heaters off immediately.</p>
-      </fieldset>
-      <div class="device-columns">
-        <section class="device-column">
-          <h3 class="column-title">Heaters</h3>
-          <p class="help">One must stay enabled. Each heater needs its own BCM pin. Defaults are BCM 12 and 16. Hours count how long that element has been powered, including calibration.</p>
-          ${deviceSection('heater', 'Heater')}
-          <p class="form-error device-guard" id="heater-guard" data-message="One heater must stay enabled."></p>
+      <div class="settings-top">
+        <section class="dashboard-card settings-card" aria-labelledby="control-title">
+          <h2 class="card-title" id="control-title">Control</h2>
+          <div class="setting-list">
+            ${settingRow(
+              'Default target',
+              {
+                lead: 'Compared with the first enabled probe.',
+                rows: [
+                  ['Off early', 'By the cutoff below'],
+                  ['Before cal.', 'Back on 2°F under that cutoff'],
+                  ['After cal.', 'Pulses near the target'],
+                ],
+              },
+              `<label class="field target-field-setting">Temperature (°F)
+                <input name="target_temp_f" id="settings-target" type="number" min="90" max="240" step="1" inputmode="numeric" required />
+                <p class="boil-warning" id="target-warning" hidden>Above water's boiling point (212°F).</p>
+              </label>`,
+            )}
+            ${settingRow(
+              'Early cutoff',
+              {
+                lead: 'Power drops this far before the target so residual heat finishes the rise.',
+                rows: [
+                  ['3°F', 'Starting point for a small still'],
+                  ['0', 'Wait until the probe hits the target'],
+                  ['After cal.', 'Replaced by the measured coast'],
+                ],
+              },
+              `<label class="field target-field-setting">Degrees below target (°F)
+                <input name="early_cutoff_f" id="early-cutoff" type="number" min="0" max="20" step="0.5" inputmode="decimal" required />
+              </label>`,
+            )}
+            ${settingRow(
+              'Cabinet limit',
+              {
+                lead: 'The HTS221 stops the heaters and refuses Start above this.',
+                rows: [
+                  ['170°F', 'Default'],
+                  ['Humidity', 'Shown. Does not trip the stop'],
+                  ['HTS221 off', 'Interlock is off'],
+                ],
+              },
+              `<label class="field target-field-setting">Maximum (°F)
+                <input name="cabinet_limit_f" id="cabinet-limit" type="number" min="100" max="200" step="1" inputmode="numeric" required />
+              </label>`,
+            )}
+            ${settingRow(
+              'Minimum on time',
+              {
+                lead: 'A heater stays on at least this long.',
+                rows: [['Pause, Stop', 'Still turn the heaters off now']],
+              },
+              `<label class="field target-field-setting">Seconds
+                <input name="heater_min_on_seconds" id="heater-min-on" type="number" min="0.5" max="60" step="0.1" inputmode="decimal" required />
+              </label>`,
+            )}
+            ${settingRow(
+              'Minimum off time',
+              {
+                lead: 'A heater stays off at least this long so the SSR does not chatter.',
+                rows: [
+                  ['0.5–2 s', 'Enough for a zero-crossing SSR'],
+                  ['Pause, Stop', 'Still turn the heaters off now'],
+                ],
+              },
+              `<label class="field target-field-setting">Seconds
+                <input name="heater_min_off_seconds" id="heater-min-off" type="number" min="0.5" max="60" step="0.1" inputmode="decimal" required />
+              </label>`,
+            )}
+          </div>
         </section>
-        <section class="device-column">
-          <h3 class="column-title">Temperature probes</h3>
-          <p class="help">One must stay enabled. The first enabled probe controls the heaters. A probe name is 1 to 11 characters. Each probe is a MAX31865 with its own chip select. Probe 2 starts disabled. Defaults are chip selects BCM 17 and 8.</p>
-          ${deviceSection('sensor', 'Probe')}
-          <p class="form-error device-guard" id="sensor-guard" data-message="One temperature probe must stay enabled."></p>
+        <section class="dashboard-card settings-card" aria-labelledby="software-title">
+          <h2 class="card-title" id="software-title">Software</h2>
+          <div class="setting-row source-row">
+            <div class="setting-copy">
+              <h3>Update source${tip({
+                lead: 'Used by Check for Update and the boot prompt.',
+                rows: [
+                  ['Main', 'Latest published release'],
+                  ['Beta', 'Latest commit on beta'],
+                ],
+              })}</h3>
+            </div>
+            <div class="source-choice" role="radiogroup" aria-label="Update source">
+              <label>Main
+                <input type="radio" name="update_source" value="main" checked />
+              </label>
+              <label>Beta
+                <input type="radio" name="update_source" value="beta" />
+              </label>
+            </div>
+          </div>
         </section>
       </div>
-      <fieldset>
-        <legend>Panel</legend>
-        <p class="help">Encoder, start and stop buttons, and the LED relays. Defaults are encoder BCM 27 and 22, buttons BCM 5 and 6, and LED relays BCM 23 and 24.</p>
+      <section class="dashboard-card settings-card">
+        <h2 class="card-title">Devices</h2>
+        <div class="device-columns">
+          <section class="device-column">
+            <h3 class="column-title">Heaters${tip({
+              lead: 'Each element has its own pin. One stays enabled.',
+              rows: [
+                ['Defaults', 'BCM 12 and 16'],
+                ['Hours', 'Time powered, including calibration'],
+              ],
+            })}</h3>
+            ${deviceSection('heater', 'Heater')}
+            <p class="form-error device-guard" id="heater-guard" data-message="One heater must stay enabled."></p>
+          </section>
+          <section class="device-column">
+            <h3 class="column-title">Temperature probes${tip({
+              lead: 'The first enabled probe controls the heaters. One stays enabled.',
+              rows: [
+                ['Name', '1–11 characters'],
+                ['RTD', 'PT100 or PT1000'],
+                ['Wires', '2, 3, or 4'],
+                ['Reference', '430 Ω or 4300 Ω'],
+                ['Probe 2', 'Starts disabled'],
+                ['Chip select', 'BCM 17 and 8'],
+              ],
+            })}</h3>
+            ${deviceSection('sensor', 'Probe')}
+            <p class="form-error device-guard" id="sensor-guard" data-message="One temperature probe must stay enabled."></p>
+          </section>
+        </div>
+      </section>
+      <section class="dashboard-card settings-card">
+        <h2 class="card-title with-tip">Wiring${tip({
+          lead: 'Copied onto each run when it starts.',
+          rows: [
+            ['Copied', 'Names, pins, RTD, wires, reference'],
+            ['Pi', 'The controller drives these pins'],
+            ['Dev', 'The dummy source ignores them'],
+            ['Heaters', 'BCM 12 and 16'],
+            ['Probes', '2-wire PT100, 430 Ω'],
+          ],
+        })}</h2>
+        <h3 class="column-title">Panel${tip({
+          lead: 'Encoder, buttons, and LED relays.',
+          rows: [
+            ['Encoder', 'BCM 27 and 22'],
+            ['Buttons', 'BCM 5 and 6'],
+            ['Start LED', 'BCM 24'],
+            ['Stop LED', 'BCM 23'],
+          ],
+        })}</h3>
         ${panelFields()}
-      </fieldset>
-      <fieldset>
-        <legend>SPI and I2C</legend>
-        <p class="help">Both probes share SPI. Defaults are CLK 11, SDO 9, and SDI 10. The HTS221 and the LCD share I2C. Defaults are SDA 2 and SCL 3. Every pin on this page has to be unique.</p>
+        <h3 class="column-title wiring-subtitle">SPI and I2C${tip({
+          lead: 'Shared buses. Every pin on this page is unique.',
+          rows: [
+            ['SPI', 'CLK 11, SDO 9, SDI 10'],
+            ['I2C', 'SDA 2, SCL 3'],
+            ['HTS221 off', 'Cabinet interlock is off'],
+            ['LCD off', 'Display stays closed'],
+          ],
+        })}</h3>
         ${busFields()}
-      </fieldset>
-      <p class="help">Names, pins, and which devices are enabled are copied onto each run when it starts, along with each probe's RTD, wire count, and reference resistor. The installed controller drives these pins. brewski dev on a Mac uses the dummy source and ignores them. Heater defaults are BCM 12 and 16. Each probe starts as a 2-wire PT100 with a 430 Ω reference.</p>
-      <p class="form-error" id="settings-error" hidden></p>
-      <p class="saved" id="settings-saved" hidden>Saved</p>
-      <div class="status-actions">
-        <button class="action-btn start-btn" type="submit">Save settings</button>
+      </section>
+      <div class="dashboard-card settings-save">
+        <p class="form-error" id="settings-error" hidden></p>
+        <p class="saved" id="settings-saved" hidden>Saved</p>
+        <div class="status-actions">
+          <button class="action-btn start-btn" type="submit">Save settings</button>
+        </div>
       </div>
-      <section class="reset-panel">
-        <h3 class="column-title">Data</h3>
-        <p class="help">Erase every run, sample, and cooldown, and restore the default target, heaters, probes, and GPIO pins. Element hours are kept. Heaters turn off. On the dummy source, the pot returns to room temperature. This cannot be undone.</p>
+      <section class="dashboard-card reset-panel">
+        <h2 class="card-title with-tip">Data${tip({
+          lead: 'Erases history and restores defaults. This cannot be undone.',
+          rows: [
+            ['Kept', 'Element hours'],
+            ['Restored', 'Target, devices, pins, source'],
+            ['Heaters', 'Turn off'],
+            ['Dev', 'Pot returns to room temperature'],
+          ],
+        })}</h2>
         <button class="action-btn stop-btn" type="button" id="reset-data">Reset all data</button>
       </section>
     </form>
@@ -113,17 +219,59 @@ export function mountSettings(root) {
       button.disabled = isLocked
     }
     for (const input of form.querySelectorAll(
-      'input:not([name="target_temp_f"]):not([name="cabinet_limit_f"]):not([name="heater_min_on_seconds"]):not([name="heater_min_off_seconds"]):not([name="early_cutoff_f"]), select',
+      'input:not([name="target_temp_f"]):not([name="cabinet_limit_f"]):not([name="heater_min_on_seconds"]):not([name="heater_min_off_seconds"]):not([name="early_cutoff_f"]):not([name="update_source"]), select',
     )) {
       input.disabled = isLocked
     }
   }
 
+  function closeTips() {
+    for (const button of form.querySelectorAll('.tip.is-open')) {
+      button.classList.remove('is-open')
+      button.setAttribute('aria-expanded', 'false')
+    }
+  }
+
+  function placeTip(button) {
+    const bubble = button.querySelector('.tip-bubble')
+    if (!bubble) return
+    const margin = 12
+    const width = Math.min(228, window.innerWidth - margin * 2)
+    bubble.style.width = `${width}px`
+    bubble.style.left = '0px'
+    bubble.style.right = 'auto'
+    const rect = button.getBoundingClientRect()
+    const overflow = rect.left + width - (window.innerWidth - margin)
+    const shift = Math.max(0, Math.min(overflow, width - 24))
+    if (shift) bubble.style.left = `${-shift}px`
+    bubble.style.setProperty('--tip-caret', `${7 + shift}px`)
+  }
+
+  function onDocumentClick(event) {
+    if (!event.target.closest('.tip')) closeTips()
+  }
+
+  function onDocumentKey(event) {
+    if (event.key === 'Escape') closeTips()
+  }
+
+  document.addEventListener('click', onDocumentClick)
+  document.addEventListener('keydown', onDocumentKey)
+  form.addEventListener('mouseover', (event) => {
+    const button = event.target.closest('.tip')
+    if (button) placeTip(button)
+  })
+  form.addEventListener('focusin', (event) => {
+    const button = event.target.closest('.tip')
+    if (button) placeTip(button)
+  })
+
   form.addEventListener('change', (event) => {
-    const rtd = (event.target.name || '').match(/^sensor_rtd_(\d+)$/)
+    const name = event.target.name || ''
+    const rtd = name.match(/^sensor_rtd_(\d+)$/)
     if (rtd) applyStockReference(form, Number(rtd[1]))
-    if ((event.target.name || '').startsWith('i2c_') && event.target.type === 'checkbox') syncI2cLabels(form)
-    const kind = (event.target.name || '').match(/^(heater|sensor)_enabled_/)?.[1]
+    if (name.startsWith('i2c_') && event.target.type === 'checkbox') syncI2cLabels(form)
+    const kind = name.match(/^(heater|sensor)_enabled_/)?.[1]
     if (!kind) return
     const guard = document.getElementById(`${kind}-guard`)
     if (!event.target.checked && enabledCount(kind) === 0) {
@@ -137,6 +285,16 @@ export function mountSettings(root) {
   })
 
   form.addEventListener('click', async (event) => {
+    const tipButton = event.target.closest('.tip')
+    if (tipButton) {
+      event.preventDefault()
+      placeTip(tipButton)
+      const willOpen = !tipButton.classList.contains('is-open')
+      closeTips()
+      tipButton.classList.toggle('is-open', willOpen)
+      tipButton.setAttribute('aria-expanded', willOpen ? 'true' : 'false')
+      return
+    }
     const button = event.target.closest('[data-replace-heater]')
     if (!button || button.disabled) return
     const index = Number(button.dataset.replaceHeater)
@@ -182,6 +340,7 @@ export function mountSettings(root) {
       early_cutoff_f: Number(form.elements.early_cutoff_f.value),
       heater_min_on_seconds: Number(form.elements.heater_min_on_seconds.value),
       heater_min_off_seconds: Number(form.elements.heater_min_off_seconds.value),
+      update_source: form.elements.update_source.value === 'beta' ? 'beta' : 'main',
       heaters: readDevices('heater'),
       sensors: readDevices('sensor'),
       gpio: readGpio(form),
@@ -245,6 +404,9 @@ export function mountSettings(root) {
     if (document.activeElement !== minOff) {
       minOff.value = String(settings.heater_min_off_seconds)
     }
+    if (document.activeElement?.name !== 'update_source') {
+      form.elements.update_source.value = settings.update_source === 'beta' ? 'beta' : 'main'
+    }
     writeGpio(form, settings.gpio)
     syncTargetWarning()
     applyDeviceState()
@@ -296,8 +458,30 @@ export function mountSettings(root) {
   return () => {
     stopped = true
     clearInterval(timer)
+    document.removeEventListener('click', onDocumentClick)
+    document.removeEventListener('keydown', onDocumentKey)
   }
 }
+
+function settingRow(title, help, control) {
+  return `
+    <div class="setting-row">
+      <div class="setting-copy">
+        <h3>${title}${tip(help)}</h3>
+      </div>
+      <div class="setting-control">${control}</div>
+    </div>`
+}
+
+function tip({ lead, rows }, id) {
+  const bubbleId = id || `tip-${tipCounter += 1}`
+  const items = (rows || []).map(([label, value]) =>
+    `<span class="tip-row"><span class="tip-k">${label}</span><span class="tip-v">${value}</span></span>`,
+  ).join('')
+  return `<button type="button" class="tip" aria-label="Details" aria-describedby="${bubbleId}" aria-expanded="false"><span aria-hidden="true">i</span><span class="tip-bubble" id="${bubbleId}" role="tooltip"><span class="tip-lead">${lead}</span><span class="tip-rows">${items}</span></span></button>`
+}
+
+let tipCounter = 0
 
 function applyStockReference(form, index) {
   const ref = form.elements[`sensor_ref_${index}`]

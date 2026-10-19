@@ -2,7 +2,16 @@ import sqlite3
 
 import pytest
 
-from brewski.store import Channel, SettingsError, Store, default_gpio, heater_on_seconds, merge_settings, utc_now
+from brewski.store import (
+    Channel,
+    SettingsError,
+    Store,
+    default_gpio,
+    heater_on_seconds,
+    merge_settings,
+    shape_changed,
+    utc_now,
+)
 
 
 def test_default_settings_are_two_heaters_and_two_sensors(store):
@@ -24,6 +33,7 @@ def test_default_settings_are_two_heaters_and_two_sensors(store):
     assert settings.heater_min_on_seconds == 1.0
     assert settings.heater_min_off_seconds == 1.0
     assert settings.early_cutoff_f == 3.0
+    assert settings.update_source == "main"
     assert settings.learned_coast_f is None
     assert settings.learned_cooldown_f_per_min is None
     assert settings.charge_gallons is None
@@ -60,6 +70,21 @@ def test_settings_round_trip(store):
     assert saved.sensors[1].wires == 4
     assert saved.sensors[1].rtd == "pt1000"
     assert saved.sensors[1].ref_ohms == 4300.0
+
+
+def test_update_source_round_trips_and_is_not_wiring(store):
+    current = store.get_settings()
+    updated = merge_settings(current, {"update_source": "beta"})
+    assert updated.update_source == "beta"
+    assert shape_changed(current, updated) is False
+    store.save_settings(updated)
+    assert store.get_settings().update_source == "beta"
+    assert store.get_settings().to_dict()["update_source"] == "beta"
+    with pytest.raises(SettingsError, match="Update source must be main or beta"):
+        merge_settings(current, {"update_source": "nightly"})
+    restored = merge_settings(updated, {"update_source": "main"})
+    store.save_settings(restored)
+    assert store.get_settings().update_source == "main"
 
 
 def test_settings_validation_rejects_bad_values(store):
@@ -242,6 +267,7 @@ def test_older_databases_keep_counts_and_gain_default_pins(tmp_path):
     assert settings.heater_min_on_seconds == 1.0
     assert settings.heater_min_off_seconds == 1.0
     assert settings.early_cutoff_f == 3.0
+    assert settings.update_source == "main"
     assert settings.learned_coast_f is None
     assert settings.learned_cooldown_f_per_min is None
     assert settings.setup_complete is True
@@ -339,6 +365,35 @@ def test_old_target_limit_and_probe_name_are_brought_into_range(store):
     assert loaded.cabinet_limit_f == 200
     assert loaded.sensors[0].name == "Very long p"
     assert len(loaded.sensors[0].name) == 11
+
+
+def test_saved_lamp_pins_that_were_documented_backwards_are_swapped(store):
+    import json
+
+    gpio = default_gpio().to_dict()
+    gpio["leds"] = {"start": 23, "stop": 24}
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("UPDATE settings SET gpio = ? WHERE id = 1", (json.dumps(gpio),))
+
+    loaded = Store(store.path).get_settings()
+    assert loaded.gpio.led_start == 24
+    assert loaded.gpio.led_stop == 23
+    again = Store(store.path).get_settings()
+    assert again.gpio.led_start == 24
+    assert again.gpio.led_stop == 23
+
+
+def test_a_custom_lamp_pair_is_left_alone(store):
+    import json
+
+    gpio = default_gpio().to_dict()
+    gpio["leds"] = {"start": 25, "stop": 26}
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("UPDATE settings SET gpio = ? WHERE id = 1", (json.dumps(gpio),))
+
+    loaded = Store(store.path).get_settings()
+    assert loaded.gpio.led_start == 25
+    assert loaded.gpio.led_stop == 26
 
 
 def test_heater_math_adds_the_tail_after_the_last_sample():

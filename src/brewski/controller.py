@@ -484,6 +484,7 @@ class Controller:
             current=current["current"],
             latest=current["latest"] or "",
             error=None,
+            ref=current.get("ref"),
             directory=directory,
         )
         self._hold_display = True

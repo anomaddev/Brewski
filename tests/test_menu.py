@@ -1,7 +1,7 @@
 """Software menu screens, and a Stop hold versus a short press."""
 
 from brewski.menu import SoftwareMenu
-from brewski.panel import STOP_HOLD_SECONDS, Panel
+from brewski.panel import HOLD_RELEASE_OFF_SECONDS, STOP_HOLD_SECONDS, Panel
 from brewski.updates import ReleaseInfo
 
 
@@ -23,33 +23,68 @@ class _Leds:
 
 def _panel():
     stop = _Button()
-    panel = Panel(_Button(), stop, _Leds(), None)
-    return panel, stop
+    leds = _Leds()
+    panel = Panel(_Button(), stop, leds, None)
+    return panel, stop, leds
 
 
 def test_a_stop_release_is_a_short_press():
-    panel, stop = _panel()
-    assert stop.hold_time == STOP_HOLD_SECONDS
+    panel, stop, _leds = _panel()
     stop.when_pressed()
     stop.when_released()
     assert panel.take() == (0, 1, 0, 0)
 
 
-def test_a_stop_hold_is_not_a_short_press(monkeypatch):
-    panel, stop = _panel()
+def test_a_quick_stop_counts_when_the_release_callback_is_missed(monkeypatch):
+    panel, stop, _leds = _panel()
     now = {"t": 1_000.0}
     monkeypatch.setattr("brewski.panel.time.monotonic", lambda: now["t"])
     stop.is_pressed = True
     stop.when_pressed()
+    stop.is_pressed = False
+    now["t"] += 0.05
+    assert panel.take() == (0, 1, 0, 0)
+
+
+def test_a_quick_start_counts_once_on_the_way_down(monkeypatch):
+    now = {"t": 1_000.0}
+    monkeypatch.setattr("brewski.panel.time.monotonic", lambda: now["t"])
+    start = _Button()
+    panel = Panel(start, _Button(), _Leds(), None)
+    start.is_pressed = True
+    start.when_pressed()
+    start.when_pressed()
+    assert panel.take() == (1, 0, 0, 0)
+    start.is_pressed = False
+    start.when_released()
+    now["t"] += 0.05
+    start.is_pressed = True
+    start.when_pressed()
+    assert panel.take() == (1, 0, 0, 0)
+
+
+def test_the_hold_lamp_comes_on_and_goes_out_with_the_button(monkeypatch):
+    panel, stop, leds = _panel()
+    now = {"t": 1_000.0}
+    monkeypatch.setattr("brewski.panel.time.monotonic", lambda: now["t"])
+    panel.set_leds(True, True)
+    stop.is_pressed = True
+    stop.when_pressed()
+    assert leds.state == (True, False)
     now["t"] += STOP_HOLD_SECONDS
     assert panel.take() == (0, 0, 1, 0)
+    assert leds.state == (True, True)
     stop.is_pressed = False
     stop.when_released()
+    assert leds.state == (True, False)
     assert panel.take() == (0, 0, 0, 0)
+    now["t"] += HOLD_RELEASE_OFF_SECONDS
+    panel.take()
+    assert leds.state == (True, True)
 
 
 def test_a_short_release_does_not_leave_a_hold_behind(monkeypatch):
-    panel, stop = _panel()
+    panel, stop, _leds = _panel()
     now = {"t": 1_000.0}
     monkeypatch.setattr("brewski.panel.time.monotonic", lambda: now["t"])
     stop.is_pressed = True

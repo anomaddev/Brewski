@@ -1523,6 +1523,15 @@ class Controller:
         if panel is None:
             return dismissed or painted
         starts, stops, holds, steps = panel.take()  # type: ignore[attr-defined]
+        if starts and stops:
+            # Both pins moved. In a run, Stop is the one that matters.
+            # Otherwise it was Start, and the other pin followed the ground.
+            with self._lock:
+                running = self._mode in ("running", "paused")
+            if running:
+                starts = 0
+            else:
+                stops = 0
         if self._menu is not None:
             return self._apply_menu(starts, stops, steps) or dismissed or painted
         if holds and self._open_menu():

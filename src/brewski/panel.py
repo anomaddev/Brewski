@@ -14,7 +14,7 @@ import threading
 import time
 from typing import NamedTuple
 
-from brewski.lcd import LED_ACTIVE_HIGH, PromptLeds, panel_pin_factory
+from brewski.lcd import LED_ACTIVE_HIGH, STOP_ACTIVE_STATE, PromptLeds, panel_pin_factory
 from brewski.press import STOP_HOLD_SECONDS, PressPair
 from brewski.store import Settings, default_gpio
 
@@ -248,6 +248,7 @@ def open_panel(settings: Settings) -> Panel | None:
         stop = Button(
             gpio.button_stop,
             pull_up=True,
+            active_state=STOP_ACTIVE_STATE,
             bounce_time=None,
             pin_factory=factory,
         )

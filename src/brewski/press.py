@@ -41,10 +41,13 @@ class Press:
         self._timer: threading.Timer | None = None
 
     def blocks_other(self, now: float) -> bool:
-        """True when a new edge on the other button is this press, not a new one."""
+        """True only in the brief window after this finger lifts.
 
-        if self.down_at is not None and now - self.down_at >= CROSSTALK_SECONDS:
-            return True
+        A pin that stays down must not block the other button. Stop's pin
+        follows Start through the shared ground, and that was keeping Start
+        from ever arming.
+        """
+
         return self.down_at is None and now - self.ended_at < CROSSTALK_SECONDS
 
     def arm(self, now: float, schedule) -> None:
@@ -184,7 +187,9 @@ class PressPair:
         duration = now - press.down_at
         was_held = press.held
         overlapped = press.overlapped
-        other_down = other.down_at is not None or _is_pressed(other.button) is True
+        this_started = press.down_at
+        other_started = other.down_at
+        other_down = other_started is not None or _is_pressed(other.button) is True
         other_counted = other.counted
         press.disarm(now)
         if was_held or (press.hold_seconds is not None and duration >= press.hold_seconds):
@@ -198,20 +203,38 @@ class PressPair:
         if duration < PRESS_BOUNCE_SECONDS:
             press.ended_at = 0.0
             return "bounce" if name == "stop" else None
-        # The pin that lets go while the other is still down is the blip.
-        # A short tap still counts when it outlasts that blip.
-        suppress = other_down or (overlapped and other_counted)
+        # The button that went down second, and let go quickly, is the shared
+        # ground. A press that went down first still counts if the other pin
+        # is low, because that pin follows this finger.
+        follower = (
+            other_started is not None
+            and this_started is not None
+            and this_started > other_started
+            and duration < CROSSTALK_SECONDS
+        )
+        suppress = follower or (overlapped and other_counted and duration < CROSSTALK_SECONDS)
         handed = None
-        if suppress and other_down and duration < CROSSTALK_SECONDS and other.down_at is None:
+        if suppress and other_down and other.down_at is None:
             handed = self._down(self._other_name(name), now, force=True)
         if not suppress:
             press.taps += 1
             press.counted = True
+            self._drop_follower(other, this_started)
         if handed == "down":
             return "down"
         if name == "stop":
             return "tap"
         return None
+
+    def _drop_follower(self, other: Press, this_started: float | None) -> None:
+        """Cancel a pin that fell because this finger did."""
+
+        if this_started is None or other.down_at is None:
+            return
+        if this_started < other.down_at <= this_started + CROSSTALK_SECONDS:
+            other.disarm(other.down_at)
+            other.ended_at = 0.0
+            other.overlapped = False
 
     def _reconcile(self, name: str, now: float) -> str | None:
         press = self._press(name)

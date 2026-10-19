@@ -4,10 +4,10 @@ The display stays closed until setup has saved the pins. The Pi's hardware
 I2C controller is ``/dev/i2c-1`` on BCM 2 (SDA) and BCM 3 (SCL). Any other
 saved pair is left unused. The backpack address is probed, not stored.
 
-The button pins and the LED relay pins are different. Each button is wired
-from its GPIO to ground. A 10 kΩ resistor from 3.3 V holds the pin high, and
-the internal pull-up stays on, so a press is low. Each LED is switched by
-its own relay.
+The button pins and the LED relay pins are different. Start is a normally
+open contact to ground, so its pin sits high and a press is low. Stop is a
+normally closed contact to ground, so its pin sits low and a press lets the
+10 kΩ pull-up take it high. Each LED is switched by its own relay.
 """
 
 from __future__ import annotations
@@ -34,11 +34,13 @@ BACKPACK_ADDRESSES = (0x27, 0x3F)
 # LED relay modules, on the saved LED pins, not the button pins. Those
 # boards energize when the pin is low, so "on" has to drive the pin low.
 LED_ACTIVE_HIGH = False
-# Momentary buttons are wired from the GPIO pin to ground. A 10 kΩ from 3.3 V
-# to the pin holds it high, and the internal pull-up stays on, so a press is
-# low. There is no capacitor. gpiozero's bounce timer is left off; PressPair
-# ignores a spike shorter than PRESS_BOUNCE_SECONDS.
+# Both buttons have a 10 kΩ from 3.3 V to the GPIO, and the internal pull-up
+# stays on. Start's normally open contact shorts that pin to ground, so a
+# press is low. Stop's normally closed contact already shorts its pin, and a
+# press opens it, so a press is high. There is no capacitor. gpiozero's bounce
+# timer is left off; PressPair ignores a spike shorter than PRESS_BOUNCE_SECONDS.
 BUTTON_BOUNCE_SECONDS = PRESS_BOUNCE_SECONDS
+STOP_ACTIVE_STATE = True
 _SYSTEM_LGPIO = "/usr/lib/python3/dist-packages"
 
 _logged: set[str] = set()
@@ -298,6 +300,7 @@ def open_buttons(settings: Settings) -> ButtonReader | None:
         stop = Button(
             gpio.button_stop,
             pull_up=True,
+            active_state=STOP_ACTIVE_STATE,
             bounce_time=None,
             pin_factory=factory,
         )

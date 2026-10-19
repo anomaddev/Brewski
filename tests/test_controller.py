@@ -282,6 +282,57 @@ def test_a_cooling_rate_pulses_near_the_target_instead_of_the_deadband(store):
     assert source.heaters[:2] == [False, False]
 
 
+def test_the_climb_coasts_from_the_learned_cutoff_instead_of_pulsing(store):
+    # Coast of 15°F shuts the element off at 150°F on the way to 165°F.
+    # The sustain point is about 164°F. Heating through 151–163°F spends
+    # the whole coast on top of the target.
+    store.save_settings(
+        merge_settings(
+            store.get_settings(),
+            {
+                "learned_coast_f": 15,
+                "learned_coast_seconds": 90,
+                "learned_cooldown_f_per_min": 2,
+                "early_cutoff_f": 15,
+                "target_temp_f": 165,
+            },
+        )
+    )
+    source = StaticSource([100.0, 90.0])
+    controller = Controller(store, source)
+    controller.start()
+    controller.tick(2)
+
+    source.temps = [150.0, 90.0]
+    controller.tick(1)
+    assert source.heaters[:2] == [False, False]
+
+    source.temps = [158.0, 90.0]
+    controller.tick(5)
+    assert source.heaters[:2] == [False, False]
+
+    reheat = reheat_temperature(165, 2, sustain_pulse_seconds(15, 90))
+    source.temps = [reheat - 0.5, 90.0]
+    controller.tick(1)
+    assert source.heaters[:2] == [False, False]
+
+    # Arrival, then a sag, is what earns the short pulse.
+    source.temps = [164.5, 90.0]
+    controller.tick(1)
+    assert source.heaters[:2] == [False, False]
+    source.temps = [reheat, 90.0]
+    controller.tick(1)
+    assert source.heaters[:2] == [True, True]
+
+    # Falling through the cutoff starts a new climb, which coasts again.
+    source.temps = [140.0, 90.0]
+    controller.tick(2)
+    assert source.heaters[:2] == [True, True]
+    source.temps = [158.0, 90.0]
+    controller.tick(1)
+    assert source.heaters[:2] == [False, False]
+
+
 def test_calibration_keeps_running_while_the_average_is_still_changing(store):
     source = StaticSource([100.0, 90.0])
     controller = Controller(store, source)

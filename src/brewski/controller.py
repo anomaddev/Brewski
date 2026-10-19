@@ -312,6 +312,10 @@ class Controller:
         self._display_rate: float | None = None
         # Elapsed time when the current sustain pulse should end.
         self._pulse_until: float | None = None
+        # Set once this run has already climbed above the sustain point.
+        # The approach has to stay off after the coast cutoff; a pulse before
+        # that point heats the rest of the way and the stored heat overshoots.
+        self._hold_ready = False
         self._heaters = [False] * SLOT_COUNT
         self._heater_on_for = [0.0] * SLOT_COUNT
         # Powered time not yet written to the element-hour meters.
@@ -554,6 +558,7 @@ class Controller:
             self._display_coast = None
             self._display_rate = None
             self._pulse_until = None
+            self._hold_ready = False
             self._live_temps = self.source.read_temperatures(SLOT_COUNT)
             self._sample_climate()
             self._emergency = self._emergency_codes(settings)
@@ -783,6 +788,7 @@ class Controller:
             self._display_rate = watch.get("saved_rate")
         self._coast_watch = None
         self._pulse_until = None
+        self._hold_ready = False
         self._flush_heater_life()
         self._set_heaters([False] * SLOT_COUNT, release_off_dwell=True)
         self._live_temps = self.source.read_temperatures(SLOT_COUNT)
@@ -1212,6 +1218,7 @@ class Controller:
         self._coast_seconds = None
         self._calibration_settled = False
         self._pulse_until = None
+        self._hold_ready = False
 
     def _hold_pulse(self, settings: Settings) -> tuple[float, float] | None:
         """Pulse length and reheat temperature, when a cooling rate can hold the target."""
@@ -1231,13 +1238,23 @@ class Controller:
         return duration, reheat
 
     def _sustain_states(self, settings: Settings, primary: float, pulse: tuple[float, float]) -> list[bool]:
+        """Approach on the learned coast, then pulse only after the pot has arrived.
+
+        The climb turns the elements off at the early cutoff and leaves them
+        off while stored heat finishes the rise. A pulse starts only after
+        the probe has already been above the reheat point and then sagged
+        back to it. Pulsing as soon as the cutoff is crossed heats the rest
+        of the way to the target, and the learned coast then overshoots it.
+        """
+
         duration, reheat = pulse
         target = float(settings.target_temp_f)
         enabled = [settings.heaters[index].enabled for index in range(SLOT_COUNT)]
-        if primary >= target or primary <= target - settings.early_cutoff_f:
+        coast_line = target - settings.early_cutoff_f
+        if primary <= coast_line:
+            # Below the coast, including a deep sag, this is a fresh approach.
             self._pulse_until = None
-            if primary >= target:
-                return [False] * SLOT_COUNT
+            self._hold_ready = False
             return [
                 heater_should_be_on(
                     primary,
@@ -1248,27 +1265,36 @@ class Controller:
                 and enabled[index]
                 for index in range(SLOT_COUNT)
             ]
+        if primary >= target:
+            self._pulse_until = None
+            self._hold_ready = True
+            return [False] * SLOT_COUNT
         if self._pulse_until is not None and self._elapsed < self._pulse_until:
             return list(enabled)
         self._pulse_until = None
-        if primary <= reheat:
-            blocked = any(
-                enabled[index]
-                and not self._heaters[index]
-                and self._heater_off_for[index] < settings.heater_min_off_seconds
-                for index in range(SLOT_COUNT)
-            )
-            if not blocked:
-                self._pulse_until = self._elapsed + duration
-            return list(enabled)
-        return [False] * SLOT_COUNT
+        if primary > reheat:
+            self._hold_ready = True
+            return [False] * SLOT_COUNT
+        if not self._hold_ready:
+            return [False] * SLOT_COUNT
+        blocked = any(
+            enabled[index]
+            and not self._heaters[index]
+            and self._heater_off_for[index] < settings.heater_min_off_seconds
+            for index in range(SLOT_COUNT)
+        )
+        if not blocked:
+            self._pulse_until = self._elapsed + duration
+        return list(enabled)
 
     def _decide(self, settings: Settings, temps: list[float]) -> list[bool]:
         """Physical heater mask. Index 0 is heater 1. Disabled slots stay off.
 
         The on/off choice itself, including why power is removed before the
-        setpoint, lives in :func:`heater_should_be_on`. Near the target, a
-        learned cooling rate replaces that deadband with a short pulse.
+        setpoint, lives in :func:`heater_should_be_on`. Once a cooling rate
+        is known, the climb still shuts off at the learned coast. A short
+        pulse replaces the deadband only after that coast has already
+        carried the probe up to the target and it sags back.
         """
 
         off = [False] * SLOT_COUNT

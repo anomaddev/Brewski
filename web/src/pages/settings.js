@@ -1,4 +1,5 @@
 import { api } from '../api.js'
+import { numberStepper } from '../controls.js'
 import { aboveBoiling, formatHours } from '../format.js'
 import { busFields, markPinClashes, panelFields, pinSelect, readGpio, syncI2cLabels, validatePins, writeGpio } from '../gpio.js'
 import { setSourceBadge } from '../layout.js'
@@ -31,7 +32,7 @@ export function mountSettings(root) {
                 ],
               },
               `<label class="field target-field-setting">Temperature (°F)
-                <input name="target_temp_f" id="settings-target" type="number" min="90" max="240" step="1" inputmode="numeric" required />
+                ${numberStepper('<input name="target_temp_f" id="settings-target" type="number" min="90" max="240" step="1" inputmode="numeric" required />')}
                 <p class="boil-warning" id="target-warning" hidden>Above water's boiling point (212°F).</p>
               </label>`,
             )}
@@ -47,7 +48,7 @@ export function mountSettings(root) {
                 ],
               },
               `<label class="field target-field-setting">Maximum (°F)
-                <input name="cabinet_limit_f" id="cabinet-limit" type="number" min="100" max="200" step="1" inputmode="numeric" required />
+                ${numberStepper('<input name="cabinet_limit_f" id="cabinet-limit" type="number" min="100" max="200" step="1" inputmode="numeric" required />')}
               </label>`,
             )}
             ${settingRow(
@@ -60,7 +61,7 @@ export function mountSettings(root) {
                 ],
               },
               `<label class="field target-field-setting">Seconds
-                <input name="heater_min_on_seconds" id="heater-min-on" type="number" min="0.5" max="60" step="0.1" inputmode="decimal" required />
+                ${numberStepper('<input name="heater_min_on_seconds" id="heater-min-on" type="number" min="0.5" max="60" step="0.1" inputmode="decimal" required />')}
               </label>`,
             )}
             ${settingRow(
@@ -73,7 +74,7 @@ export function mountSettings(root) {
                 ],
               },
               `<label class="field target-field-setting">Seconds
-                <input name="heater_min_off_seconds" id="heater-min-off" type="number" min="0.5" max="60" step="0.1" inputmode="decimal" required />
+                ${numberStepper('<input name="heater_min_off_seconds" id="heater-min-off" type="number" min="0.5" max="60" step="0.1" inputmode="decimal" required />')}
               </label>`,
             )}
           </div>
@@ -604,7 +605,7 @@ function deviceSection(kind, label) {
             </select>
           </label>
           <label class="field ref-field">Reference (Ω)
-            <input name="sensor_ref_${index}" type="number" min="100" max="10000" step="0.01" inputmode="decimal" required />
+            ${numberStepper(`<input name="sensor_ref_${index}" type="number" min="100" max="10000" step="0.01" inputmode="decimal" required />`)}
           </label>
         </div>` : ''}
         ${kind === 'heater' ? `

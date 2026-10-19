@@ -71,8 +71,10 @@ export function setSourceBadge(source) {
   })
 }
 
-export function setAppVersion(version) {
-  const label = version ? `v${version}` : ''
+export function setAppVersion(status) {
+  const commit = status?.about_label === 'Commit'
+  const raw = status?.about_value || status?.version || ''
+  const label = !raw ? '' : commit ? String(raw) : `v${String(raw).replace(/^v/i, '')}`
   document.querySelectorAll('[data-app-version]').forEach((node) => {
     node.textContent = label
   })

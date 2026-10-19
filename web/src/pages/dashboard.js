@@ -488,7 +488,7 @@ export function mountDashboard(root) {
     if (stopped) return
     const status = await api.status()
     setSourceBadge(status.source)
-    setAppVersion(status.version)
+    setAppVersion(status)
     document.getElementById('elapsed').textContent = formatDuration(status.elapsed_seconds)
     const mode = document.getElementById('system-mode')
     mode.textContent = statusLabel(status.mode)

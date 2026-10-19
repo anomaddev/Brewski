@@ -96,7 +96,7 @@ export function mountStatusStrip(host) {
 
   function render(status) {
     setSourceBadge(status.source)
-    setAppVersion(status.version)
+    setAppVersion(status)
     strip.dataset.mode = status.mode || 'idle'
     const mode = host.querySelector('[data-strip="mode"]')
     mode.textContent = statusLabel(status.mode)

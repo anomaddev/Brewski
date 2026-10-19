@@ -1,4 +1,5 @@
 import { api } from './api.js'
+import { numberStepper } from './controls.js'
 import { aboveBoiling, escapeHtml } from './format.js'
 import { busFields, markPinClashes, panelFields, pinSelect, readGpio, syncI2cLabels, validatePins } from './gpio.js'
 import { openPath } from './router.js'
@@ -57,11 +58,11 @@ function openSetup(host, settings) {
           <section class="setup-panel" data-step="target">
             <p class="setup-lead">Calibration heats water to this temperature and measures how far it keeps climbing after the element turns off. That climb is the coast a later run shuts off early for.</p>
             <label class="field">Temperature (°F)
-              <input name="target_temp_f" id="setup-target" type="number" min="90" max="240" step="1" inputmode="numeric" required value="${Math.round(Number(settings.target_temp_f))}" />
+              ${numberStepper(`<input name="target_temp_f" id="setup-target" type="number" min="90" max="240" step="1" inputmode="numeric" required value="${Math.round(Number(settings.target_temp_f))}" />`)}
             </label>
             <p class="boil-warning" id="setup-boil" hidden>Above water's boiling point (212°F).</p>
             <label class="field">Still size (gal)
-              <input name="charge_gallons" id="setup-charge" type="number" min="0.25" max="100" step="0.25" inputmode="decimal" required value="${settings.charge_gallons == null ? '' : settings.charge_gallons}" />
+              ${numberStepper(`<input name="charge_gallons" id="setup-charge" type="number" min="0.25" max="100" step="0.25" inputmode="decimal" required value="${settings.charge_gallons == null ? '' : settings.charge_gallons}" />`)}
             </label>
             <p class="help">Gallons the pot holds. Calibration uses this size. A later calibration scales the learned coast when the size changes. Start stays off until the calibration is saved.</p>
           </section>
@@ -354,7 +355,7 @@ function probeConfig(index, channel) {
         <select name="sensor_wires_${index}">${wireOptions}</select>
       </label>
       <label class="field ref-field">Reference (Ω)
-        <input name="sensor_ref_${index}" type="number" min="100" max="10000" step="0.01" inputmode="decimal" required value="${ref}" />
+        ${numberStepper(`<input name="sensor_ref_${index}" type="number" min="100" max="10000" step="0.01" inputmode="decimal" required value="${ref}" />`)}
       </label>
     </div>`
 }

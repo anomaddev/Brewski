@@ -28,9 +28,9 @@ HARDWARE_SDA = 2
 HARDWARE_SCL = 3
 I2C_BUS = 1
 BACKPACK_ADDRESSES = (0x27, 0x3F)
-# LED relay modules, on the saved LED pins, not the button pins. On this
-# board the lamp lights when the pin is high.
-LED_ACTIVE_HIGH = True
+# LED relay modules, on the saved LED pins, not the button pins. Those
+# boards energize when the pin is low, so "on" has to drive the pin low.
+LED_ACTIVE_HIGH = False
 _SYSTEM_LGPIO = "/usr/lib/python3/dist-packages"
 
 _logged: set[str] = set()
@@ -295,8 +295,18 @@ def open_prompt_leds(settings: Settings) -> PromptLeds | None:
         return None
     start = stop = None
     try:
-        start = LED(gpio.led_start, active_high=LED_ACTIVE_HIGH, pin_factory=factory)
-        stop = LED(gpio.led_stop, active_high=LED_ACTIVE_HIGH, pin_factory=factory)
+        start = LED(
+            gpio.led_start,
+            active_high=LED_ACTIVE_HIGH,
+            initial_value=True,
+            pin_factory=factory,
+        )
+        stop = LED(
+            gpio.led_stop,
+            active_high=LED_ACTIVE_HIGH,
+            initial_value=True,
+            pin_factory=factory,
+        )
         return PromptLeds(start, stop)
     except Exception as exc:
         _log_once("leds", "Start and stop LEDs could not be opened: %s", exc)

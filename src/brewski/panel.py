@@ -247,7 +247,7 @@ def open_panel(settings: Settings) -> Panel | None:
         )
         stop = Button(
             gpio.button_stop,
-            pull_up=True,
+            pull_up=None,
             active_state=STOP_ACTIVE_STATE,
             bounce_time=None,
             pin_factory=factory,
@@ -261,9 +261,29 @@ def open_panel(settings: Settings) -> Panel | None:
             wrap=True,
             pin_factory=factory,
         )
-        return Panel(start, stop, PromptLeds(led_start, led_stop), encoder)
-    except Exception:
+        panel = Panel(start, stop, PromptLeds(led_start, led_stop), encoder)
+        # #region agent log
+        try:
+            import json
+            payload = {"sessionId": "4a65cb", "timestamp": int(time.time() * 1000), "location": "panel.py:open_panel", "message": "panel opened", "data": {"stopPressed": bool(getattr(stop, "is_pressed", None)), "stopPull": getattr(stop, "pull_up", None)}, "hypothesisId": "A", "runId": "post-fix"}
+            with open("/Volumes/VAB/Github/Brewski/.cursor/debug-4a65cb.log", "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(payload) + "\n")
+        except Exception:
+            pass
+        # #endregion
+        logger.info("Panel opened. Stop is_pressed=%s", getattr(stop, "is_pressed", None))
+        return panel
+    except Exception as exc:
         logger.exception("Panel controls could not be opened")
+        # #region agent log
+        try:
+            import json
+            payload = {"sessionId": "4a65cb", "timestamp": int(time.time() * 1000), "location": "panel.py:open_panel", "message": "panel failed", "data": {"error": str(exc)}, "hypothesisId": "A", "runId": "post-fix"}
+            with open("/Volumes/VAB/Github/Brewski/.cursor/debug-4a65cb.log", "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(payload) + "\n")
+        except Exception:
+            pass
+        # #endregion
         for device in (start, stop, led_start, led_stop, encoder):
             if device is None:
                 continue

@@ -315,6 +315,72 @@ build_dashboard() {
   [[ -f "$root/web/dist/index.html" ]] || die "the dashboard build did not produce web/dist/index.html."
 }
 
+# Drop packages the venv picked up outside this install. pip reports them as
+# conflicts on every later install, including leftovers such as
+# types-flask-migrate that Brewski does not use.
+prune_foreign_packages() {
+  [[ -x "$VENV/bin/python" ]] || return 0
+  "$VENV/bin/python" - <<'PY'
+import subprocess
+import sys
+from importlib.metadata import PackageNotFoundError, distribution, distributions
+
+KEEP = {"pip", "setuptools", "wheel"}
+
+
+def canonical(name):
+    return name.lower().replace("_", "-")
+
+
+def requirement_name(raw):
+    body = raw.split(";", 1)[0].strip()
+    name = []
+    for char in body:
+        if char in " <>=!~[":
+            break
+        name.append(char)
+    return "".join(name)
+
+
+def selected(raw):
+    if ";" not in raw:
+        return True
+    marker = raw.split(";", 1)[1]
+    if "extra" not in marker:
+        return True
+    return 'extra == "pi"' in marker or "extra == 'pi'" in marker
+
+
+keep = set(KEEP)
+queue = ["brewski"]
+seen = set()
+while queue:
+    name = queue.pop()
+    key = canonical(name)
+    if not key or key in seen:
+        continue
+    seen.add(key)
+    keep.add(key)
+    try:
+        required = distribution(name).requires
+    except PackageNotFoundError:
+        continue
+    for raw in required or []:
+        if selected(raw):
+            queue.append(requirement_name(raw))
+
+remove = []
+for dist in distributions():
+    name = dist.metadata["Name"]
+    if name and canonical(name) not in keep:
+        remove.append(name)
+if not remove:
+    raise SystemExit(0)
+print("Removing packages that are not part of Brewski: " + ", ".join(sorted(remove)))
+subprocess.check_call([sys.executable, "-m", "pip", "uninstall", "-y", *remove])
+PY
+}
+
 install_python() {
   local root=$1
   local user=$2
@@ -330,10 +396,14 @@ install_python() {
   if [[ ! -x "$VENV/bin/python" ]]; then
     python3 -m venv "$VENV"
   fi
+  # Before pip runs, so its conflict check never sees a leftover.
+  prune_foreign_packages
   "$VENV/bin/python" -m pip install --upgrade pip
-  # Force a reinstall so a repeat run picks up code even when the version
-  # number in pyproject.toml has not changed.
-  "$VENV/bin/python" -m pip install --upgrade --force-reinstall "${root}[pi]"
+  # Reinstall Brewski itself so a repeat run picks up code even when the
+  # version number has not changed. Dependencies stay when they already match.
+  "$VENV/bin/python" -m pip install --upgrade --force-reinstall --no-deps "$root"
+  "$VENV/bin/python" -m pip install --upgrade "${root}[pi]"
+  prune_foreign_packages
   chown -R "${user}:${group}" "$VENV" "$DATA_DIR"
   [[ -x "$VENV/bin/brewski" ]] || die "pip install did not create ${VENV}/bin/brewski."
 }

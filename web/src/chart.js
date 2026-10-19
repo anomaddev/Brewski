@@ -11,6 +11,19 @@ Chart.defaults.font.family = "Inter, ui-sans-serif, system-ui, -apple-system, 'S
 const NARROW = '(max-width: 800px)'
 const START_LINE = '#34d399'
 const STOP_LINE = '#f87171'
+const OFF_GAP_MS = 30000
+const OFF_LABEL = '#93a0b5'
+
+function offSpans(points, gapMs) {
+  const spans = []
+  for (let index = 1; index < points.length; index += 1) {
+    const from = points[index - 1].at
+    const to = points[index].at
+    if (!Number.isFinite(from) || !Number.isFinite(to) || to - from <= gapMs) continue
+    spans.push({ from, to })
+  }
+  return spans
+}
 
 const runMarkersPlugin = {
   id: 'runMarkers',
@@ -58,7 +71,67 @@ const runMarkersPlugin = {
   },
 }
 
-Chart.register(runMarkersPlugin)
+function offLegendHidden(chart) {
+  const index = chart.data.datasets.findIndex((dataset) => dataset.label === 'Off')
+  if (index < 0) return false
+  return Boolean(chart.getDatasetMeta(index).hidden)
+}
+
+const offSpansPlugin = {
+  id: 'offSpans',
+  beforeDatasetsDraw(chart) {
+    const spans = chart.$offSpans
+    const area = chart.chartArea
+    if (!spans?.length || !area || offLegendHidden(chart)) return
+    const xScale = chart.scales.x
+    const ctx = chart.ctx
+    ctx.save()
+    ctx.beginPath()
+    ctx.rect(area.left, area.top, area.right - area.left, area.bottom - area.top)
+    ctx.clip()
+    for (const span of spans) {
+      const start = xScale.getPixelForValue(span.from)
+      const end = xScale.getPixelForValue(span.to)
+      if (!Number.isFinite(start) || !Number.isFinite(end)) continue
+      const left = Math.max(area.left, Math.min(start, end))
+      const right = Math.min(area.right, Math.max(start, end))
+      if (right - left < 1) continue
+      ctx.fillStyle = 'rgba(147, 160, 181, 0.14)'
+      ctx.fillRect(left, area.top, right - left, area.bottom - area.top)
+    }
+    ctx.restore()
+  },
+  afterDatasetsDraw(chart) {
+    const spans = chart.$offSpans
+    const area = chart.chartArea
+    if (!spans?.length || !area || offLegendHidden(chart)) return
+    const xScale = chart.scales.x
+    const ctx = chart.ctx
+    ctx.save()
+    ctx.beginPath()
+    ctx.rect(area.left, area.top, area.right - area.left, area.bottom - area.top)
+    ctx.clip()
+    ctx.fillStyle = OFF_LABEL
+    ctx.font = "12px Inter, ui-sans-serif, system-ui, sans-serif"
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    const label = 'Off'
+    const textWidth = ctx.measureText(label).width
+    const midY = (area.top + area.bottom) / 2
+    for (const span of spans) {
+      const start = xScale.getPixelForValue(span.from)
+      const end = xScale.getPixelForValue(span.to)
+      if (!Number.isFinite(start) || !Number.isFinite(end)) continue
+      const left = Math.max(area.left, Math.min(start, end))
+      const right = Math.min(area.right, Math.max(start, end))
+      if (right - left < textWidth + 12) continue
+      ctx.fillText(label, (left + right) / 2, midY)
+    }
+    ctx.restore()
+  },
+}
+
+Chart.register(offSpansPlugin, runMarkersPlugin)
 
 function clockLabel(at) {
   return new Date(at).toLocaleTimeString('en-US', {
@@ -112,6 +185,9 @@ export function createTempChart(canvas, { timed = false } = {}) {
           borderColor: 'rgba(255, 255, 255, 0.08)',
           borderWidth: 1,
           padding: 10,
+          filter(item) {
+            return item.dataset.label !== 'Off'
+          },
           callbacks: timed
             ? {
                 title(items) {
@@ -170,6 +246,7 @@ export function createTempChart(canvas, { timed = false } = {}) {
   }
   chart.$timed = timed
   chart.$markers = []
+  chart.$offSpans = []
   applyChartLayout(chart)
   return chart
 }
@@ -177,6 +254,8 @@ export function createTempChart(canvas, { timed = false } = {}) {
 export function setChartPoints(chart, points, sensorNames, markers = []) {
   chart.$markers = markers
   const timed = Boolean(chart.$timed)
+  const spans = timed ? offSpans(points, OFF_GAP_MS) : []
+  chart.$offSpans = spans
   const datasets = sensorNames.map((name, index) => ({
     label: `${name} (°F)`,
     data: points.map((point) =>
@@ -189,7 +268,7 @@ export function setChartPoints(chart, points, sensorNames, markers = []) {
     tension: 0.25,
     pointRadius: 0,
     pointHoverRadius: 4,
-    spanGaps: timed ? 30000 : true,
+    spanGaps: timed ? OFF_GAP_MS : true,
   }))
   if (points.length) {
     datasets.push({
@@ -201,7 +280,19 @@ export function setChartPoints(chart, points, sensorNames, markers = []) {
       pointRadius: 0,
       fill: false,
       tension: 0,
-      spanGaps: timed ? 30000 : true,
+      spanGaps: timed ? OFF_GAP_MS : true,
+    })
+  }
+  if (spans.length) {
+    datasets.push({
+      label: 'Off',
+      data: [],
+      borderColor: 'rgba(147, 160, 181, 0.45)',
+      backgroundColor: 'rgba(147, 160, 181, 0.16)',
+      pointStyle: 'rect',
+      pointRadius: 0,
+      pointHoverRadius: 0,
+      borderWidth: 0,
     })
   }
   chart.data.labels = timed ? [] : points.map((point) => point.label)

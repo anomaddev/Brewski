@@ -1,0 +1,12 @@
+(kicad_sch (version 20240702) (generator "protoflow_schematic_v2")
+  (uuid "cbffdfd2-37b1-423d-94ad-b5e380710668")
+  (paper "A4")
+  (title_block
+    (title "StillPi Prototype")
+    (rev "1.0")
+    (company "Protoflow")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)

@@ -1,0 +1,12 @@
+(kicad_sch (version 20240702) (generator "protoflow_schematic_v2")
+  (uuid "8adebf28-7633-4f16-bc77-afb568b72eac")
+  (paper "A4")
+  (title_block
+    (title "PiHat V2")
+    (rev "1.0")
+    (company "Protoflow")
+  )
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+)

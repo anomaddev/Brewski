@@ -1,0 +1,9 @@
+(fp_lib_table
+  (lib
+    (name "ProtoFlow.pretty")
+    (type "KiCad")
+    (uri "${KIPRJMOD}/ProtoFlow.pretty")
+    (options "")
+    (descr "ProtoFlow Project Footprints (Portable)")
+  )
+)

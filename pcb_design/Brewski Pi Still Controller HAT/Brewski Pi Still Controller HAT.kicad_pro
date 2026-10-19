@@ -1,0 +1,13 @@
+{
+  "meta": {
+    "version": 1,
+    "generator": "protoflow",
+    "name": "Brewski Pi Still Controller HAT"
+  },
+  "schematic": {},
+  "pcbnew": {},
+  "libraries": {
+    "symbols": [],
+    "footprints": []
+  }
+}

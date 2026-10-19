@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "revision": 1,
+  "updated_at": "2026-10-19T02:32:04.183094Z",
+  "title": "Brewski Pi HAT",
+  "summary": "Pi HAT: 5V in, SSR drivers, MOC3063 lamp drivers, STEMMA I2C hub, probe sockets, encoder/button terminals.",
+  "phase": "parts",
+  "blocks": [
+    {
+      "id": "power",
+      "name": "5V input & rails",
+      "kind": "power",
+      "status": "planned"
+    },
+    {
+      "id": "ssr",
+      "name": "SSR drivers",
+      "kind": "io",
+      "status": "planned"
+    },
+    {
+      "id": "lamp",
+      "name": "Lamp optocouplers (mains side)",
+      "kind": "protection",
+      "status": "planned"
+    },
+    {
+      "id": "buttons",
+      "name": "Buttons & dial",
+      "kind": "connector",
+      "status": "planned"
+    },
+    {
+      "id": "i2c",
+      "name": "STEMMA hub",
+      "kind": "interface",
+      "status": "planned"
+    },
+    {
+      "id": "probes",
+      "name": "MAX31865 sockets",
+      "kind": "sensor",
+      "status": "planned"
+    },
+    {
+      "id": "pi",
+      "name": "Pi header",
+      "kind": "mcu",
+      "status": "planned"
+    }
+  ],
+  "links": [],
+  "decisions": [],
+  "next_steps": [
+    "Select and import parts",
+    "Build schematic",
+    "ERC"
+  ],
+  "activity": [
+    {
+      "at": "2026-10-19T02:32:04.183094Z",
+      "text": "Phase: Choosing parts"
+    },
+    {
+      "at": "2026-10-19T02:32:04.183094Z",
+      "text": "Laid out 7 blocks: 5V input & rails, SSR drivers, Lamp optocouplers (mains side), Buttons & dial and 3 more"
+    }
+  ]
+}

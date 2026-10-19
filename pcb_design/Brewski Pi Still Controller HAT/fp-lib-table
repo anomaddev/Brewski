@@ -1,0 +1,10 @@
+(fp_lib_table
+  (lib
+    (name "ProtoFlow.pretty")
+    (type "KiCad")
+    (uri "${KIPRJMOD}/ProtoFlow.pretty")
+    (options "")
+    (descr "ProtoFlow Project Footprints (Portable)")
+  )
+  (lib (name "ProtoFlow_Parts")(type "KiCad")(uri "${KIPRJMOD}/ProtoFlow_Parts.pretty")(options "")(descr "Parts imported by ProtoFlow"))
+)

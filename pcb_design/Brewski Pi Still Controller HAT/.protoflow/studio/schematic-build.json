@@ -1,0 +1,522 @@
+{
+  "version": 1,
+  "schematic": "Pi Header Breakout.kicad_sch",
+  "sha256": "4cad64051a6e10c80be8c373e542183b5e1541b551e02eb3debebd1a99c7228d",
+  "root_uuid": "cbffdfd2-37b1-423d-94ad-b5e380710668",
+  "updated_at": "2026-10-19T02:41:34.530283Z",
+  "spec": {
+    "title": "Raspberry Pi 40-pin Header Breakout",
+    "rev": "A",
+    "paper": "A3",
+    "symbols": {
+      "PI": {
+        "lcsc": "C2977589",
+        "reference": "J",
+        "left": [
+          "1",
+          "3",
+          "5",
+          "7",
+          "9",
+          "11",
+          "13",
+          "15",
+          "17",
+          "19",
+          "21",
+          "23",
+          "25",
+          "27",
+          "29",
+          "31",
+          "33",
+          "35",
+          "37",
+          "39"
+        ],
+        "right": [
+          "2",
+          "4",
+          "6",
+          "8",
+          "10",
+          "12",
+          "14",
+          "16",
+          "18",
+          "20",
+          "22",
+          "24",
+          "26",
+          "28",
+          "30",
+          "32",
+          "34",
+          "36",
+          "38",
+          "40"
+        ]
+      },
+      "PINS": {
+        "lcsc": "C50981",
+        "reference": "J",
+        "left": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7",
+          "8",
+          "9",
+          "10",
+          "11",
+          "12",
+          "13",
+          "14",
+          "15",
+          "16",
+          "17",
+          "18",
+          "19",
+          "20"
+        ]
+      }
+    },
+    "layout": [
+      [
+        "pi",
+        "odd",
+        "even"
+      ]
+    ],
+    "sections": [
+      {
+        "id": "pi",
+        "title": "PI HEADER (plugs onto Pi)",
+        "color": "blue",
+        "parts": [
+          {
+            "ref": "J1",
+            "symbol": "PI",
+            "value": "Pi 40-pin",
+            "at": [
+              8,
+              0
+            ]
+          }
+        ],
+        "connect": [
+          {
+            "attach": {
+              "J1.1": "+3V3",
+              "J1.17": "+3V3",
+              "J1.2": "+5V",
+              "J1.4": "+5V",
+              "J1.6": "GND",
+              "J1.9": "GND",
+              "J1.14": "GND",
+              "J1.20": "GND",
+              "J1.25": "GND",
+              "J1.30": "GND",
+              "J1.34": "GND",
+              "J1.39": "GND",
+              "J1.3": "GPIO2_SDA",
+              "J1.5": "GPIO3_SCL",
+              "J1.7": "GPIO4",
+              "J1.8": "GPIO14_TXD",
+              "J1.10": "GPIO15_RXD",
+              "J1.11": "GPIO17",
+              "J1.12": "GPIO18",
+              "J1.13": "GPIO27",
+              "J1.15": "GPIO22",
+              "J1.16": "GPIO23",
+              "J1.18": "GPIO24",
+              "J1.19": "GPIO10_MOSI",
+              "J1.21": "GPIO9_MISO",
+              "J1.22": "GPIO25",
+              "J1.23": "GPIO11_SCLK",
+              "J1.24": "GPIO8_CE0",
+              "J1.26": "GPIO7_CE1",
+              "J1.27": "GPIO0_IDSD",
+              "J1.28": "GPIO1_IDSC",
+              "J1.29": "GPIO5",
+              "J1.31": "GPIO6",
+              "J1.32": "GPIO12",
+              "J1.33": "GPIO13",
+              "J1.35": "GPIO19",
+              "J1.36": "GPIO16",
+              "J1.37": "GPIO26",
+              "J1.38": "GPIO20",
+              "J1.40": "GPIO21"
+            }
+          },
+          {
+            "pwr_flag": {
+              "net": "+5V"
+            }
+          },
+          {
+            "pwr_flag": {
+              "net": "+3V3"
+            }
+          },
+          {
+            "pwr_flag": {
+              "net": "GND"
+            }
+          }
+        ]
+      },
+      {
+        "id": "odd",
+        "title": "BREAKOUT ROW A (header pins 1,3,...39)",
+        "color": "green",
+        "parts": [
+          {
+            "ref": "J2",
+            "symbol": "PINS",
+            "value": "Odd pins",
+            "at": [
+              0,
+              0
+            ]
+          }
+        ],
+        "connect": [
+          {
+            "attach": {
+              "J2.1": "+3V3",
+              "J2.2": "GPIO2_SDA",
+              "J2.3": "GPIO3_SCL",
+              "J2.4": "GPIO4",
+              "J2.5": "GND",
+              "J2.6": "GPIO17",
+              "J2.7": "GPIO27",
+              "J2.8": "GPIO22",
+              "J2.9": "+3V3",
+              "J2.10": "GPIO10_MOSI",
+              "J2.11": "GPIO9_MISO",
+              "J2.12": "GPIO11_SCLK",
+              "J2.13": "GND",
+              "J2.14": "GPIO0_IDSD",
+              "J2.15": "GPIO5",
+              "J2.16": "GPIO6",
+              "J2.17": "GPIO13",
+              "J2.18": "GPIO19",
+              "J2.19": "GPIO26",
+              "J2.20": "GND"
+            }
+          }
+        ],
+        "notes": [
+          "Pin n = Pi header pin 2n-1"
+        ]
+      },
+      {
+        "id": "even",
+        "title": "BREAKOUT ROW B (header pins 2,4,...40)",
+        "color": "orange",
+        "parts": [
+          {
+            "ref": "J3",
+            "symbol": "PINS",
+            "value": "Even pins",
+            "at": [
+              0,
+              0
+            ]
+          }
+        ],
+        "connect": [
+          {
+            "attach": {
+              "J3.1": "+5V",
+              "J3.2": "+5V",
+              "J3.3": "GND",
+              "J3.4": "GPIO14_TXD",
+              "J3.5": "GPIO15_RXD",
+              "J3.6": "GPIO18",
+              "J3.7": "GND",
+              "J3.8": "GPIO23",
+              "J3.9": "GPIO24",
+              "J3.10": "GND",
+              "J3.11": "GPIO25",
+              "J3.12": "GPIO8_CE0",
+              "J3.13": "GPIO7_CE1",
+              "J3.14": "GPIO1_IDSC",
+              "J3.15": "GND",
+              "J3.16": "GPIO12",
+              "J3.17": "GND",
+              "J3.18": "GPIO16",
+              "J3.19": "GPIO20",
+              "J3.20": "GPIO21"
+            }
+          }
+        ],
+        "notes": [
+          "Pin n = Pi header pin 2n"
+        ]
+      }
+    ]
+  },
+  "built_spec": {
+    "title": "Raspberry Pi 40-pin Header Breakout",
+    "rev": "A",
+    "paper": "A3",
+    "symbols": {
+      "PI": {
+        "lcsc": "C2977589",
+        "reference": "J",
+        "left": [
+          "1",
+          "3",
+          "5",
+          "7",
+          "9",
+          "11",
+          "13",
+          "15",
+          "17",
+          "19",
+          "21",
+          "23",
+          "25",
+          "27",
+          "29",
+          "31",
+          "33",
+          "35",
+          "37",
+          "39"
+        ],
+        "right": [
+          "2",
+          "4",
+          "6",
+          "8",
+          "10",
+          "12",
+          "14",
+          "16",
+          "18",
+          "20",
+          "22",
+          "24",
+          "26",
+          "28",
+          "30",
+          "32",
+          "34",
+          "36",
+          "38",
+          "40"
+        ]
+      },
+      "PINS": {
+        "lcsc": "C50981",
+        "reference": "J",
+        "left": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7",
+          "8",
+          "9",
+          "10",
+          "11",
+          "12",
+          "13",
+          "14",
+          "15",
+          "16",
+          "17",
+          "18",
+          "19",
+          "20"
+        ]
+      }
+    },
+    "layout": [
+      [
+        "pi",
+        "odd",
+        "even"
+      ]
+    ],
+    "sections": [
+      {
+        "id": "pi",
+        "title": "PI HEADER (plugs onto Pi)",
+        "color": "blue",
+        "parts": [
+          {
+            "ref": "J1",
+            "symbol": "PI",
+            "value": "Pi 40-pin",
+            "at": [
+              8,
+              0
+            ]
+          }
+        ],
+        "connect": [
+          {
+            "attach": {
+              "J1.1": "+3V3",
+              "J1.17": "+3V3",
+              "J1.2": "+5V",
+              "J1.4": "+5V",
+              "J1.6": "GND",
+              "J1.9": "GND",
+              "J1.14": "GND",
+              "J1.20": "GND",
+              "J1.25": "GND",
+              "J1.30": "GND",
+              "J1.34": "GND",
+              "J1.39": "GND",
+              "J1.3": "GPIO2_SDA",
+              "J1.5": "GPIO3_SCL",
+              "J1.7": "GPIO4",
+              "J1.8": "GPIO14_TXD",
+              "J1.10": "GPIO15_RXD",
+              "J1.11": "GPIO17",
+              "J1.12": "GPIO18",
+              "J1.13": "GPIO27",
+              "J1.15": "GPIO22",
+              "J1.16": "GPIO23",
+              "J1.18": "GPIO24",
+              "J1.19": "GPIO10_MOSI",
+              "J1.21": "GPIO9_MISO",
+              "J1.22": "GPIO25",
+              "J1.23": "GPIO11_SCLK",
+              "J1.24": "GPIO8_CE0",
+              "J1.26": "GPIO7_CE1",
+              "J1.27": "GPIO0_IDSD",
+              "J1.28": "GPIO1_IDSC",
+              "J1.29": "GPIO5",
+              "J1.31": "GPIO6",
+              "J1.32": "GPIO12",
+              "J1.33": "GPIO13",
+              "J1.35": "GPIO19",
+              "J1.36": "GPIO16",
+              "J1.37": "GPIO26",
+              "J1.38": "GPIO20",
+              "J1.40": "GPIO21"
+            }
+          },
+          {
+            "pwr_flag": {
+              "net": "+5V"
+            }
+          },
+          {
+            "pwr_flag": {
+              "net": "+3V3"
+            }
+          },
+          {
+            "pwr_flag": {
+              "net": "GND"
+            }
+          }
+        ]
+      },
+      {
+        "id": "odd",
+        "title": "BREAKOUT ROW A (header pins 1,3,...39)",
+        "color": "green",
+        "parts": [
+          {
+            "ref": "J2",
+            "symbol": "PINS",
+            "value": "Odd pins",
+            "at": [
+              0,
+              0
+            ]
+          }
+        ],
+        "connect": [
+          {
+            "attach": {
+              "J2.1": "+3V3",
+              "J2.2": "GPIO2_SDA",
+              "J2.3": "GPIO3_SCL",
+              "J2.4": "GPIO4",
+              "J2.5": "GND",
+              "J2.6": "GPIO17",
+              "J2.7": "GPIO27",
+              "J2.8": "GPIO22",
+              "J2.9": "+3V3",
+              "J2.10": "GPIO10_MOSI",
+              "J2.11": "GPIO9_MISO",
+              "J2.12": "GPIO11_SCLK",
+              "J2.13": "GND",
+              "J2.14": "GPIO0_IDSD",
+              "J2.15": "GPIO5",
+              "J2.16": "GPIO6",
+              "J2.17": "GPIO13",
+              "J2.18": "GPIO19",
+              "J2.19": "GPIO26",
+              "J2.20": "GND"
+            }
+          }
+        ],
+        "notes": [
+          "Pin n = Pi header pin 2n-1"
+        ]
+      },
+      {
+        "id": "even",
+        "title": "BREAKOUT ROW B (header pins 2,4,...40)",
+        "color": "orange",
+        "parts": [
+          {
+            "ref": "J3",
+            "symbol": "PINS",
+            "value": "Even pins",
+            "at": [
+              0,
+              0
+            ]
+          }
+        ],
+        "connect": [
+          {
+            "attach": {
+              "J3.1": "+5V",
+              "J3.2": "+5V",
+              "J3.3": "GND",
+              "J3.4": "GPIO14_TXD",
+              "J3.5": "GPIO15_RXD",
+              "J3.6": "GPIO18",
+              "J3.7": "GND",
+              "J3.8": "GPIO23",
+              "J3.9": "GPIO24",
+              "J3.10": "GND",
+              "J3.11": "GPIO25",
+              "J3.12": "GPIO8_CE0",
+              "J3.13": "GPIO7_CE1",
+              "J3.14": "GPIO1_IDSC",
+              "J3.15": "GND",
+              "J3.16": "GPIO12",
+              "J3.17": "GND",
+              "J3.18": "GPIO16",
+              "J3.19": "GPIO20",
+              "J3.20": "GPIO21"
+            }
+          }
+        ],
+        "notes": [
+          "Pin n = Pi header pin 2n"
+        ]
+      }
+    ]
+  },
+  "symbol_cache": {}
+}

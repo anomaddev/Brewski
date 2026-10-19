@@ -4,4 +4,4 @@
 ``brewski --version`` prints it, and the API and dashboard report it.
 """
 
-__version__ = "0.6.21"
+__version__ = "0.6.22"

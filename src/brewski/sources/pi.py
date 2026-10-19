@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 
 from brewski.lcd import panel_pin_factory
 from brewski.sources.hts221 import (
@@ -45,8 +46,9 @@ _CONVERT_SECONDS = 0.07
 class PiSource:
     name = "pi"
 
-    def __init__(self, store: Store) -> None:
+    def __init__(self, store: Store, status: Callable[[str], None] | None = None) -> None:
         self.store = store
+        self._status = status
         self.spi_fault = False
         self.probe_faults = [False] * SLOT_COUNT
         self.climate_fault = False
@@ -146,9 +148,16 @@ class PiSource:
             logger.warning("GPIO did not open. Heaters stay off.")
             return
         settings = self.store.get_settings()
+        self._report("Opening outputs")
         self._open_heaters(settings)
+        self._report("Opening probes")
         self._open_spi(settings)
+        self._report("Cabinet sensor")
         self._open_climate(settings)
+
+    def _report(self, step: str) -> None:
+        if self._status is not None:
+            self._status(step)
 
     def _open_heaters(self, settings: Settings) -> None:
         try:

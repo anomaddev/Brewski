@@ -21,7 +21,7 @@ from dataclasses import replace
 
 from brewski import __version__
 from brewski.emergency import summary
-from brewski.lcd import NullDisplay, display_key, open_display, status_lines
+from brewski.lcd import Display, NullDisplay, display_key, open_display, startup_lines, status_lines
 from brewski.menu import SoftwareMenu
 from brewski.network import display_identity
 from brewski.panel import indicator_leds, open_panel, panel_key
@@ -415,7 +415,12 @@ class ControllerError(Exception):
 
 
 class Controller:
-    def __init__(self, store: Store, source: HardwareSource) -> None:
+    def __init__(
+        self,
+        store: Store,
+        source: HardwareSource,
+        display: Display | None = None,
+    ) -> None:
         self.store = store
         self.source = source
         self._lock = threading.Lock()
@@ -424,6 +429,7 @@ class Controller:
         self._shut_down = False
         self._display = NullDisplay()
         self._display_key: tuple[int, int] | None = None
+        self._show_panel_step = True
         self._panel: object | None = None
         self._panel_key: tuple[int, ...] | None = None
         self._menu: SoftwareMenu | None = None
@@ -478,12 +484,16 @@ class Controller:
         # turn-on of a run is not delayed. A control-law turn-off sets this
         # back to zero. Pause and Stop leave it satisfied on purpose.
         self._heater_off_for = [math.inf] * SLOT_COUNT
+        if display is not None:
+            self._display = display
+            self._display_key = display_key(self.store.get_settings())
         # A previous process may have stopped mid-run. Close that record so
         # the next start is a new run, not a continuation of a dead one.
         self.store.close_open_runs()
         open_cooldown = self.store.claim_open_cooldown()
         if open_cooldown is not None:
             self._adopt_cooldown(open_cooldown)
+        self._show_startup("Reading sensors")
         self._live_temps = self.source.read_temperatures(SLOT_COUNT)
         self._sample_climate()
         self._emergency = self._emergency_codes(self.store.get_settings())
@@ -789,6 +799,9 @@ class Controller:
                 raise ControllerError("There is no open run to stop", 409)
             self._finish_run()
             return self._status()
+
+    def _show_startup(self, step: str) -> None:
+        self._display.write(startup_lines(step))
 
     def _refresh_display(self) -> None:
         if self._hold_display:
@@ -1991,6 +2004,9 @@ class Controller:
         self._panel_key = key
         if key is None:
             return
+        if self._show_panel_step:
+            self._show_startup("Opening panel")
+            self._show_panel_step = False
         self._panel = open_panel(settings)
 
     def _close_panel(self) -> None:

@@ -1,7 +1,6 @@
 [Unit]
 Description=Ask before updating Brewski
-After=network-online.target
-Wants=network-online.target
+After=local-fs.target
 Before=brewski.service
 
 [Service]

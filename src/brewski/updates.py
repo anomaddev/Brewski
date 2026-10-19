@@ -1,7 +1,7 @@
 """GitHub release checks and the prompted installer.
 
-A fresh boot does not contact GitHub. The I2C pins are whatever setup saved,
-and the panel prompt cannot open the bus before that.
+A fresh boot does not contact GitHub until setup has saved the I2C pins.
+Once those pins are saved, the LCD comes on before the network wait.
 """
 
 from __future__ import annotations
@@ -26,7 +26,9 @@ from brewski.lcd import (
     open_prompt_leds,
     progress_lines,
     prompt_lines,
+    startup_lines,
 )
+from brewski.network import has_default_route
 from brewski.paths import data_directory
 from brewski.store import DEFAULT_UPDATE_SOURCE, load_settings
 
@@ -37,6 +39,7 @@ REVISION_PATH = Path("/opt/brewski/revision")
 INSTALL_SCRIPT = Path("/opt/brewski/install.sh")
 APPLY_UNIT = "brewski-apply-update.service"
 PROMPT_SECONDS = 60
+NETWORK_WAIT_SECONDS = 20
 _CACHE_SECONDS = 300.0
 _cache_lock = threading.Lock()
 _cache: dict[str, tuple[float, ReleaseInfo]] = {}
@@ -200,6 +203,7 @@ def run_boot_update() -> int:
 
     Always returns 0. A declined, skipped, or failed update keeps the
     installed version, and the service that runs after this oneshot starts it.
+    The display opens before the network wait so the panel can show startup.
     """
 
     directory = data_directory(False)
@@ -207,17 +211,28 @@ def run_boot_update() -> int:
     if settings is None or not settings.setup_complete:
         logger.info("Brewski setup has not saved the I2C pins. Skipping the update check.")
         return 0
+    display = open_display(settings)
+    if display.hardware:
+        display.write(startup_lines("Starting"))
+        if not _wait_for_route(display):
+            logger.info("No network route. Starting the installed version.")
+            display.close(clear=False)
+            return 0
+        display.write(startup_lines("Checking for updates"))
     release = check_release()
     if not release.available:
         if release.reachable:
             logger.info("Brewski %s is current.", release.current)
         else:
             logger.info("GitHub could not be reached. Starting the installed version.")
+        if display.hardware:
+            display.close(clear=False)
         return 0
     if settings.gpio is None or not settings.gpio.lcd_enabled():
         logger.info("An update is available and the LCD is turned off. Keeping this version.")
+        if display.hardware:
+            display.close(clear=False)
         return 0
-    display = open_display(settings)
     if not display.hardware:
         logger.warning("An update is available and the LCD could not be opened. Keeping this version.")
         display.close()
@@ -255,6 +270,21 @@ def run_boot_update() -> int:
     time.sleep(2)
     display.close()
     return 0
+
+
+def _wait_for_route(display: Display, seconds: int = NETWORK_WAIT_SECONDS) -> bool:
+    """Give the network a short head start, and say so on the panel."""
+
+    if has_default_route():
+        return True
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        display.write(startup_lines("Waiting for network"))
+        time.sleep(1)
+        if has_default_route():
+            return True
+    display.write(startup_lines("Waiting for network"))
+    return False
 
 
 def run_apply_update() -> int:

@@ -64,6 +64,12 @@ def _listen_port() -> int:
     return port
 
 
+def has_default_route() -> bool:
+    """True when the kernel has an address it would use to leave this machine."""
+
+    return _primary_ipv4() is not None
+
+
 def _primary_ipv4() -> str | None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:

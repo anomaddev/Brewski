@@ -2,7 +2,7 @@ import json
 import urllib.error
 
 from brewski import __version__
-from brewski.lcd import NullDisplay
+from brewski.lcd import NullDisplay, startup_lines
 from brewski.store import Store, merge_settings
 from brewski.menu import SoftwareMenu
 from brewski.updates import (
@@ -258,6 +258,7 @@ def test_boot_installs_when_start_is_pressed(tmp_path, monkeypatch):
             flashes.append("closed")
 
     monkeypatch.setattr("brewski.updates.open_display", lambda _settings: Panel())
+    monkeypatch.setattr("brewski.updates.has_default_route", lambda: True)
     monkeypatch.setattr("brewski.updates.open_buttons", lambda _settings: Buttons())
     monkeypatch.setattr(
         "brewski.updates.open_prompt_leds",
@@ -317,18 +318,95 @@ def test_boot_waits_on_the_prompt_when_buttons_cannot_open(tmp_path, monkeypatch
     panel = Panel()
     leds = Leds()
     monkeypatch.setattr("brewski.updates.open_display", lambda _settings: panel)
+    monkeypatch.setattr("brewski.updates.has_default_route", lambda: True)
     monkeypatch.setattr("brewski.updates.open_buttons", lambda _settings: None)
     monkeypatch.setattr("brewski.updates.open_prompt_leds", lambda _settings: leds)
     installed = []
     monkeypatch.setattr("brewski.updates.run_installer", lambda *_args: installed.append(True))
     assert run_boot_update() == 0
     assert installed == []
-    assert panel.history[0][0] == "Update available"
-    assert panel.history[0][2] == "START update"
-    assert panel.history[0][3] == "STOP keep 60s"
+    assert panel.history[0] == startup_lines("Starting")
+    prompt = next(lines for lines in panel.history if lines[0] == "Update available")
+    assert prompt[2] == "START update"
+    assert prompt[3] == "STOP keep 60s"
     assert panel.lines[0] == "Keeping this copy"
     assert clock["now"] >= 60
     assert leds.closed
+
+
+def test_boot_shows_starting_before_it_checks_for_a_release(tmp_path, monkeypatch):
+    store = Store(tmp_path)
+    store.save_settings(merge_settings(store.get_settings(), {"setup_complete": True}))
+    monkeypatch.setenv("BREWSKI_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr("brewski.updates.has_default_route", lambda: True)
+    seen: list[list[str]] = []
+
+    def check_later(**_kwargs):
+        seen.append(["check"])
+        return ReleaseInfo(current="0.2.0", latest="0.2.0", available=False, reachable=True)
+
+    class Panel(NullDisplay):
+        def __init__(self):
+            super().__init__()
+            self.history: list[list[str]] = []
+
+        @property
+        def hardware(self):
+            return True
+
+        def write(self, lines):
+            super().write(lines)
+            self.history.append(list(self.lines))
+            seen.append(list(self.lines))
+
+    panel = Panel()
+    monkeypatch.setattr("brewski.updates.open_display", lambda _settings: panel)
+    monkeypatch.setattr("brewski.updates.check_release", check_later)
+    assert run_boot_update() == 0
+    assert panel.history[0] == startup_lines("Starting")
+    assert startup_lines("Checking for updates") in panel.history
+    assert seen.index(startup_lines("Starting")) < seen.index(["check"])
+    assert seen.index(startup_lines("Checking for updates")) < seen.index(["check"])
+    assert panel.closed_clear is False
+
+
+def test_boot_skips_github_when_the_network_never_arrives(tmp_path, monkeypatch):
+    store = Store(tmp_path)
+    store.save_settings(merge_settings(store.get_settings(), {"setup_complete": True}))
+    monkeypatch.setenv("BREWSKI_DATA_DIR", str(tmp_path))
+    clock = {"now": 0.0}
+
+    def sleep(seconds):
+        clock["now"] += seconds
+
+    monkeypatch.setattr("brewski.updates.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr("brewski.updates.time.sleep", sleep)
+    monkeypatch.setattr("brewski.updates.has_default_route", lambda: False)
+
+    def explode(**_kwargs):
+        raise AssertionError("GitHub was contacted with no route")
+
+    class Panel(NullDisplay):
+        def __init__(self):
+            super().__init__()
+            self.history: list[list[str]] = []
+
+        @property
+        def hardware(self):
+            return True
+
+        def write(self, lines):
+            super().write(lines)
+            self.history.append(list(self.lines))
+
+    panel = Panel()
+    monkeypatch.setattr("brewski.updates.check_release", explode)
+    monkeypatch.setattr("brewski.updates.open_display", lambda _settings: panel)
+    assert run_boot_update() == 0
+    assert panel.history[0] == startup_lines("Starting")
+    assert startup_lines("Waiting for network") in panel.history
+    assert panel.closed_clear is False
+    assert clock["now"] >= 20
 
 
 def test_prompt_times_out_as_a_decline():

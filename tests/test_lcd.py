@@ -14,6 +14,7 @@ from brewski.lcd import (
     open_display,
     progress_lines,
     prompt_lines,
+    startup_lines,
     status_lines,
 )
 from brewski.sources.dummy import DummySource
@@ -219,6 +220,29 @@ def test_prompt_and_progress_screens():
     _lines_fit(done)
 
 
+def test_startup_lines_name_the_step_and_fit_the_panel():
+    lines = startup_lines("Checking for updates")
+    assert lines[0] == "Brewski"
+    assert lines[1] == "Checking for updates"
+    assert lines[2:] == ["", ""]
+    _lines_fit(lines)
+    _lines_fit(startup_lines("Waiting for network"))
+
+
+def test_closing_without_clear_leaves_the_glass():
+    class _Lcd:
+        def __init__(self) -> None:
+            self.cleared: bool | None = None
+
+        def close(self, clear: bool = True) -> None:
+            self.cleared = clear
+
+    lcd = _Lcd()
+    display = HardwareDisplay(lcd)
+    display.close(clear=False)
+    assert lcd.cleared is False
+
+
 def test_display_stays_closed_until_setup_saves_the_pins():
     settings = default_settings()
     assert display_key(settings) is None
@@ -296,6 +320,28 @@ def test_controller_opens_the_saved_pins_after_setup(store, source, monkeypatch)
     controller._refresh_display()
     assert opened == [(2, 3)]
     assert controller._display.lines[0] == "Calibrate:     START"
+
+
+def test_controller_reuses_a_display_opened_before_startup(store, source, monkeypatch):
+    from brewski.store import merge_settings
+
+    store.save_settings(merge_settings(store.get_settings(), {"setup_complete": True}))
+    panel = NullDisplay()
+
+    def explode(_settings):
+        raise AssertionError("the startup display was opened again")
+
+    def open_panel(_settings):
+        assert panel.lines[1] == "Opening panel"
+        return None
+
+    monkeypatch.setattr("brewski.controller.open_display", explode)
+    monkeypatch.setattr("brewski.controller.open_panel", open_panel)
+    controller = Controller(store, source, display=panel)
+    assert panel.lines[0] == "Brewski"
+    assert panel.lines[1] == "Reading sensors"
+    controller._refresh_display()
+    assert controller._display is panel
 
 
 def test_lgpio_is_imported_from_a_writable_directory(tmp_path, monkeypatch):

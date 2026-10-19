@@ -61,7 +61,7 @@ class Display(Protocol):
 
     def clear(self) -> None: ...
 
-    def close(self) -> None: ...
+    def close(self, *, clear: bool = True) -> None: ...
 
 
 class NullDisplay:
@@ -84,8 +84,9 @@ class NullDisplay:
         self.lines = [""] * ROWS
         self.cleared = True
 
-    def close(self) -> None:
+    def close(self, *, clear: bool = True) -> None:
         self.closed = True
+        self.closed_clear = clear
 
 
 class HardwareDisplay:
@@ -120,12 +121,12 @@ class HardwareDisplay:
         self._lcd.clear()  # type: ignore[attr-defined]
         self._last = [""] * ROWS
 
-    def close(self) -> None:
+    def close(self, *, clear: bool = True) -> None:
         if self._closed:
             return
         self._closed = True
         try:
-            self._lcd.close(clear=True)  # type: ignore[attr-defined]
+            self._lcd.close(clear=clear)  # type: ignore[attr-defined]
         except TypeError:
             self._lcd.close()  # type: ignore[attr-defined]
         except Exception:
@@ -652,6 +653,12 @@ def _eta_label(seconds: float, kind: str | None) -> str:
     if kind == "cool":
         return f"cool {clock}"
     return f"~{clock}"
+
+
+def startup_lines(step: str) -> list[str]:
+    """Boot status. The step sits under the name until the live screen takes over."""
+
+    return frame(["Brewski", step, "", ""])
 
 
 def prompt_lines(current: str, latest: str, seconds_left: int) -> list[str]:

@@ -188,8 +188,9 @@ def test_installed_service_uses_the_pi_source(monkeypatch, tmp_path):
     class FakePi:
         name = "pi"
 
-        def __init__(self, store):
+        def __init__(self, store, status=None):
             self.store = store
+            self.status = status
 
         def read_temperatures(self, count):
             return [70.0, 62.0][:count]
@@ -207,6 +208,7 @@ def test_installed_service_uses_the_pi_source(monkeypatch, tmp_path):
     controller, _app = _build_runtime(False)
     assert isinstance(controller.source, FakePi)
     assert controller.source.name == "pi"
+    assert callable(controller.source.status)
     controller.shutdown()
 
 

@@ -6,7 +6,9 @@ from brewski.controller import Controller
 from brewski.lcd import (
     COLUMNS,
     HardwareDisplay,
+    ButtonReader,
     NullDisplay,
+    PromptLeds,
     display_key,
     frame,
     open_display,
@@ -336,3 +338,57 @@ def test_a_broken_lgpio_import_does_not_stop_startup(tmp_path, monkeypatch):
     before = os.getcwd()
     assert lcd._ensure_lgpio() is False
     assert os.getcwd() == before
+
+
+def test_the_boot_prompt_ignores_a_start_blip_while_stop_is_down(monkeypatch):
+    now = {"t": 1_000.0}
+    monkeypatch.setattr("brewski.lcd.time.monotonic", lambda: now["t"])
+
+    class _Button:
+        def __init__(self) -> None:
+            self.when_pressed = None
+            self.when_released = None
+
+        def close(self) -> None:
+            return None
+
+    start = _Button()
+    stop = _Button()
+    reader = ButtonReader(start, stop)
+    stop.is_pressed = True
+    stop.when_pressed()
+    start.is_pressed = True
+    start.when_pressed()
+    start.is_pressed = False
+    start.when_released()
+    assert reader.pressed() is None
+    now["t"] += 0.2
+    stop.is_pressed = False
+    stop.when_released()
+    assert reader.pressed() == "stop"
+    reader.close()
+
+
+def test_changing_the_stop_lamp_does_not_touch_the_start_lamp():
+    class _Pin:
+        def __init__(self) -> None:
+            self.on_calls = 0
+            self.off_calls = 0
+
+        def on(self) -> None:
+            self.on_calls += 1
+
+        def off(self) -> None:
+            self.off_calls += 1
+
+    start = _Pin()
+    stop = _Pin()
+    leds = PromptLeds(start, stop)
+    assert (start.on_calls, stop.on_calls) == (1, 1)
+    leds.set(True, False)
+    assert start.on_calls == 1
+    assert start.off_calls == 0
+    assert stop.off_calls == 1
+    leds.set(True, True)
+    assert start.on_calls == 1
+    assert stop.on_calls == 2

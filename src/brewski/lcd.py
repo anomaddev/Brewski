@@ -14,9 +14,11 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Protocol
 
+from brewski.press import PressPair
 from brewski.store import Settings, default_gpio
 
 logger = logging.getLogger(__name__)
@@ -125,31 +127,47 @@ class HardwareDisplay:
 class ButtonReader:
     """Start and stop buttons wired to ground, using the Pi's internal pull-ups.
 
-    The first new press wins. A button already held when the prompt opens
+    The first completed tap wins. A button already held when the prompt opens
     does not count, so a stuck switch cannot accept the update by itself.
+    A blip on the shared ground does not count as the other button.
     """
 
     def __init__(self, start: object, stop: object) -> None:
         self._start = start
         self._stop = stop
         self._choice: str | None = None
-        start.when_pressed = self._press_start  # type: ignore[attr-defined]
-        stop.when_pressed = self._press_stop  # type: ignore[attr-defined]
+        self._pair = PressPair(start, stop, hold_seconds=None)
+        start.when_pressed = self._start_down  # type: ignore[attr-defined]
+        start.when_released = self._start_up  # type: ignore[attr-defined]
+        stop.when_pressed = self._stop_down  # type: ignore[attr-defined]
+        stop.when_released = self._stop_up  # type: ignore[attr-defined]
 
-    def _press_start(self) -> None:
-        self._choose("start")
+    def _start_down(self) -> None:
+        self._pair.down("start", time.monotonic())
 
-    def _press_stop(self) -> None:
-        self._choose("stop")
+    def _start_up(self) -> None:
+        self._pair.up("start", time.monotonic())
 
-    def _choose(self, choice: str) -> None:
-        if self._choice is None:
-            self._choice = choice
+    def _stop_down(self) -> None:
+        self._pair.down("stop", time.monotonic())
+
+    def _stop_up(self) -> None:
+        self._pair.up("stop", time.monotonic())
 
     def pressed(self) -> str | None:
+        if self._choice is not None:
+            return self._choice
+        now = time.monotonic()
+        self._pair.poll(now)
+        starts, stops, _holds = self._pair.consume()
+        if stops:
+            self._choice = "stop"
+        elif starts:
+            self._choice = "start"
         return self._choice
 
     def close(self) -> None:
+        self._pair.close()
         for button in (self._start, self._stop):
             try:
                 button.close()  # type: ignore[attr-defined]
@@ -214,11 +232,21 @@ class PromptLeds:
     def __init__(self, start: object, stop: object) -> None:
         self._start = start
         self._stop = stop
+        self._shown: tuple[bool, bool] | None = None
         self.set(True, True)
 
     def set(self, start_on: bool, stop_on: bool) -> None:
-        _drive_led(self._start, start_on)
-        _drive_led(self._stop, stop_on)
+        shown = (bool(start_on), bool(stop_on))
+        previous = self._shown
+        if shown == previous:
+            return
+        self._shown = shown
+        # Write only the lamp that changed. Restating the other pin makes
+        # that relay click, so a Stop press was lighting the Start lamp.
+        if previous is None or previous[0] != shown[0]:
+            _drive_led(self._start, shown[0])
+        if previous is None or previous[1] != shown[1]:
+            _drive_led(self._stop, shown[1])
 
     def close(self) -> None:
         for led in (self._start, self._stop):

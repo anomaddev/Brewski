@@ -242,6 +242,11 @@ def test_stop_hold_opens_the_software_menu_without_changing_the_target(controlle
     assert controller._menu is None
     assert controller._display.lines[0] == "Idle:"
 
+    controller._panel = _Panel((0, 0, 1, 0))
+    controller._apply_panel()
+    assert controller._menu is not None
+    assert controller._display.lines[0] == "Software Menu"
+
 
 def test_stop_hold_during_a_run_does_not_stop_or_open_the_menu(controller):
     controller.start()

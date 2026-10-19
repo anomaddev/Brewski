@@ -221,11 +221,11 @@ def test_stop_hold_opens_the_software_menu_without_changing_the_target(controlle
 
     controller._panel = _Panel((0, 0, 0, 5))
     controller._apply_panel()
-    assert controller._display.lines[2] == "> Check for Update"
+    assert controller._display.lines[3] == "> Reboot"
     assert store.get_settings().target_temp_f == 165
     assert controller.status()["target_temp_f"] == 165
 
-    controller._panel = _Panel((0, 0, 0, -1))
+    controller._panel = _Panel((0, 0, 0, -2))
     controller._apply_panel()
     assert controller._display.lines[1] == "> About"
 

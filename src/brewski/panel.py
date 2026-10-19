@@ -4,14 +4,16 @@ The running controller keeps these open for the life of the process. A
 button already held when the pins open does not count. LED relays stay
 solid on only while that button will do something.
 
-Stop counts on release. A press that lasts for ``STOP_HOLD_SECONDS`` is a
-hold, and that release is not also a short press.
+Stop is timed here, not by gpiozero's hold thread. A press that is still
+down at ``STOP_HOLD_SECONDS`` is one hold. Anything shorter counts once,
+on release.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import NamedTuple
 
 from brewski.lcd import LED_ACTIVE_HIGH, PromptLeds, panel_pin_factory
@@ -42,15 +44,16 @@ class Panel:
         self._start_presses = 0
         self._stop_presses = 0
         self._stop_holds = 0
-        self._stop_held = False
+        self._stop_down_at: float | None = None
+        self._stop_hold_sent = False
         self._steps = 0
         try:
             stop.hold_time = STOP_HOLD_SECONDS  # type: ignore[attr-defined]
+            stop.when_held = None  # type: ignore[attr-defined]
         except Exception:
             logger.debug("Stop hold time was left at the button default", exc_info=True)
         start.when_pressed = self._press_start  # type: ignore[attr-defined]
         stop.when_pressed = self._arm_stop  # type: ignore[attr-defined]
-        stop.when_held = self._hold_stop  # type: ignore[attr-defined]
         stop.when_released = self._release_stop  # type: ignore[attr-defined]
         if encoder is not None:
             encoder.when_rotated_clockwise = self._clockwise  # type: ignore[attr-defined]
@@ -63,19 +66,43 @@ class Panel:
 
     def _arm_stop(self) -> None:
         with self._guard:
-            self._stop_held = False
-
-    def _hold_stop(self) -> None:
-        with self._guard:
-            self._stop_held = True
-            self._stop_holds += 1
+            self._stop_down_at = time.monotonic()
+            self._stop_hold_sent = False
 
     def _release_stop(self) -> None:
         with self._guard:
-            held = self._stop_held
-            self._stop_held = False
-            if not held:
-                self._stop_presses += 1
+            self._finish_stop(time.monotonic())
+
+    def _finish_stop(self, now: float) -> None:
+        """Caller holds ``self._guard``. One press becomes one event."""
+
+        down_at = self._stop_down_at
+        sent = self._stop_hold_sent
+        self._stop_down_at = None
+        self._stop_hold_sent = False
+        if down_at is None or sent:
+            return
+        if now - down_at >= STOP_HOLD_SECONDS:
+            self._stop_holds += 1
+        else:
+            self._stop_presses += 1
+
+    def _stop_is_down(self) -> bool:
+        pressed = getattr(self._stop_button, "is_pressed", None)
+        if pressed is None:
+            return False
+        return bool(pressed)
+
+    def _note_hold_while_down(self, now: float) -> None:
+        """Caller holds ``self._guard``. Count a hold once, while the button is down."""
+
+        down_at = self._stop_down_at
+        if down_at is None or self._stop_hold_sent:
+            return
+        if now - down_at < STOP_HOLD_SECONDS or not self._stop_is_down():
+            return
+        self._stop_hold_sent = True
+        self._stop_holds += 1
 
     def _clockwise(self) -> None:
         self._add_steps(1)
@@ -90,7 +117,9 @@ class Panel:
     def take(self) -> PanelEvents:
         """Return new presses, the stop hold, and encoder steps, then clear them."""
 
+        now = time.monotonic()
         with self._guard:
+            self._note_hold_while_down(now)
             events = PanelEvents(
                 self._start_presses,
                 self._stop_presses,

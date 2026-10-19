@@ -35,12 +35,29 @@ def test_a_stop_release_is_a_short_press():
     assert panel.take() == (0, 1, 0, 0)
 
 
-def test_a_stop_hold_is_not_a_short_press():
+def test_a_stop_hold_is_not_a_short_press(monkeypatch):
     panel, stop = _panel()
+    now = {"t": 1_000.0}
+    monkeypatch.setattr("brewski.panel.time.monotonic", lambda: now["t"])
+    stop.is_pressed = True
     stop.when_pressed()
-    stop.when_held()
+    now["t"] += STOP_HOLD_SECONDS
     assert panel.take() == (0, 0, 1, 0)
+    stop.is_pressed = False
     stop.when_released()
+    assert panel.take() == (0, 0, 0, 0)
+
+
+def test_a_short_release_does_not_leave_a_hold_behind(monkeypatch):
+    panel, stop = _panel()
+    now = {"t": 1_000.0}
+    monkeypatch.setattr("brewski.panel.time.monotonic", lambda: now["t"])
+    stop.is_pressed = True
+    stop.when_pressed()
+    now["t"] += 0.2
+    stop.is_pressed = False
+    stop.when_released()
+    assert panel.take() == (0, 1, 0, 0)
     assert panel.take() == (0, 0, 0, 0)
 
 
@@ -53,6 +70,9 @@ def test_software_menu_lines_and_leds():
         "  Reboot",
     ]
     assert menu.leds() == (True, True)
+    assert menu.move(4) is True
+    assert menu.lines("0.6.5")[2] == "> Check for Update"
+    menu.index = 0
     assert menu.move(-1) is True
     assert menu.lines("0.6.5")[3] == "> Reboot"
     menu.select()

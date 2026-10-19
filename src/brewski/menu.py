@@ -28,12 +28,11 @@ class SoftwareMenu:
         self.failed = False
 
     def move(self, steps: int) -> bool:
-        """Move one row in the direction of ``steps``. Extra steps are ignored."""
+        """Move the highlight by every dial step accumulated since the last paint."""
 
         if self.screen != "list" or not steps:
             return False
-        delta = 1 if steps > 0 else -1
-        self.index = (self.index + delta) % len(ITEMS)
+        self.index = (self.index + int(steps)) % len(ITEMS)
         return True
 
     def back(self) -> bool:

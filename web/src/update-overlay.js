@@ -199,7 +199,7 @@ function percent(phaseName, elapsed) {
 
 function phaseText(phaseName) {
   if (phaseName === 'downloading') return 'Downloading'
-  if (phaseName === 'building') return 'Building the dashboard'
+  if (phaseName === 'building') return 'Building Brewski'
   if (phaseName === 'installing') return 'Installing'
   if (phaseName === 'complete') return 'Waiting for restart'
   if (phaseName === 'failed') return 'Update failed'

@@ -289,7 +289,7 @@ function sameVersion(running, latest) {
 
 function phaseText(phase) {
   if (phase === 'downloading') return 'Downloading'
-  if (phase === 'building') return 'Building the dashboard'
+  if (phase === 'building') return 'Building Brewski'
   if (phase === 'installing') return 'Installing'
   if (phase === 'complete') return 'Waiting for restart'
   if (phase === 'failed') return 'Update failed'

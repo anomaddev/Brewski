@@ -213,3 +213,6 @@ __marimo__/
 
 # Ignore Coding Prompts
 .prompts/
+
+# KiCad / ProtoFlow PCB design (local for now)
+pcb_design/

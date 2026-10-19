@@ -1,7 +1,0 @@
-{
-  "schemaVersion": 1,
-  "documentType": "protoflow_project",
-  "name": "Brewski Pi Still Controller HAT",
-  "projectFile": "Brewski Pi Still Controller HAT.kicad_pro",
-  "description": "A Raspberry Pi HAT for a small still controller featuring an integrated I2C hub, SSR control headers for external heater relays, optoisolated indicator lamp drivers, and interfaces for temperature probes, a rotary dial, and momentary switches."
-}

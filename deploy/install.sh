@@ -315,12 +315,13 @@ build_dashboard() {
   [[ -f "$root/web/dist/index.html" ]] || die "the dashboard build did not produce web/dist/index.html."
 }
 
-# Drop packages the venv picked up outside this install. pip reports them as
-# conflicts on every later install, including leftovers such as
-# types-flask-migrate that Brewski does not use.
+# Drop packages installed inside this venv that Brewski does not use. The venv
+# can also see Debian packages in /usr/lib/python3/dist-packages. Those are not
+# part of the venv, and pip cannot remove them.
 prune_foreign_packages() {
   [[ -x "$VENV/bin/python" ]] || return 0
   "$VENV/bin/python" - <<'PY'
+import os
 import subprocess
 import sys
 from importlib.metadata import PackageNotFoundError, distribution, distributions
@@ -369,11 +370,21 @@ while queue:
         if selected(raw):
             queue.append(requirement_name(raw))
 
+def installed_in_venv(dist):
+    try:
+        place = os.path.realpath(dist.locate_file(""))
+    except Exception:
+        return False
+    root = os.path.realpath(sys.prefix)
+    return place == root or place.startswith(root + os.sep)
+
+
 remove = []
 for dist in distributions():
     name = dist.metadata["Name"]
-    if name and canonical(name) not in keep:
-        remove.append(name)
+    if not name or canonical(name) in keep or not installed_in_venv(dist):
+        continue
+    remove.append(name)
 if not remove:
     raise SystemExit(0)
 print("Removing packages that are not part of Brewski: " + ", ".join(sorted(remove)))

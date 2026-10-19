@@ -69,10 +69,9 @@ MAX_TICK_SECONDS = 3600.0
 # A calibration only trusts a coast after the element has been on long enough
 # to be hot. Shorter pulses still have a cold sheath and teach the wrong number.
 COAST_SOAK_SECONDS = 30.0
-# The early cutoff would open the SSR before the setpoint, and the probe would
-# never actually reach it. Calibration keeps heating until the probe is this
-# far above the target, then lets that overshoot become the measurement.
-CALIBRATION_ABOVE_F = 1.0
+# Calibration always aims here. The temperature chosen for a real run is not
+# part of the measurement, and this number is not written over that setpoint.
+CALIBRATION_TEMP_F = 120.0
 # After that soaked shutoff, the coast is the rise in a rolling average of the
 # control probe, measured at the crest. A slow climb is still climbing.
 COAST_AVERAGE_SECONDS = 10.0
@@ -112,6 +111,13 @@ PREDICT_MAX_HORIZON_SECONDS = 4 * 60 * 60
 # A fast rise may shut off sooner than the learned coast, but not by more than
 # this multiple, and never by more than EARLY_CUTOFF_MAX_F degrees.
 PREDICT_COAST_SCALE_MAX = 3.0
+# A late slope this close to the early one is still a straight line. The
+# flattening fit waits until the rise has clearly slowed.
+COAST_TAU_SLOW_FRACTION = 0.85
+# Below this fraction the sheath is still leaving cold, and the shallow slope
+# is not yet the straight-line rate. At SOAK_FULL the full coast applies.
+SOAK_RAMP_MIN = 0.2
+SOAK_FULL = 0.9
 # Cooldown is time to get this close to a nominal room temperature. Reaching
 # the room itself would take forever under Newton's law of cooling.
 PREDICT_AMBIENT_F = 70.0
@@ -292,6 +298,167 @@ def predicted_coast_f(
     elif scale > PREDICT_COAST_SCALE_MAX:
         scale = PREDICT_COAST_SCALE_MAX
     return min(EARLY_CUTOFF_MAX_F, coast * scale)
+
+
+def coast_tau_seconds(samples: list[tuple[float, float]]) -> float | None:
+    """Time constant of a rise that is slowing down.
+
+    The early and late windows each have to be long enough to trust a slope.
+    Both slopes have to be rising, and the late one has to be clearly slower.
+    ``tau = dt / ln(early / late)`` for a rate that decays as ``exp(-t / tau)``.
+    """
+
+    if len(samples) < PREDICT_MIN_SAMPLES * 2:
+        return None
+    start = samples[0][0]
+    end = samples[-1][0]
+    if end - start < PREDICT_MIN_SPAN_SECONDS * 2:
+        return None
+    early_end = start + PREDICT_MIN_SPAN_SECONDS
+    late_start = end - PREDICT_MIN_SPAN_SECONDS
+    if late_start < early_end:
+        return None
+    early = [(stamp, reading) for stamp, reading in samples if stamp <= early_end]
+    late = [(stamp, reading) for stamp, reading in samples if stamp >= late_start]
+    early_rate = slope_f_per_sec(early)
+    late_rate = slope_f_per_sec(late)
+    if (
+        early_rate is None
+        or late_rate is None
+        or early_rate < PREDICT_MIN_RATE_F_PER_SEC
+        or late_rate < PREDICT_MIN_RATE_F_PER_SEC
+        or late_rate > early_rate * COAST_TAU_SLOW_FRACTION
+    ):
+        return None
+    early_mid = (early[0][0] + early[-1][0]) / 2.0
+    late_mid = (late[0][0] + late[-1][0]) / 2.0
+    dt = late_mid - early_mid
+    if dt <= 0 or early_rate <= late_rate:
+        return None
+    tau = dt / math.log(early_rate / late_rate)
+    if tau < 1.0 or tau > COAST_WATCH_MAX_SECONDS:
+        return None
+    return tau
+
+
+def sheath_soak(off_seconds: float, on_seconds: float, tau_seconds: float) -> float:
+    """Fraction of a hot sheath, from 0 cold to 1 soaked.
+
+    The same time constant fills the sheath after the SSR closes and empties
+    it after the SSR opens. A long off interval starts from cold.
+    """
+
+    if tau_seconds <= 0:
+        return 1.0
+    off = max(0.0, off_seconds)
+    if math.isinf(off) or off >= tau_seconds * 8.0:
+        stored = 0.0
+    else:
+        stored = math.exp(-off / tau_seconds)
+    on = max(0.0, on_seconds)
+    return 1.0 - (1.0 - stored) * math.exp(-on / tau_seconds)
+
+
+def projected_linear_rate(rate_f_per_sec: float | None, soak: float) -> float | None:
+    """Straight-line °F/s the ramp is climbing toward.
+
+    A cold sheath has not shown that rate yet. Returns None until the soak is
+    far enough along, and the measured slope itself once the sheath is hot.
+    """
+
+    if rate_f_per_sec is None or rate_f_per_sec < PREDICT_MIN_RATE_F_PER_SEC:
+        return None
+    if soak >= SOAK_FULL:
+        return rate_f_per_sec
+    if soak < SOAK_RAMP_MIN:
+        return None
+    return rate_f_per_sec / soak
+
+
+def seconds_along_coast(
+    temp_f: float,
+    target_f: float,
+    rate_f_per_sec: float | None,
+    tau_seconds: float | None,
+) -> float | None:
+    """Seconds to the target while the rise rate decays as ``exp(-t / tau)``.
+
+    The degrees still to come are ``rate * tau``. Returns None when this coast
+    crests short of the target, or when the rise is not real.
+    """
+
+    if temp_f >= target_f:
+        return 0.0
+    if (
+        rate_f_per_sec is None
+        or rate_f_per_sec < PREDICT_MIN_RATE_F_PER_SEC
+        or tau_seconds is None
+        or tau_seconds <= 0
+    ):
+        return None
+    remaining = rate_f_per_sec * float(tau_seconds)
+    gap = target_f - temp_f
+    if remaining <= gap:
+        return None
+    seconds = -float(tau_seconds) * math.log(1.0 - gap / remaining)
+    return min(PREDICT_MAX_HORIZON_SECONDS, max(0.0, seconds))
+
+
+def tune_coast(
+    learned_f: float | None,
+    learned_seconds: float | None,
+    used_f: float,
+    rate_f_per_sec: float | None,
+    miss_f: float,
+    observed_seconds: float,
+    tau_seconds: float | None = None,
+) -> tuple[float, float | None]:
+    """Learned coast and duration after a calibration landing.
+
+    ``miss_f`` is the crest minus the calibration temperature. Positive means
+    the shutoff was late. The coast that would have landed on that temperature
+    is the coast the prediction used, plus the miss. A fitted time constant is
+    kept when the same rise rate still predicts that corrected coast. Otherwise
+    the duration is the one that makes :func:`predicted_coast_f` return it.
+    With no fit, the time from shutoff to the crest stays the duration.
+    """
+
+    desired = min(EARLY_CUTOFF_MAX_F, max(0.0, float(used_f) + float(miss_f)))
+    fitted = tau_seconds is not None and tau_seconds > 0
+    rate_ok = (
+        rate_f_per_sec is not None
+        and rate_f_per_sec >= PREDICT_MIN_RATE_F_PER_SEC
+        and used_f > 0
+    )
+    if not rate_ok:
+        if fitted:
+            seconds: float | None = float(tau_seconds)
+        elif observed_seconds > 0:
+            seconds = observed_seconds
+        else:
+            seconds = learned_seconds
+        return round(desired, 2), None if seconds is None else round(float(seconds), 2)
+
+    floor = 0.0 if learned_f is None else float(learned_f)
+    if used_f <= floor + 0.05 or desired < floor:
+        floor = desired
+    elif desired > floor * PREDICT_COAST_SCALE_MAX:
+        floor = desired / PREDICT_COAST_SCALE_MAX
+    floor = min(EARLY_CUTOFF_MAX_F, max(0.0, floor))
+    rate = float(rate_f_per_sec)
+    if fitted and abs(predicted_coast_f(floor, float(tau_seconds), rate) - desired) <= 0.05:
+        return round(floor, 2), round(float(tau_seconds), 2)
+    if desired <= 0:
+        fallback = float(tau_seconds) if fitted else learned_seconds
+        return 0.0, None if fallback is None else round(float(fallback), 2)
+    seconds = desired / rate
+    if floor <= 0 or desired > floor * PREDICT_COAST_SCALE_MAX:
+        floor = desired / PREDICT_COAST_SCALE_MAX
+    if floor > desired:
+        floor = desired
+    if fitted and abs(predicted_coast_f(floor, float(tau_seconds), rate) - desired) <= 0.05:
+        seconds = float(tau_seconds)
+    return round(min(EARLY_CUTOFF_MAX_F, floor), 2), round(seconds, 2)
 
 
 def seconds_to_target(
@@ -477,7 +644,18 @@ class Controller:
         # time, including pause, so a test can advance it without sleeping.
         self._predict_clock = 0.0
         self._predict_samples: list[tuple[float, float]] = []
+        # Samples since the SSR opened, cleared when an element turns back on.
+        self._coast_curve: list[tuple[float, float]] = []
+        # Coast and slope from the last shutoff decision, captured while the
+        # sheath on-time is still the one that decision used.
+        self._last_shutoff_coast = 0.0
+        self._last_shutoff_rate: float | None = None
         self._heater_on_for = [0.0] * SLOT_COUNT
+        # Off-time at the moment each SSR last closed. Infinity is a cold start.
+        self._off_when_closed = [math.inf] * SLOT_COUNT
+        # On-time at the moment each SSR last opened, so the sheath can cool
+        # from hot instead of looking cold the instant the element turns off.
+        self._on_when_opened = [0.0] * SLOT_COUNT
         # Powered time not yet written to the element-hour meters.
         self._heater_life_pending = [0.0] * SLOT_COUNT
         # Infinity means the off dwell is already satisfied, so the first
@@ -706,7 +884,9 @@ class Controller:
                 except SettingsError as exc:
                     raise ControllerError(str(exc), 400) from exc
             self._write_pending_target()
-            if "target_temp_f" in patch:
+            # A calibration aims at CALIBRATION_TEMP_F. A target in this
+            # request would replace the setpoint the next real run uses.
+            if kind != "calibration" and "target_temp_f" in patch:
                 try:
                     updated = merge_settings(
                         self.store.get_settings(),
@@ -744,20 +924,26 @@ class Controller:
             self._pulse_until = None
             self._hold_ready = False
             self._clear_predict()
+            self._coast_curve.clear()
             self._live_temps = self.source.read_temperatures(SLOT_COUNT)
             self._sample_climate()
             self._emergency = self._emergency_codes(settings)
             if self._emergency:
                 self._set_heaters([False] * SLOT_COUNT, release_off_dwell=True)
                 raise ControllerError("Emergency stop is active", 409)
-            self._command_heaters(settings)
-            run = self.store.create_run(settings, kind=kind, charge_gallons=gallons)
-            self._run_id = int(run["id"])
+            # Running before the first heater command so a calibration aims at
+            # 120°F on that command, not at the saved run setpoint.
             self._mode = "running"
             self._elapsed = 0.0
             self._since_sample = 0.0
+            self._command_heaters(settings)
+            run_settings = settings
+            if kind == "calibration":
+                run_settings = replace(settings, target_temp_f=int(CALIBRATION_TEMP_F))
+            run = self.store.create_run(run_settings, kind=kind, charge_gallons=gallons)
+            self._run_id = int(run["id"])
             self._record_sample(settings)
-            logger.info("Run %s started at %s°F", self._run_id, settings.target_temp_f)
+            logger.info("Run %s started at %s°F", self._run_id, self._aim_temperature(settings))
             return self._status()
 
     def pause(self) -> dict:
@@ -909,7 +1095,7 @@ class Controller:
         return status_lines(
             mode=self._mode,
             elapsed_seconds=elapsed,
-            target_f=self._target_value(settings),
+            target_f=self._aim_temperature(settings),
             probes=probes,
             heaters=heaters,
             calibrating=self._run_kind == "calibration" and self._mode in ("running", "paused"),
@@ -1057,7 +1243,8 @@ class Controller:
             if found is None:
                 return
             index, temp = found
-            if temp < settings.target_temp_f:
+            aim = self._aim_temperature(settings)
+            if temp < aim:
                 return
             self._cooldown_run_id = self._run_id
             self._cooldown_sensor = index
@@ -1067,13 +1254,13 @@ class Controller:
                 self._run_id,
                 cooldown_status="open",
                 cooldown_seconds=0,
-                cooldown_baseline_f=settings.target_temp_f,
+                cooldown_baseline_f=aim,
                 cooldown_sensor_index=index,
             )
             logger.info(
                 "Run %s reached %s°F; cooldown timing started",
                 self._run_id,
-                settings.target_temp_f,
+                aim,
             )
         self._cooldown_elapsed += dt
         self._cooldown_since_sample += dt
@@ -1168,7 +1355,11 @@ class Controller:
             elapsed_seconds=round(self._cooldown_elapsed, 2),
             temps_f=temps,
             heaters_on=[False] * SLOT_COUNT,
-            target_temp_f=settings.target_temp_f,
+            target_temp_f=(
+                CALIBRATION_TEMP_F
+                if self._run_kind == "calibration"
+                else float(settings.target_temp_f)
+            ),
             phase="cooldown",
         )
         self._log_forecast(settings)
@@ -1262,6 +1453,7 @@ class Controller:
                 continue
             states.append(bool(desired[index]))
         self._set_heaters(states)
+        self._note_coast_curve(settings)
         self._note_coast_open(settings, before, on_for)
 
     def _set_heaters(self, states: list[bool], *, release_off_dwell: bool = False) -> None:
@@ -1274,8 +1466,12 @@ class Controller:
         self._heaters = requested
         for index, on in enumerate(self._heaters):
             if on:
+                if not previous[index]:
+                    self._off_when_closed[index] = self._heater_off_for[index]
                 self._heater_off_for[index] = math.inf
             else:
+                if previous[index]:
+                    self._on_when_opened[index] = self._heater_on_for[index]
                 self._heater_on_for[index] = 0.0
                 # Only the transition into off starts the dwell. Holding an
                 # already-open SSR does not reset the timer. Pause and Stop
@@ -1316,6 +1512,8 @@ class Controller:
                 "below_since": None,
                 "fall_samples": [],
                 "saved_rate": None,
+                "predicted_f": self._last_shutoff_coast,
+                "rate_f_per_sec": self._last_shutoff_rate,
             }
 
     def _advance_coast(self, settings: Settings) -> None:
@@ -1388,9 +1586,18 @@ class Controller:
         if self._run_id is None or watch.get("locked"):
             return
         peak = float(watch["peak_average"])
-        coast = min(EARLY_CUTOFF_MAX_F, max(0.0, round(peak - watch["temp_at_open"], 2)))
-        seconds = round(max(0.0, float(watch["peak_elapsed"]) - watch["opened_elapsed"]), 2)
-        settled = peak >= settings.target_temp_f - CALIBRATION_LAND_F
+        aim = CALIBRATION_TEMP_F
+        observed = round(max(0.0, float(watch["peak_elapsed"]) - watch["opened_elapsed"]), 2)
+        coast, seconds = tune_coast(
+            settings.learned_coast_f,
+            settings.learned_coast_seconds,
+            float(watch.get("predicted_f") or 0.0),
+            watch.get("rate_f_per_sec"),
+            peak - aim,
+            observed,
+            coast_tau_seconds(watch["samples"]),
+        )
+        settled = peak >= aim - CALIBRATION_LAND_F
         watch["locked"] = True
         self._coast_f = coast
         self._coast_seconds = seconds
@@ -1436,6 +1643,7 @@ class Controller:
     def _clear_predict(self) -> None:
         self._predict_clock = 0.0
         self._predict_samples.clear()
+        self._coast_curve.clear()
 
     def _note_predict(self, dt: float) -> None:
         """Append the control probe and drop readings older than the window."""
@@ -1453,17 +1661,92 @@ class Controller:
             self._predict_samples.pop(0)
 
     def _shutoff_coast(self, settings: Settings) -> float:
-        """Degrees early to open the SSR on a normal run.
+        """Degrees early to open the SSR.
 
-        Calibration does not use this. A short window leaves the learned coast
-        unchanged so one jumped reading cannot move the shutoff.
+        A short window leaves the learned coast unchanged so one jumped reading
+        cannot move the shutoff. While the sheath is still heating, only the
+        soaked fraction of that coast is used. A hot sheath uses the full
+        prediction, widened when the live rise is faster.
         """
 
-        return predicted_coast_f(
-            settings.learned_coast_f,
-            settings.learned_coast_seconds,
-            slope_f_per_sec(self._predict_samples),
+        rate = slope_f_per_sec(self._predict_samples)
+        tau = settings.learned_coast_seconds
+        soak = 1.0 if tau is None or tau <= 0 else self._sheath_soak(settings)
+        if soak < SOAK_FULL:
+            coast = predicted_coast_f(settings.learned_coast_f, tau, None) * soak
+        else:
+            coast = predicted_coast_f(settings.learned_coast_f, tau, rate)
+        self._last_shutoff_coast = coast
+        self._last_shutoff_rate = rate
+        return coast
+
+    def _sheath_soak(self, settings: Settings) -> float:
+        """Hottest enabled sheath that is currently on, else the hottest enabled one."""
+
+        tau = settings.learned_coast_seconds
+        if tau is None or tau <= 0:
+            return 1.0
+        enabled = [index for index in range(SLOT_COUNT) if settings.heaters[index].enabled]
+        if not enabled:
+            return 1.0
+        powered = [index for index in enabled if self._heaters[index]] or enabled
+        return max(self._one_sheath_soak(index, tau) for index in powered)
+
+    def _one_sheath_soak(self, index: int, tau: float) -> float:
+        if self._heaters[index]:
+            return sheath_soak(self._off_when_closed[index], self._heater_on_for[index], tau)
+        hot = sheath_soak(self._off_when_closed[index], self._on_when_opened[index], tau)
+        off = self._heater_off_for[index]
+        if math.isinf(off):
+            return 0.0
+        return hot * math.exp(-max(0.0, off) / tau)
+
+    def _elements_on(self, settings: Settings) -> bool:
+        return any(
+            self._heaters[index] and settings.heaters[index].enabled for index in range(SLOT_COUNT)
         )
+
+    def _note_coast_curve(self, settings: Settings) -> None:
+        """Remember the rise after the SSR opens, and drop it when heat returns."""
+
+        if self._elements_on(settings):
+            self._coast_curve.clear()
+            return
+        found = self._current_control(settings)
+        if found is None:
+            return
+        self._coast_curve.append((self._predict_clock, found[1]))
+        horizon = self._predict_clock - COAST_WATCH_MAX_SECONDS
+        while len(self._coast_curve) >= 2 and self._coast_curve[1][0] <= horizon:
+            self._coast_curve.pop(0)
+
+    def _coast_time_constant(self, settings: Settings) -> float | None:
+        """Fitted decay from this shutoff, or the learned duration when it has not bent yet."""
+
+        samples: list[tuple[float, float]] = []
+        watch = self._coast_watch
+        if watch is not None and watch.get("samples"):
+            samples = watch["samples"]
+        elif self._coast_curve:
+            samples = self._coast_curve
+        fitted = coast_tau_seconds(samples) if len(samples) >= PREDICT_MIN_SAMPLES * 2 else None
+        if fitted is not None:
+            return fitted
+        learned = settings.learned_coast_seconds
+        if learned is None or learned <= 0:
+            return None
+        return float(learned)
+
+    def _aim_temperature(self, settings: Settings) -> float:
+        """Temperature the heaters are aiming at.
+
+        A calibration always aims at 120°F. The dial and the saved setpoint
+        still belong to the next real run.
+        """
+
+        if self._run_kind == "calibration" and self._mode in ("running", "paused"):
+            return CALIBRATION_TEMP_F
+        return float(self._target_value(settings))
 
     def _forecast(self, settings: Settings) -> dict[str, float | None]:
         """Time to the target while rising, and time to cool while falling."""
@@ -1476,27 +1759,41 @@ class Controller:
             return empty
         _, temp = found
         rate = slope_f_per_sec(self._predict_samples)
-        coast = self._shutoff_coast(settings)
-        heating = any(
-            self._heaters[index] and settings.heaters[index].enabled for index in range(SLOT_COUNT)
-        )
-        rising = (
-            rate is not None
-            and rate >= PREDICT_MIN_RATE_F_PER_SEC
-            and temp < float(settings.target_temp_f)
-        )
+        aim = self._aim_temperature(settings)
+        heating = self._elements_on(settings)
+        rising = rate is not None and rate >= PREDICT_MIN_RATE_F_PER_SEC and temp < aim
         if heating or rising:
-            return {
-                "seconds_to_target": _forecast_seconds(
-                    seconds_to_target(
+            if heating:
+                use_rate = rate
+                if settings.learned_coast_seconds:
+                    use_rate = projected_linear_rate(rate, self._sheath_soak(settings))
+                seconds = seconds_to_target(
+                    temp,
+                    aim,
+                    self._shutoff_coast(settings),
+                    use_rate,
+                    settings.learned_coast_f,
+                    settings.learned_coast_seconds,
+                )
+            else:
+                tau = self._coast_time_constant(settings)
+                if tau is None:
+                    seconds = seconds_to_target(
                         temp,
-                        float(settings.target_temp_f),
-                        coast,
+                        aim,
+                        predicted_coast_f(
+                            settings.learned_coast_f,
+                            settings.learned_coast_seconds,
+                            rate,
+                        ),
                         rate,
                         settings.learned_coast_f,
                         settings.learned_coast_seconds,
                     )
-                ),
+                else:
+                    seconds = seconds_along_coast(temp, aim, rate, tau)
+            return {
+                "seconds_to_target": _forecast_seconds(seconds),
                 "seconds_to_cooldown": None,
             }
         return {
@@ -1617,19 +1914,20 @@ class Controller:
         current = list(self._heaters[:SLOT_COUNT])
         while len(current) < SLOT_COUNT:
             current.append(False)
-        # A normal run stops at the learned coast, or sooner when the rise is
-        # fast. Calibration heats until the probe is a little above the target,
-        # so the still can actually reach it. Prediction stays out of that watch.
+        # Calibration uses the same early cutoff as a run, aimed at 120°F.
+        # It does not pulse: a pulse would heat through the landing.
         if self._run_kind == "calibration":
-            cutoff = -CALIBRATION_ABOVE_F
+            cutoff = self._shutoff_coast(settings)
+            target = CALIBRATION_TEMP_F
         elif (pulse := self._hold_pulse(settings)) is not None:
             return self._sustain_states(settings, primary, pulse)
         else:
             cutoff = self._shutoff_coast(settings)
+            target = float(settings.target_temp_f)
         return [
             heater_should_be_on(
                 primary,
-                settings.target_temp_f,
+                target,
                 bool(current[index]),
                 early_cutoff_f=cutoff,
             )
@@ -1650,7 +1948,7 @@ class Controller:
             elapsed_seconds=round(self._elapsed, 2),
             temps_f=temps,
             heaters_on=heaters,
-            target_temp_f=settings.target_temp_f,
+            target_temp_f=self._aim_temperature(settings),
         )
         self._log_forecast(settings)
 
@@ -1686,7 +1984,7 @@ class Controller:
                 self._cooldown_elapsed if self._mode == "cooling" else self._elapsed,
                 1,
             ),
-            "target_temp_f": self._target_value(settings),
+            "target_temp_f": int(self._aim_temperature(settings)),
             **self._forecast(settings),
             "learned_coast_f": settings.learned_coast_f,
             "learned_coast_seconds": settings.learned_coast_seconds,

@@ -37,7 +37,7 @@ function coastText(status) {
     if (status.calibration_step === 'falling') {
       return withEta('Peak saved. Measuring how fast the pot cools.')
     }
-    return withEta('Heating a little past the target. Then Brewski watches the climb to its peak and how fast the pot cools.')
+    return withEta('Heating toward 120°F. The elements turn off early so the crest can land there, then Brewski watches that climb and how fast the pot cools.')
   }
   if (status.learned_coast_f == null) {
     return withEta('Calibrate with water in the pot. Runs stay locked until that measurement is saved.')
@@ -285,7 +285,7 @@ export function mountDashboard(root) {
     if (busy) return
     busy = true
     try {
-      const body = { target_temp_f: targetValue(), kind: 'calibration' }
+      const body = { kind: 'calibration' }
       const raw = document.getElementById('charge-gallons').value.trim()
       if (raw !== '') body.charge_gallons = Number(raw)
       await api.start(body)
@@ -507,7 +507,10 @@ export function mountDashboard(root) {
       cabinetOn ? 'Cabinet and heaters' : 'Heaters',
     )
     const target = document.getElementById('target-input')
-    if (document.activeElement !== target) target.value = String(Math.round(Number(status.target_temp_f)))
+    // Status reports 120°F while calibrating. That is the aim, not the setpoint.
+    if (status.run_kind !== 'calibration' && document.activeElement !== target) {
+      target.value = String(Math.round(Number(status.target_temp_f)))
+    }
     syncTargetWarning()
     calibrated = status.learned_coast_f != null
     const emergency = (status.emergency || []).map((item) => item.code).join(',')

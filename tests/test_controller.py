@@ -1,21 +1,38 @@
+import math
+
 import pytest
 
 from brewski.controller import (
-    CALIBRATION_ABOVE_F,
+    CALIBRATION_TEMP_F,
     COOLDOWN_STABLE_SECONDS,
     PREDICT_MAX_HORIZON_SECONDS,
     Controller,
     ControllerError,
+    coast_tau_seconds,
     heater_should_be_on,
     predicted_coast_f,
+    projected_linear_rate,
     reheat_temperature,
+    seconds_along_coast,
     seconds_to_cooldown,
     seconds_to_target,
+    sheath_soak,
     slope_f_per_sec,
     sustain_pulse_seconds,
+    tune_coast,
 )
 from brewski.sources.dummy import DummySource
 from brewski.store import merge_settings
+
+
+def _soak_sheath(controller):
+    """Mark the elements hot without adding rise samples.
+
+    A following one-tick jump is not long enough to become a slope, so the
+    shutoff stays on the learned coast.
+    """
+
+    controller._heater_on_for = [10_000.0, 10_000.0]
 
 
 class StaticSource:
@@ -77,6 +94,7 @@ def test_deadband_holds_heater_state_around_the_early_cutoff(store):
     source = StaticSource([100.0, 90.0])
     controller = Controller(store, source)
     controller.start()
+    _soak_sheath(controller)
     assert source.heaters[:2] == [True, True]
 
     # Still short of the cutoff. Target is 165°F, so power stays on below 162°F.
@@ -99,6 +117,53 @@ def test_deadband_holds_heater_state_around_the_early_cutoff(store):
     assert source.heaters[:2] == [True, True]
 
 
+def test_a_slowing_rise_has_a_time_constant_and_the_forecast_follows_it():
+    # 0.5°F/s decaying with tau 10s. Remaining degrees are rate * tau.
+    samples = []
+    for second in range(25):
+        samples.append((float(second), 100.0 + 5.0 * (1.0 - math.exp(-second / 10.0))))
+    tau = coast_tau_seconds(samples)
+    assert tau == pytest.approx(10.0, rel=0.15)
+    assert coast_tau_seconds([(0, 100), (8, 108), (16, 116)]) is None
+    assert seconds_along_coast(162, 165, 0.5, 10) == pytest.approx(-10 * math.log(1 - 3 / 5))
+    assert seconds_along_coast(160, 165, 0.5, 10) is None
+    assert sheath_soak(float("inf"), 0, 8) == 0
+    assert sheath_soak(float("inf"), 8, 8) == pytest.approx(1 - math.exp(-1))
+    assert projected_linear_rate(0.2, 0.5) == pytest.approx(0.4)
+    assert projected_linear_rate(0.2, 0.1) is None
+    assert projected_linear_rate(0.2, 0.95) == pytest.approx(0.2)
+
+
+def test_the_landing_miss_moves_the_coast_the_prediction_will_use():
+    # On the floor, 2°F past 120°F adds 2°F. The same slow rate still predicts it.
+    coast, seconds = tune_coast(5, 8, 5, 0.1, 2, 20, tau_seconds=8)
+    assert coast == pytest.approx(7)
+    assert predicted_coast_f(coast, seconds, 0.1) == pytest.approx(7)
+    # Short of 120°F subtracts.
+    short, short_seconds = tune_coast(5, 8, 5, 0.1, -1.5, 20, tau_seconds=8)
+    assert short == pytest.approx(3.5)
+    assert predicted_coast_f(short, short_seconds, 0.1) == pytest.approx(3.5)
+    # No fit and no rate yet: the overshoot is the first coast, timed to the crest.
+    first, first_seconds = tune_coast(None, None, 0, None, 12, 40, tau_seconds=None)
+    assert first == pytest.approx(12)
+    assert first_seconds == pytest.approx(40)
+    # A fast rise keeps the next prediction, at that same rate, on the corrected coast.
+    fast, fast_seconds = tune_coast(3, 8, 8, 1.0, 2, 10, tau_seconds=4)
+    assert predicted_coast_f(fast, fast_seconds, 1.0) == pytest.approx(10, abs=0.02)
+
+
+def test_a_cold_sheath_waits_longer_to_open_the_ssr(store):
+    source = StaticSource([100.0, 90.0])
+    controller = Controller(store, source)
+    controller.start()
+    source.temps = [162.0, 90.0]
+    controller.tick(1)
+    assert source.heaters[:2] == [True, True]
+    _soak_sheath(controller)
+    controller.tick(1)
+    assert source.heaters[:2] == [False, False]
+
+
 def test_a_short_window_does_not_move_the_learned_coast():
     # 3°F over 8s implies 0.375°F/s. One fast jump is not a window, so the
     # shutoff stays at 162°F.
@@ -114,6 +179,7 @@ def test_a_fast_rise_opens_the_ssr_before_the_learned_coast(store):
     source = StaticSource([140.0, 90.0])
     controller = Controller(store, source)
     controller.start()
+    _soak_sheath(controller)
     for step in range(10):
         source.temps = [140.0 + step, 90.0]
         controller.tick(1)
@@ -131,6 +197,7 @@ def test_a_flat_slope_does_not_heat_past_the_learned_coast(store):
     source = StaticSource([160.0, 90.0])
     controller = Controller(store, source)
     controller.start()
+    _soak_sheath(controller)
     for _ in range(10):
         controller.tick(1)
     assert source.heaters[:2] == [True, True]
@@ -199,12 +266,17 @@ def test_resume_does_not_wait_out_the_minimum_off_time(store):
     assert source.heaters[:2] == [True, True]
 
 
-def _open_soaked_calibration(controller, source, target=165.0):
-    controller.start({"kind": "calibration", "charge_gallons": 5, "target_temp_f": target})
-    controller.tick(30)
-    source.temps = [target, 150.0]
-    controller.tick(1)
-    opened = target + CALIBRATION_ABOVE_F
+def _open_soaked_calibration(controller, source):
+    """Open the SSR at 120°F minus the learned coast, on a flat slope."""
+
+    controller.start({"kind": "calibration", "charge_gallons": 5, "target_temp_f": 190})
+    _soak_sheath(controller)
+    held = CALIBRATION_TEMP_F - 3.1
+    for _ in range(16):
+        source.temps = [held, 150.0]
+        controller.tick(1)
+    assert source.heaters[:2] == [True, True]
+    opened = CALIBRATION_TEMP_F - 3.0
     source.temps = [opened, 150.0]
     controller.tick(1)
     assert source.heaters[:2] == [False, False]
@@ -215,6 +287,9 @@ def test_calibration_records_the_crest_and_then_the_cooling_rate(store):
     source = StaticSource([100.0, 90.0])
     controller = Controller(store, source)
     opened = _open_soaked_calibration(controller, source)
+    assert store.get_settings().target_temp_f == 165
+    assert controller.status()["target_temp_f"] == CALIBRATION_TEMP_F
+    assert store.get_run(controller.status()["run_id"])["target_temp_f"] == CALIBRATION_TEMP_F
     assert controller.status()["calibration_step"] == "coasting"
     assert controller._panel_lines(store.get_settings())[0].startswith("Coasting:")
 
@@ -291,6 +366,7 @@ def test_a_cooling_rate_pulses_near_the_target_instead_of_the_deadband(store):
     source = StaticSource([100.0, 90.0])
     controller = Controller(store, source)
     controller.start()
+    _soak_sheath(controller)
     controller.tick(2)
     source.temps = [150.0, 90.0]
     controller.tick(1)
@@ -333,6 +409,7 @@ def test_the_climb_coasts_from_the_learned_cutoff_instead_of_pulsing(store):
     source = StaticSource([100.0, 90.0])
     controller = Controller(store, source)
     controller.start()
+    _soak_sheath(controller)
     controller.tick(2)
 
     source.temps = [150.0, 90.0]
@@ -360,6 +437,7 @@ def test_the_climb_coasts_from_the_learned_cutoff_instead_of_pulsing(store):
     source.temps = [140.0, 90.0]
     controller.tick(2)
     assert source.heaters[:2] == [True, True]
+    _soak_sheath(controller)
     source.temps = [158.0, 90.0]
     controller.tick(1)
     assert source.heaters[:2] == [False, False]
@@ -369,8 +447,11 @@ def test_calibration_keeps_running_while_the_average_is_still_changing(store):
     source = StaticSource([100.0, 90.0])
     controller = Controller(store, source)
     controller.start({"kind": "calibration", "target_temp_f": 165})
-    controller.tick(30)
-    source.temps = [165.0 + CALIBRATION_ABOVE_F, 150.0]
+    _soak_sheath(controller)
+    for _ in range(16):
+        source.temps = [CALIBRATION_TEMP_F - 3.1, 150.0]
+        controller.tick(1)
+    source.temps = [CALIBRATION_TEMP_F - 3.0, 150.0]
     controller.tick(1)
     for step in range(1, 16):
         source.temps = [166.0 + step * 0.5, 150.0]
@@ -427,7 +508,7 @@ def test_a_short_pulse_does_not_teach_the_coast(store):
     source = StaticSource([100.0, 90.0])
     controller = Controller(store, source)
     controller.start({"kind": "calibration"})
-    source.temps = [165.0 + CALIBRATION_ABOVE_F, 90.0]
+    source.temps = [CALIBRATION_TEMP_F + 1.0, 90.0]
     controller.tick(1)
     assert source.heaters[:2] == [False, False]
     source.temps = [164.0, 90.0]

@@ -32,7 +32,6 @@ def test_default_settings_are_two_heaters_and_two_sensors(store):
     assert settings.cabinet_limit_f == 170
     assert settings.heater_min_on_seconds == 1.0
     assert settings.heater_min_off_seconds == 1.0
-    assert settings.early_cutoff_f == 3.0
     assert settings.update_source == "main"
     assert settings.learned_coast_f is None
     assert settings.learned_cooldown_f_per_min is None
@@ -163,12 +162,8 @@ def test_settings_validation_rejects_bad_values(store):
     with pytest.raises(SettingsError, match="heater_min_off_seconds must be between 0.5 and 60"):
         merge_settings(current, {"heater_min_off_seconds": 0.49})
     assert merge_settings(current, {"heater_min_off_seconds": 2}).heater_min_off_seconds == 2.0
-    with pytest.raises(SettingsError, match="early_cutoff_f must be between 0 and 20"):
-        merge_settings(current, {"early_cutoff_f": -0.1})
-    with pytest.raises(SettingsError, match="early_cutoff_f must be between 0 and 20"):
-        merge_settings(current, {"early_cutoff_f": 20.01})
-    assert merge_settings(current, {"early_cutoff_f": 0}).early_cutoff_f == 0.0
-    assert merge_settings(current, {"early_cutoff_f": 2.5}).early_cutoff_f == 2.5
+    with pytest.raises(SettingsError, match="Unknown settings: early_cutoff_f"):
+        merge_settings(current, {"early_cutoff_f": 2.5})
 
 
 def test_probe_fields_default_to_a_two_wire_pt100(store):
@@ -266,7 +261,6 @@ def test_older_databases_keep_counts_and_gain_default_pins(tmp_path):
     assert settings.target_temp_f == 165
     assert settings.heater_min_on_seconds == 1.0
     assert settings.heater_min_off_seconds == 1.0
-    assert settings.early_cutoff_f == 3.0
     assert settings.update_source == "main"
     assert settings.learned_coast_f is None
     assert settings.learned_cooldown_f_per_min is None

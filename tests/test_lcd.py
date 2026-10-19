@@ -66,6 +66,16 @@ def test_two_probe_line_and_heater_padding():
     assert len(fault[2]) == COLUMNS
 
 
+def test_an_eta_shares_the_target_line():
+    heating = _screen(eta_seconds=12 * 60 + 40, eta_kind="target")
+    assert heating[1] == "165 F           ~12m"
+    assert len(heating[1]) == COLUMNS
+    cooling = _screen(mode="cooling", eta_seconds=8 * 60, eta_kind="cool", probes=[("Boiler", 150.0)])
+    assert cooling[1] == "165 F        cool 8m"
+    assert len(cooling[1]) == COLUMNS
+    assert _screen()[1] == "Target:        165 F"
+
+
 def test_shorter_target_keeps_the_degree_flush_right():
     lines = _screen(target_f=90, probes=[("Boiler", 90.0)])
     assert lines[1] == "Target:         90 F"

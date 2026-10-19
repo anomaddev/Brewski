@@ -155,7 +155,7 @@ def test_reset_clears_runs_and_restores_defaults(client, controller):
     assert reset.get_json()["target_temp_f"] == 165
     assert reset.get_json()["heater_min_on_seconds"] == 1.0
     assert reset.get_json()["heater_min_off_seconds"] == 1.0
-    assert reset.get_json()["early_cutoff_f"] == 3.0
+    assert "early_cutoff_f" not in reset.get_json()
     assert reset.get_json()["update_source"] == "main"
     assert reset.get_json()["heater_names"] == ["Heater 1", "Heater 2"]
     assert reset.get_json()["sensor_names"] == ["Boiler", "Column"]
@@ -244,8 +244,7 @@ def test_invalid_settings_and_transitions(client):
     assert client.put("/api/settings", json={"target_temp_f": 10}).status_code == 400
     assert client.put("/api/settings", json={"heater_min_on_seconds": 0.4}).status_code == 400
     assert client.put("/api/settings", json={"heater_min_off_seconds": 0.4}).status_code == 400
-    assert client.put("/api/settings", json={"early_cutoff_f": 21}).status_code == 400
-    assert client.put("/api/settings", json={"early_cutoff_f": 2.5}).get_json()["early_cutoff_f"] == 2.5
+    assert client.put("/api/settings", json={"early_cutoff_f": 2.5}).status_code == 400
     saved = client.put("/api/settings", json={"heater_min_on_seconds": 0.5})
     assert saved.status_code == 200
     assert saved.get_json()["heater_min_on_seconds"] == 0.5
@@ -337,3 +336,48 @@ def test_apply_is_refused_when_nothing_is_newer(client, monkeypatch):
     )
     refused = client.post("/api/update")
     assert refused.status_code == 409
+
+
+def test_apply_is_refused_while_a_run_is_open(client, monkeypatch):
+    monkeypatch.setattr("brewski.updates.apply_supported", lambda: True)
+    monkeypatch.setattr(
+        "brewski.updates.check_release",
+        lambda **_kwargs: ReleaseInfo(
+            current="0.2.0",
+            latest="v0.3.0",
+            available=True,
+            reachable=True,
+        ),
+    )
+    assert client.post("/api/runs/start", json={}).status_code == 200
+    refused = client.post("/api/update")
+    assert refused.status_code == 409
+    assert "Stop the run" in refused.get_json()["error"]
+
+
+def test_reboot_asks_the_pi_to_restart(client, monkeypatch):
+    called = []
+    monkeypatch.setattr("brewski.controller.request_reboot", lambda: called.append(True))
+    response = client.post("/api/reboot")
+    assert response.status_code == 202
+    assert response.get_json()["rebooting"] is True
+    assert called == [True]
+
+
+def test_reboot_is_refused_while_a_run_is_open(client, monkeypatch):
+    called = []
+    monkeypatch.setattr("brewski.controller.request_reboot", lambda: called.append(True))
+    assert client.post("/api/runs/start", json={}).status_code == 200
+    refused = client.post("/api/reboot")
+    assert refused.status_code == 409
+    assert called == []
+
+
+def test_reboot_reports_when_the_machine_cannot(client, monkeypatch):
+    def refuse():
+        raise OSError("nope")
+
+    monkeypatch.setattr("brewski.controller.request_reboot", refuse)
+    response = client.post("/api/reboot")
+    assert response.status_code == 500
+    assert "reboot" in response.get_json()["error"].lower()

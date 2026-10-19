@@ -1,6 +1,6 @@
 import { api } from '../api.js'
 import { aboveBoiling, formatHours } from '../format.js'
-import { busFields, panelFields, readGpio, syncI2cLabels, validatePins, writeGpio } from '../gpio.js'
+import { busFields, markPinClashes, panelFields, pinSelect, readGpio, syncI2cLabels, validatePins, writeGpio } from '../gpio.js'
 import { setSourceBadge } from '../layout.js'
 import { openPath } from '../router.js'
 
@@ -13,7 +13,7 @@ export function mountSettings(root) {
         <h1>Settings</h1>
       </header>
       <p class="lock-banner" id="lock-banner" hidden>
-        Heater, probe, and GPIO setup is locked while a run is open. The target, the cabinet limit, the early cutoff, the minimum on and off times, and the update source can still be changed.
+        Heater, probe, and GPIO setup is locked while a run is open. The target, the cabinet limit, the minimum on and off times, and the update source can still be changed.
       </p>
       <div class="settings-top">
         <section class="dashboard-card settings-card" aria-labelledby="control-title">
@@ -24,8 +24,9 @@ export function mountSettings(root) {
               {
                 lead: 'Compared with the first enabled probe.',
                 rows: [
-                  ['Off early', 'By the cutoff below'],
-                  ['Before cal.', 'Back on 2°F under that cutoff'],
+                  ['Range', '90–240°F'],
+                  ['Shutoff', 'Measured coast, sooner if the rise is fast'],
+                  ['No cool rate', 'Back on 2°F under that coast'],
                   ['After cal.', 'Pulses near the target'],
                 ],
               },
@@ -35,25 +36,12 @@ export function mountSettings(root) {
               </label>`,
             )}
             ${settingRow(
-              'Early cutoff',
-              {
-                lead: 'Power drops this far before the target so residual heat finishes the rise.',
-                rows: [
-                  ['3°F', 'Starting point for a small still'],
-                  ['0', 'Wait until the probe hits the target'],
-                  ['After cal.', 'Replaced by the measured coast'],
-                ],
-              },
-              `<label class="field target-field-setting">Degrees below target (°F)
-                <input name="early_cutoff_f" id="early-cutoff" type="number" min="0" max="20" step="0.5" inputmode="decimal" required />
-              </label>`,
-            )}
-            ${settingRow(
               'Cabinet limit',
               {
                 lead: 'The HTS221 stops the heaters and refuses Start above this.',
                 rows: [
-                  ['170°F', 'Default'],
+                  ['Range', '100–200°F'],
+                  ['Default', '170°F'],
                   ['Humidity', 'Shown. Does not trip the stop'],
                   ['HTS221 off', 'Interlock is off'],
                 ],
@@ -66,7 +54,10 @@ export function mountSettings(root) {
               'Minimum on time',
               {
                 lead: 'A heater stays on at least this long.',
-                rows: [['Pause, Stop', 'Still turn the heaters off now']],
+                rows: [
+                  ['Range', '0.5–60 s'],
+                  ['Pause, Stop', 'Still turn the heaters off now'],
+                ],
               },
               `<label class="field target-field-setting">Seconds
                 <input name="heater_min_on_seconds" id="heater-min-on" type="number" min="0.5" max="60" step="0.1" inputmode="decimal" required />
@@ -77,7 +68,7 @@ export function mountSettings(root) {
               {
                 lead: 'A heater stays off at least this long so the SSR does not chatter.',
                 rows: [
-                  ['0.5–2 s', 'Enough for a zero-crossing SSR'],
+                  ['Range', '0.5–60 s'],
                   ['Pause, Stop', 'Still turn the heaters off now'],
                 ],
               },
@@ -87,18 +78,15 @@ export function mountSettings(root) {
             )}
           </div>
         </section>
-        <section class="dashboard-card settings-card" aria-labelledby="software-title">
-          <h2 class="card-title" id="software-title">Software</h2>
-          <div class="setting-row source-row">
-            <div class="setting-copy">
-              <h3>Update source${tip({
-                lead: 'Used by Check for Update and the boot prompt.',
-                rows: [
-                  ['Main', 'Latest published release'],
-                  ['Beta', 'Latest commit on beta'],
-                ],
-              })}</h3>
-            </div>
+        <div class="settings-stack">
+          <section class="dashboard-card settings-card" aria-labelledby="software-title">
+            <h2 class="card-title with-tip" id="software-title">Software${tip({
+              lead: 'Used by Check for Update and the boot prompt. Save settings before checking.',
+              rows: [
+                ['Main', 'Latest published release'],
+                ['Beta', 'Latest commit on beta'],
+              ],
+            })}</h2>
             <div class="source-choice" role="radiogroup" aria-label="Update source">
               <label>Main
                 <input type="radio" name="update_source" value="main" checked />
@@ -107,11 +95,31 @@ export function mountSettings(root) {
                 <input type="radio" name="update_source" value="beta" />
               </label>
             </div>
-          </div>
-        </section>
+          </section>
+          <section class="dashboard-card settings-card" aria-labelledby="system-title">
+            <h2 class="card-title" id="system-title">System</h2>
+            <dl class="about-list">
+              <div><dt>Version</dt><dd data-about-version>—</dd></div>
+              <div><dt>Controller</dt><dd data-about-source>—</dd></div>
+            </dl>
+            <p class="about-line">Local web controller for this still.</p>
+            <div class="setting-list system-actions-list">
+              <div class="setting-row">
+                <div class="setting-copy">
+                  <h3>Check for Update</h3>
+                  <p class="help" id="update-result"></p>
+                </div>
+                <div class="system-actions">
+                  <button class="action-btn start-btn" type="button" id="check-update">Check</button>
+                  <button class="action-btn start-btn" type="button" id="apply-update" hidden>Update</button>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
       </div>
       <section class="dashboard-card settings-card">
-        <h2 class="card-title">Devices</h2>
+        <h2 class="card-title devices-title">Devices</h2>
         <div class="device-columns">
           <section class="device-column">
             <h3 class="column-title">Heaters${tip({
@@ -142,56 +150,30 @@ export function mountSettings(root) {
         </div>
       </section>
       <section class="dashboard-card settings-card">
-        <h2 class="card-title with-tip">Wiring${tip({
-          lead: 'Copied onto each run when it starts.',
-          rows: [
-            ['Copied', 'Names, pins, RTD, wires, reference'],
-            ['Pi', 'The controller drives these pins'],
-            ['Dev', 'The dummy source ignores them'],
-            ['Heaters', 'BCM 12 and 16'],
-            ['Probes', '2-wire PT100, 430 Ω'],
-          ],
-        })}</h2>
-        <h3 class="column-title">Panel${tip({
-          lead: 'Encoder, buttons, and LED relays.',
-          rows: [
-            ['Encoder', 'BCM 27 and 22'],
-            ['Buttons', 'BCM 5 and 6'],
-            ['Start LED', 'BCM 24'],
-            ['Stop LED', 'BCM 23'],
-          ],
-        })}</h3>
+        <h2 class="card-title wiring-title">Components</h2>
+        <h3 class="column-title">Panel</h3>
         ${panelFields()}
         <h3 class="column-title wiring-subtitle">SPI and I2C${tip({
           lead: 'Shared buses. Every pin on this page is unique.',
           rows: [
             ['SPI', 'CLK 11, SDO 9, SDI 10'],
             ['I2C', 'SDA 2, SCL 3'],
-            ['HTS221 off', 'Cabinet interlock is off'],
-            ['LCD off', 'Display stays closed'],
           ],
         })}</h3>
         ${busFields()}
       </section>
-      <div class="dashboard-card settings-save">
-        <p class="form-error" id="settings-error" hidden></p>
-        <p class="saved" id="settings-saved" hidden>Saved</p>
-        <div class="status-actions">
-          <button class="action-btn start-btn" type="submit">Save settings</button>
+      <div class="settings-footer">
+        <div class="settings-footer-actions">
+          <button class="action-btn ghost-btn" type="button" id="reboot-pi">Reboot</button>
+          <button class="action-btn stop-btn" type="button" id="reset-data">Reset data</button>
         </div>
+        <div class="settings-footer-status">
+          <p class="form-error" id="settings-error" hidden></p>
+          <p class="form-error" id="reboot-result"></p>
+          <p class="saved" id="settings-saved" hidden>Saved</p>
+        </div>
+        <button class="action-btn start-btn" type="submit">Save</button>
       </div>
-      <section class="dashboard-card reset-panel">
-        <h2 class="card-title with-tip">Data${tip({
-          lead: 'Erases history and restores defaults. This cannot be undone.',
-          rows: [
-            ['Kept', 'Element hours'],
-            ['Restored', 'Target, devices, pins, source'],
-            ['Heaters', 'Turn off'],
-            ['Dev', 'Pot returns to room temperature'],
-          ],
-        })}</h2>
-        <button class="action-btn stop-btn" type="button" id="reset-data">Reset all data</button>
-      </section>
     </form>
   `
 
@@ -215,11 +197,15 @@ export function mountSettings(root) {
   function applyLock(isLocked) {
     locked = isLocked
     document.getElementById('lock-banner').hidden = !isLocked
+    const reboot = document.getElementById('reboot-pi')
+    if (reboot) reboot.disabled = isLocked
+    const apply = document.getElementById('apply-update')
+    if (apply && !apply.hidden) apply.disabled = isLocked
     for (const button of form.querySelectorAll('[data-replace-heater]')) {
       button.disabled = isLocked
     }
     for (const input of form.querySelectorAll(
-      'input:not([name="target_temp_f"]):not([name="cabinet_limit_f"]):not([name="heater_min_on_seconds"]):not([name="heater_min_off_seconds"]):not([name="early_cutoff_f"]):not([name="update_source"]), select',
+      'input:not([name="target_temp_f"]):not([name="cabinet_limit_f"]):not([name="heater_min_on_seconds"]):not([name="heater_min_off_seconds"]):not([name="update_source"]), select',
     )) {
       input.disabled = isLocked
     }
@@ -268,6 +254,7 @@ export function mountSettings(root) {
 
   form.addEventListener('change', (event) => {
     const name = event.target.name || ''
+    if (event.target.closest('.gpio-field')) markPinClashes(form)
     const rtd = name.match(/^sensor_rtd_(\d+)$/)
     if (rtd) applyStockReference(form, Number(rtd[1]))
     if (name.startsWith('i2c_') && event.target.type === 'checkbox') syncI2cLabels(form)
@@ -311,6 +298,60 @@ export function mountSettings(root) {
     }
   })
 
+  document.getElementById('check-update')?.addEventListener('click', async () => {
+    const button = document.getElementById('check-update')
+    const apply = document.getElementById('apply-update')
+    const result = document.getElementById('update-result')
+    button.disabled = true
+    apply.hidden = true
+    result.textContent = 'Checking...'
+    try {
+      const update = await api.updateStatus()
+      if (stopped) return
+      result.textContent = describeUpdate(update)
+      const canInstall = update.available && update.reachable && update.apply_supported
+      apply.hidden = !canInstall
+      apply.disabled = locked || !canInstall
+    } catch (error) {
+      if (stopped) return
+      result.textContent = error.message
+    } finally {
+      if (!stopped) button.disabled = false
+    }
+  })
+
+  document.getElementById('apply-update')?.addEventListener('click', async () => {
+    if (!window.confirm('Install this update? Brewski restarts when it finishes.')) return
+    const apply = document.getElementById('apply-update')
+    const result = document.getElementById('update-result')
+    apply.disabled = true
+    window.dispatchEvent(new CustomEvent('brewski-updating'))
+    try {
+      await api.applyUpdate()
+    } catch (error) {
+      window.dispatchEvent(new CustomEvent('brewski-update-cancel'))
+      if (stopped) return
+      result.textContent = error.message
+      apply.disabled = locked
+    }
+  })
+
+  document.getElementById('reboot-pi').addEventListener('click', async () => {
+    if (!window.confirm('Reboot the Pi? The still stays off until it comes back.')) return
+    const button = document.getElementById('reboot-pi')
+    const result = document.getElementById('reboot-result')
+    button.disabled = true
+    result.textContent = ''
+    try {
+      await api.reboot()
+      window.dispatchEvent(new CustomEvent('brewski-rebooting'))
+    } catch (error) {
+      if (stopped) return
+      result.textContent = error.message
+      button.disabled = locked
+    }
+  })
+
   document.getElementById('reset-data').addEventListener('click', async () => {
     if (!window.confirm('Reset all data? Every run is deleted and settings return to their defaults. Element hours are kept.')) return
     savedEl.hidden = true
@@ -337,7 +378,6 @@ export function mountSettings(root) {
     const body = {
       target_temp_f: Math.round(Number(form.elements.target_temp_f.value)),
       cabinet_limit_f: Math.round(Number(form.elements.cabinet_limit_f.value)),
-      early_cutoff_f: Number(form.elements.early_cutoff_f.value),
       heater_min_on_seconds: Number(form.elements.heater_min_on_seconds.value),
       heater_min_off_seconds: Number(form.elements.heater_min_off_seconds.value),
       update_source: form.elements.update_source.value === 'beta' ? 'beta' : 'main',
@@ -396,10 +436,6 @@ export function mountSettings(root) {
     if (document.activeElement !== cabinet && settings.cabinet_limit_f != null) {
       cabinet.value = String(Math.round(Number(settings.cabinet_limit_f)))
     }
-    const cutoff = form.elements.early_cutoff_f
-    if (document.activeElement !== cutoff) {
-      cutoff.value = String(settings.early_cutoff_f)
-    }
     const minOff = form.elements.heater_min_off_seconds
     if (document.activeElement !== minOff) {
       minOff.value = String(settings.heater_min_off_seconds)
@@ -408,6 +444,7 @@ export function mountSettings(root) {
       form.elements.update_source.value = settings.update_source === 'beta' ? 'beta' : 'main'
     }
     writeGpio(form, settings.gpio)
+    markPinClashes(form)
     syncTargetWarning()
     applyDeviceState()
     applyLock(locked)
@@ -433,10 +470,20 @@ export function mountSettings(root) {
     }
   }
 
+  function renderAbout(status) {
+    const version = form.querySelector('[data-about-version]')
+    const source = form.querySelector('[data-about-source]')
+    if (version) version.textContent = status.version ? `v${status.version}` : '—'
+    if (source) {
+      source.textContent = status.source === 'dummy' ? 'Dummy source' : status.source === 'pi' ? 'Pi' : (status.source || '—')
+    }
+  }
+
   async function refreshLock() {
     if (stopped) return
     const status = await api.status()
     setSourceBadge(status.source)
+    renderAbout(status)
     applyLock(status.settings_locked)
     renderElementHours(status.heater_life_seconds)
   }
@@ -461,6 +508,21 @@ export function mountSettings(root) {
     document.removeEventListener('click', onDocumentClick)
     document.removeEventListener('keydown', onDocumentKey)
   }
+}
+
+function describeUpdate(update) {
+  if (!update.reachable) return 'GitHub could not be reached.'
+  const current = stripVersion(update.current)
+  if (!update.available) return `Up to date. This still is running ${current}.`
+  const latest = stripVersion(update.latest)
+  const offer = update.source === 'beta'
+    ? `Beta commit ${latest} is available.`
+    : `Version ${latest} is available.`
+  return update.apply_supported ? offer : `${offer} Update from the Pi.`
+}
+
+function stripVersion(value) {
+  return String(value || '').replace(/^v/i, '')
 }
 
 function settingRow(title, help, control) {
@@ -508,7 +570,7 @@ function deviceSection(kind, label) {
             <input name="${kind}_name_${index}" maxlength="${kind === 'sensor' ? 11 : 40}" required />
           </label>
           <label class="field gpio-field">${kind === 'sensor' ? 'Chip select' : 'BCM GPIO'}
-            <input name="${kind}_gpio_${index}" type="number" min="2" max="27" step="1" inputmode="numeric" required />
+            ${pinSelect(`${kind}_gpio_${index}`)}
           </label>
         </div>
         ${kind === 'sensor' ? `

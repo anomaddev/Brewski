@@ -3,10 +3,15 @@ import pytest
 from brewski.controller import (
     CALIBRATION_ABOVE_F,
     COOLDOWN_STABLE_SECONDS,
+    PREDICT_MAX_HORIZON_SECONDS,
     Controller,
     ControllerError,
     heater_should_be_on,
+    predicted_coast_f,
     reheat_temperature,
+    seconds_to_cooldown,
+    seconds_to_target,
+    slope_f_per_sec,
     sustain_pulse_seconds,
 )
 from brewski.sources.dummy import DummySource
@@ -94,30 +99,60 @@ def test_deadband_holds_heater_state_around_the_early_cutoff(store):
     assert source.heaters[:2] == [True, True]
 
 
-def test_zero_early_cutoff_waits_for_the_setpoint(store):
-    store.save_settings(merge_settings(store.get_settings(), {"early_cutoff_f": 0}))
-    source = StaticSource([100.0, 90.0])
+def test_a_short_window_does_not_move_the_learned_coast():
+    # 3°F over 8s implies 0.375°F/s. One fast jump is not a window, so the
+    # shutoff stays at 162°F.
+    assert slope_f_per_sec([(0, 100), (1, 110), (2, 120)]) is None
+    assert predicted_coast_f(3, 8, None) == 3
+    samples = [(0.0, 100.0), (3.0, 106.0), (6.0, 112.0), (7.0, 114.0)]
+    assert slope_f_per_sec(samples) is None
+
+
+def test_a_fast_rise_opens_the_ssr_before_the_learned_coast(store):
+    # Learned coast is 3°F over 8s (0.375°F/s). A 1°F/s climb scales that to 8°F,
+    # so 158°F is already past the shutoff on the way to 165°F.
+    source = StaticSource([140.0, 90.0])
     controller = Controller(store, source)
     controller.start()
-
-    source.temps = [164.0, 150.0]
+    for step in range(10):
+        source.temps = [140.0 + step, 90.0]
+        controller.tick(1)
+    assert any(source.heaters)
+    source.temps = [158.0, 90.0]
     controller.tick(1)
+    assert source.heaters[:2] == [False, False]
+    assert controller.status()["seconds_to_target"] is not None
+    assert controller.status()["seconds_to_cooldown"] is None
+
+
+def test_a_flat_slope_does_not_heat_past_the_learned_coast(store):
+    # 160°F is the bottom of the 2°F band under a 3°F coast, so the SSR is on.
+    # A flat window must not widen that coast and open it early.
+    source = StaticSource([160.0, 90.0])
+    controller = Controller(store, source)
+    controller.start()
+    for _ in range(10):
+        controller.tick(1)
     assert source.heaters[:2] == [True, True]
-
-    source.temps = [165.0, 150.0]
+    source.temps = [162.0, 90.0]
     controller.tick(1)
     assert source.heaters[:2] == [False, False]
 
 
-def test_a_larger_early_cutoff_opens_the_ssr_sooner(store):
-    store.save_settings(merge_settings(store.get_settings(), {"early_cutoff_f": 5}))
-    source = StaticSource([100.0, 90.0])
-    controller = Controller(store, source)
-    controller.start()
-
-    source.temps = [160.0, 150.0]
-    controller.tick(1)
-    assert source.heaters[:2] == [False, False]
+def test_time_to_target_includes_the_coast_and_cooldown_waits_for_a_fall():
+    # 1°F/s, 3°F coast over 8s. From 154°F the powered gap to a 162°F shutoff
+    # is 8°F, then the full 8s tail.
+    assert seconds_to_target(154, 165, 3, 1.0, 3, 8) == pytest.approx(16.0)
+    assert seconds_to_target(164, 165, 3, 0.5, 3, 8) == pytest.approx(2.0)
+    assert seconds_to_target(70, 240, 3, 0.01, 3, 8) == PREDICT_MAX_HORIZON_SECONDS
+    falling = [(0.0, 160.0), (5.0, 155.0), (10.0, 150.0), (15.0, 145.0)]
+    rate = slope_f_per_sec(falling)
+    assert rate is not None and rate < 0
+    cool = seconds_to_cooldown(145.0, rate)
+    assert cool is not None
+    assert 0 < cool <= PREDICT_MAX_HORIZON_SECONDS
+    assert seconds_to_cooldown(160.0, None, learned_rate_f_per_min=2.0) == pytest.approx((160 - 75) / (2 / 60))
+    assert seconds_to_cooldown(160.0, 0.2) is None
 
 
 def test_heaters_stay_off_for_the_minimum_before_they_can_turn_on(store):
@@ -212,7 +247,6 @@ def test_calibration_records_the_crest_and_then_the_cooling_rate(store):
     settings = store.get_settings()
     assert settings.learned_coast_f == pytest.approx(15.0, abs=0.15)
     assert settings.learned_cooldown_f_per_min == pytest.approx(2.0, abs=0.4)
-    assert settings.early_cutoff_f == pytest.approx(settings.learned_coast_f)
     assert settings.charge_gallons == 5
     listed = controller.runs()
     assert listed["stats"]["total_runs"] == 0
@@ -250,7 +284,6 @@ def test_a_cooling_rate_pulses_near_the_target_instead_of_the_deadband(store):
                 "learned_coast_f": 15,
                 "learned_coast_seconds": 90,
                 "learned_cooldown_f_per_min": 2,
-                "early_cutoff_f": 15,
                 "target_temp_f": 165,
             },
         )
@@ -293,7 +326,6 @@ def test_the_climb_coasts_from_the_learned_cutoff_instead_of_pulsing(store):
                 "learned_coast_f": 15,
                 "learned_coast_seconds": 90,
                 "learned_cooldown_f_per_min": 2,
-                "early_cutoff_f": 15,
                 "target_temp_f": 165,
             },
         )
@@ -366,7 +398,9 @@ def test_a_smaller_charge_scales_the_remembered_coast(store):
     source = StaticSource([100.0, 90.0])
     controller = Controller(store, source)
     controller.start({"kind": "calibration", "charge_gallons": 4})
-    assert store.get_settings().early_cutoff_f == pytest.approx(8)
+    settings = store.get_settings()
+    assert settings.learned_coast_f == pytest.approx(8)
+    assert settings.learned_coast_seconds == 12
 
 
 def test_a_smaller_charge_scales_the_cooling_rate(store):
@@ -385,7 +419,7 @@ def test_a_smaller_charge_scales_the_cooling_rate(store):
     controller = Controller(store, StaticSource([100.0, 90.0]))
     controller.start({"kind": "calibration", "charge_gallons": 4})
     settings = store.get_settings()
-    assert settings.early_cutoff_f == pytest.approx(8)
+    assert settings.learned_coast_f == pytest.approx(8)
     assert settings.learned_cooldown_f_per_min == pytest.approx(4)
 
 
@@ -398,7 +432,7 @@ def test_a_short_pulse_does_not_teach_the_coast(store):
     assert source.heaters[:2] == [False, False]
     source.temps = [164.0, 90.0]
     controller.tick(10)
-    assert store.get_settings().early_cutoff_f == 3
+    assert store.get_settings().learned_coast_f == 3
     assert controller.status()["coast_f"] is None
 
 

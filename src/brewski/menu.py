@@ -6,12 +6,15 @@ target dial moves the highlight, Start chooses the line, and Stop goes back.
 
 from __future__ import annotations
 
-from brewski.lcd import clip_line
+from brewski.lcd import COLUMNS, _pair, clip_line
 from brewski.updates import ReleaseInfo, offer_ends
 
-ITEMS = ("about", "update", "reboot")
+# The panel is four rows. The title stays put and the list under it scrolls.
+VISIBLE = 3
+ITEMS = ("about", "networking", "update", "reboot")
 LABELS = {
     "about": "About",
+    "networking": "Networking",
     "update": "Check for Update",
     "reboot": "Reboot",
 }
@@ -23,6 +26,7 @@ class SoftwareMenu:
     def __init__(self) -> None:
         self.screen = "list"
         self.index = 0
+        self.top = 0
         self.release: ReleaseInfo | None = None
         self.can_apply = False
         self.failed = False
@@ -33,6 +37,7 @@ class SoftwareMenu:
         if self.screen != "list" or not steps:
             return False
         self.index = (self.index + int(steps)) % len(ITEMS)
+        self._reveal()
         return True
 
     def back(self) -> bool:
@@ -58,6 +63,9 @@ class SoftwareMenu:
             item = ITEMS[self.index]
             if item == "about":
                 self.screen = "about"
+                return None
+            if item == "networking":
+                self.screen = "networking"
                 return None
             if item == "update":
                 self.screen = "checking"
@@ -93,9 +101,11 @@ class SoftwareMenu:
         )
         return start_on, True
 
-    def lines(self, version: str) -> list[str]:
+    def lines(self, version: str, *, address: str = "", hostname: str = "") -> list[str]:
         if self.screen == "about":
             rows = ["About", "Brewski", version, "STOP back"]
+        elif self.screen == "networking":
+            rows = network_lines(address, hostname)
         elif self.screen == "checking":
             rows = ["Check for Update", "Checking...", "", "STOP cancel"]
         elif self.screen == "update":
@@ -107,11 +117,30 @@ class SoftwareMenu:
         elif self.screen == "reboot":
             rows = ["Reboot the Pi?", "START reboot", "STOP cancel", ""]
         else:
-            rows = ["Software Menu"]
-            for index, item in enumerate(ITEMS):
-                mark = ">" if index == self.index else " "
-                rows.append(f"{mark} {LABELS[item]}")
+            rows = self._list_lines()
         return [clip_line(row) for row in rows]
+
+    def _reveal(self) -> None:
+        """Slide the window so the highlight stays on the three item rows."""
+
+        visible = min(VISIBLE, len(ITEMS))
+        if self.index < self.top:
+            self.top = self.index
+        elif self.index >= self.top + visible:
+            self.top = self.index - visible + 1
+
+    def _list_lines(self) -> list[str]:
+        self._reveal()
+        visible = min(VISIBLE, len(ITEMS))
+        hint = scroll_hint(self.top, visible, len(ITEMS))
+        rows = [menu_title(hint)]
+        for offset in range(visible):
+            index = self.top + offset
+            mark = ">" if index == self.index else " "
+            rows.append(f"{mark} {LABELS[ITEMS[index]]}")
+        while len(rows) < 4:
+            rows.append("")
+        return rows
 
     def _can_install(self) -> bool:
         release = self.release
@@ -134,3 +163,42 @@ class SoftwareMenu:
             left = version
         action = "START install" if self.can_apply else "Cannot install here"
         return ["Update available", f"{left} -> {right}", action, "STOP back"]
+
+
+def scroll_hint(top: int, visible: int, count: int) -> str:
+    """A mark for rows above the window, rows below it, or both."""
+
+    above = top > 0
+    below = top + visible < count
+    if above and below:
+        return "^v"
+    if above:
+        return "^"
+    if below:
+        return "v"
+    return ""
+
+
+def menu_title(hint: str) -> str:
+    left = "Software Menu"
+    if not hint:
+        return left
+    gap = COLUMNS - len(left) - len(hint)
+    if gap < 1:
+        return clip_line(f"{left} {hint}")
+    return f"{left}{' ' * gap}{hint}"
+
+
+def network_lines(address: str, hostname: str) -> list[str]:
+    """IP and hostname. The address line includes the port when it fits."""
+
+    shown = (address or "").strip() or "No address"
+    return ["Networking", shown, _host_line(hostname), "STOP back"]
+
+
+def _host_line(hostname: str) -> str:
+    name = (hostname or "").strip() or "—"
+    room = COLUMNS - len("Host:") - 1
+    if room < 1:
+        return clip_line(name)
+    return _pair("Host:", name[:room])

@@ -23,6 +23,7 @@ export const api = {
   resetData: () => request('/api/settings/reset', { method: 'POST' }),
   updateStatus: () => request('/api/update'),
   applyUpdate: () => request('/api/update', { method: 'POST' }),
+  reboot: () => request('/api/reboot', { method: 'POST' }),
   runs: () => request('/api/runs'),
   run: (id) => request(`/api/runs/${id}`),
   start: (body) => request('/api/runs/start', { method: 'POST', body: JSON.stringify(body || {}) }),

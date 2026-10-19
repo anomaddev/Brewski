@@ -3,8 +3,9 @@
 The loop is hardware-agnostic. It reads a :class:`HardwareSource`, decides
 whether the heaters should be on, and appends samples while a run is going.
 The first enabled probe is the one compared with the target. Heaters turn
-off before that target so heat still stored in the element can finish the
-rise. Disabled heaters stay off. The installed service drives the SSRs,
+off before that target by the coast measured in calibration, and sooner
+when the pot is rising faster than that measurement, so heat still stored
+in the element can finish the rise. Disabled heaters stay off. The installed service drives the SSRs,
 the MAX31865 probes, and the HTS221. After setup, this loop also drives
 the I2C LCD, the panel buttons, the LED relays, and the target encoder.
 """
@@ -22,6 +23,7 @@ from brewski import __version__
 from brewski.emergency import summary
 from brewski.lcd import NullDisplay, display_key, open_display, status_lines
 from brewski.menu import SoftwareMenu
+from brewski.network import display_identity
 from brewski.panel import indicator_leds, open_panel, panel_key
 from brewski.sources.base import HardwareSource
 from brewski.updates import (
@@ -95,6 +97,24 @@ SUSTAIN_RIPPLE_F = 1.0
 # Reached the target when the crest is at least this close to it.
 # Above the target counts: that overshoot is what the calibration records.
 CALIBRATION_LAND_F = 0.5
+# Control-probe samples kept for the live rise or fall. Short enough that a
+# change in heater count shows up, long enough that one noisy reading does not.
+PREDICT_WINDOW_SECONDS = 15.0
+# No slope until the window holds this many points and this much time. A single
+# jumped reading is not a rate.
+PREDICT_MIN_SAMPLES = 4
+PREDICT_MIN_SPAN_SECONDS = 8.0
+# Flatter than this is not moving. A stalled probe does not invent an ETA.
+PREDICT_MIN_RATE_F_PER_SEC = 0.01
+# Both estimates stop here. A cold pot must not report a multi-day climb.
+PREDICT_MAX_HORIZON_SECONDS = 4 * 60 * 60
+# A fast rise may shut off sooner than the learned coast, but not by more than
+# this multiple, and never by more than EARLY_CUTOFF_MAX_F degrees.
+PREDICT_COAST_SCALE_MAX = 3.0
+# Cooldown is time to get this close to a nominal room temperature. Reaching
+# the room itself would take forever under Newton's law of cooling.
+PREDICT_AMBIENT_F = 70.0
+PREDICT_AMBIENT_BAND_F = 5.0
 
 
 def scaled_cutoff(
@@ -222,6 +242,135 @@ def _cooling_progress(
     return full, False
 
 
+def slope_f_per_sec(samples: list[tuple[float, float]]) -> float | None:
+    """End-point °F/s over a window of ``(elapsed_seconds, temp_f)``.
+
+    Positive is a rise. Returns None until the window is long enough to trust.
+    """
+
+    if len(samples) < PREDICT_MIN_SAMPLES:
+        return None
+    start_t, start_v = samples[0]
+    end_t, end_v = samples[-1]
+    dt = end_t - start_t
+    if dt < PREDICT_MIN_SPAN_SECONDS:
+        return None
+    return (end_v - start_v) / dt
+
+
+def predicted_coast_f(
+    learned_coast_f: float | None,
+    learned_coast_seconds: float | None,
+    rate_f_per_sec: float | None,
+) -> float:
+    """Degrees the probe should still climb after the SSR opens.
+
+    The learned coast is the floor. It is the residual heat measured at
+    calibration, not a number from Settings. A faster live rise scales that
+    coast up, because the same sheath dumps more degrees into a pot that is
+    already climbing quickly. A slower rise does not shrink it. No learned
+    coast, or no trustworthy positive slope, leaves the floor alone.
+    """
+
+    if learned_coast_f is None or learned_coast_f <= 0:
+        return 0.0
+    coast = min(EARLY_CUTOFF_MAX_F, float(learned_coast_f))
+    if (
+        rate_f_per_sec is None
+        or rate_f_per_sec < PREDICT_MIN_RATE_F_PER_SEC
+        or learned_coast_seconds is None
+        or learned_coast_seconds <= 0
+    ):
+        return coast
+    implied = coast / float(learned_coast_seconds)
+    if implied <= 0:
+        return coast
+    scale = rate_f_per_sec / implied
+    if scale < 1.0:
+        scale = 1.0
+    elif scale > PREDICT_COAST_SCALE_MAX:
+        scale = PREDICT_COAST_SCALE_MAX
+    return min(EARLY_CUTOFF_MAX_F, coast * scale)
+
+
+def seconds_to_target(
+    temp_f: float,
+    target_f: float,
+    coast_f: float,
+    rate_f_per_sec: float | None,
+    learned_coast_f: float | None,
+    learned_coast_seconds: float | None,
+) -> float | None:
+    """Seconds until the probe reaches the target, including residual heat.
+
+    The powered gap is what the element still has to climb before the SSR
+    opens. The tail is the learned coast duration, scaled when the live coast
+    is larger than the measurement. Once the probe is already inside that
+    coast, only the remaining rise at the current rate is left. Returns None
+    when the probe is not rising.
+    """
+
+    if temp_f >= target_f:
+        return 0.0
+    if rate_f_per_sec is None or rate_f_per_sec < PREDICT_MIN_RATE_F_PER_SEC:
+        return None
+    gap = target_f - temp_f
+    powered = gap - max(0.0, coast_f)
+    if powered > 0:
+        if learned_coast_f and learned_coast_seconds and learned_coast_f > 0:
+            tail = float(learned_coast_seconds) * (max(0.0, coast_f) / float(learned_coast_f))
+        elif coast_f > 0:
+            tail = coast_f / rate_f_per_sec
+        else:
+            tail = 0.0
+        seconds = powered / rate_f_per_sec + tail
+    else:
+        seconds = gap / rate_f_per_sec
+    return min(PREDICT_MAX_HORIZON_SECONDS, max(0.0, seconds))
+
+
+def seconds_to_cooldown(
+    temp_f: float,
+    rate_f_per_sec: float | None,
+    *,
+    learned_rate_f_per_min: float | None = None,
+) -> float | None:
+    """Seconds for a falling pot to get within a few degrees of room temperature.
+
+    The live slope gives the cooling constant ``k = -rate / (temp - ambient)``.
+    Time to ``ambient + PREDICT_AMBIENT_BAND_F`` is ``ln((temp - ambient) / band) / k``.
+    Before the window is full, a learned °F/min is a linear stand-in over that
+    same drop. A rise or a flat line returns None.
+    """
+
+    goal = PREDICT_AMBIENT_F + PREDICT_AMBIENT_BAND_F
+    if temp_f <= goal:
+        return 0.0
+    if rate_f_per_sec is not None and rate_f_per_sec <= -PREDICT_MIN_RATE_F_PER_SEC:
+        above = temp_f - PREDICT_AMBIENT_F
+        if above <= PREDICT_AMBIENT_BAND_F:
+            return 0.0
+        k = -rate_f_per_sec / above
+        if k <= 0:
+            return None
+        seconds = math.log(above / PREDICT_AMBIENT_BAND_F) / k
+        return min(PREDICT_MAX_HORIZON_SECONDS, max(0.0, seconds))
+    # A live rise or a flat window is not a cooldown. The learned rate is only
+    # a stand-in before the window is long enough to have a slope at all.
+    if rate_f_per_sec is not None:
+        return None
+    if learned_rate_f_per_min is not None and learned_rate_f_per_min > 0:
+        seconds = (temp_f - goal) / (learned_rate_f_per_min / 60.0)
+        return min(PREDICT_MAX_HORIZON_SECONDS, max(0.0, seconds))
+    return None
+
+
+def _forecast_seconds(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return round(min(PREDICT_MAX_HORIZON_SECONDS, max(0.0, value)), 1)
+
+
 def heater_should_be_on(
     temperature_f: float,
     target_f: float,
@@ -317,6 +466,10 @@ class Controller:
         # that point heats the rest of the way and the stored heat overshoots.
         self._hold_ready = False
         self._heaters = [False] * SLOT_COUNT
+        # (predict clock seconds, control temperature). The clock follows tick
+        # time, including pause, so a test can advance it without sleeping.
+        self._predict_clock = 0.0
+        self._predict_samples: list[tuple[float, float]] = []
         self._heater_on_for = [0.0] * SLOT_COUNT
         # Powered time not yet written to the element-hour meters.
         self._heater_life_pending = [0.0] * SLOT_COUNT
@@ -452,6 +605,7 @@ class Controller:
             self._since_sample = 0.0
             self._clear_coast()
             self._clear_cooldown()
+            self._clear_predict()
             self._set_heaters([False] * SLOT_COUNT, release_off_dwell=True)
             reset_source = getattr(self.source, "reset", None)
             if reset_source is not None:
@@ -471,6 +625,9 @@ class Controller:
     def start_update(self) -> dict:
         """Hand the install to the root oneshot. The database is already saved."""
 
+        with self._lock:
+            if self._mode in ("running", "paused"):
+                raise ControllerError("Stop the run before updating.", 409)
         current = self.update_status()
         if not current["apply_supported"]:
             raise ControllerError("This machine cannot install a Brewski update.", 400)
@@ -496,6 +653,21 @@ class Controller:
             self._refresh_display()
             raise ControllerError("Could not start the updater.", 500) from exc
         return self.update_status()
+
+    def reboot(self) -> dict:
+        """Reboot the Pi. Refused while a run is open or an update is installing."""
+
+        with self._lock:
+            if self._mode in ("running", "paused"):
+                raise ControllerError("Stop the run before rebooting.", 409)
+        phase = read_status(self.store.path.parent).get("phase")
+        if phase in {"downloading", "building", "installing"}:
+            raise ControllerError("Wait for the update to finish.", 409)
+        try:
+            request_reboot()
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise ControllerError("Could not reboot this Pi.", 500) from exc
+        return {"rebooting": True}
 
     def start(self, patch: dict | None = None) -> dict:
         with self._lock:
@@ -541,7 +713,7 @@ class Controller:
                 updates: dict = {}
                 scaled = scaled_cutoff(settings.learned_coast_f, settings.charge_gallons, gallons)
                 if scaled is not None:
-                    updates["early_cutoff_f"] = scaled
+                    updates["learned_coast_f"] = scaled
                 scaled_cool = scaled_rate(
                     settings.learned_cooldown_f_per_min, settings.charge_gallons, gallons
                 )
@@ -560,6 +732,7 @@ class Controller:
             self._display_rate = None
             self._pulse_until = None
             self._hold_ready = False
+            self._clear_predict()
             self._live_temps = self.source.read_temperatures(SLOT_COUNT)
             self._sample_climate()
             self._emergency = self._emergency_codes(settings)
@@ -627,7 +800,14 @@ class Controller:
             settings = self.store.get_settings()
             key = display_key(settings)
             if self._menu is not None and key is not None:
-                lines = self._menu.lines(__version__)
+                address, hostname = "", ""
+                if self._menu.screen == "networking":
+                    try:
+                        address, hostname = display_identity()
+                    except Exception:
+                        logger.exception("Could not read the network address")
+                        address, hostname = "No address", "—"
+                lines = self._menu.lines(__version__, address=address, hostname=hostname)
                 led_state = self._menu.leds()
             else:
                 lines = self._panel_lines(settings) if key is not None else None
@@ -695,6 +875,16 @@ class Controller:
         elapsed = self._cooldown_elapsed if self._mode == "cooling" else self._elapsed
         code = self._emergency[0] if self._emergency else None
         lcd = self._calibration_lcd()
+        forecast = self._forecast(settings)
+        if forecast["seconds_to_target"] is not None:
+            eta_seconds: float | None = forecast["seconds_to_target"]
+            eta_kind: str | None = "target"
+        elif forecast["seconds_to_cooldown"] is not None:
+            eta_seconds = forecast["seconds_to_cooldown"]
+            eta_kind = "cool"
+        else:
+            eta_seconds = None
+            eta_kind = None
         return status_lines(
             mode=self._mode,
             elapsed_seconds=elapsed,
@@ -711,6 +901,8 @@ class Controller:
             calibration_rise_f=lcd.get("rise"),
             calibration_peak_f=lcd.get("peak"),
             calibration_rate_f=lcd.get("rate"),
+            eta_seconds=eta_seconds,
+            eta_kind=eta_kind,
         )
 
     def _loop(self) -> None:
@@ -754,6 +946,11 @@ class Controller:
         self._live_temps = self.source.read_temperatures(SLOT_COUNT)
         self._sample_climate()
         self._emergency = self._emergency_codes(settings)
+        if self._mode in ("running", "paused", "cooling"):
+            if self._current_control(settings) is None:
+                self._predict_samples.clear()
+            else:
+                self._note_predict(dt)
         if self._emergency:
             if self._mode in ("running", "paused"):
                 self._finish_run()
@@ -953,6 +1150,7 @@ class Controller:
             target_temp_f=settings.target_temp_f,
             phase="cooldown",
         )
+        self._log_forecast(settings)
 
     def _clear_cooldown(self) -> None:
         self._cooldown_run_id = None
@@ -1178,7 +1376,6 @@ class Controller:
         self._calibration_settled = settled
         learned = replace(
             settings,
-            early_cutoff_f=coast,
             learned_coast_f=coast,
             learned_coast_seconds=seconds,
             learned_cooldown_f_per_min=None,
@@ -1191,13 +1388,7 @@ class Controller:
             coast_seconds=seconds,
             calibration_settled=1 if settled else 0,
         )
-        logger.info(
-            "Run %s coast %s°F over %ss; cutoff now %s°F",
-            self._run_id,
-            coast,
-            seconds,
-            coast,
-        )
+        logger.info("Run %s coast %s°F over %ss", self._run_id, coast, seconds)
 
     def _finish_calibration(self, settings: Settings, rate: float | None) -> None:
         watch = self._coast_watch
@@ -1221,6 +1412,95 @@ class Controller:
         self._pulse_until = None
         self._hold_ready = False
 
+    def _clear_predict(self) -> None:
+        self._predict_clock = 0.0
+        self._predict_samples.clear()
+
+    def _note_predict(self, dt: float) -> None:
+        """Append the control probe and drop readings older than the window."""
+
+        if dt <= 0:
+            return
+        self._predict_clock += dt
+        found = self._current_control(self.store.get_settings())
+        if found is None:
+            self._predict_samples.clear()
+            return
+        self._predict_samples.append((self._predict_clock, found[1]))
+        horizon = self._predict_clock - PREDICT_WINDOW_SECONDS
+        while len(self._predict_samples) >= 2 and self._predict_samples[1][0] <= horizon:
+            self._predict_samples.pop(0)
+
+    def _shutoff_coast(self, settings: Settings) -> float:
+        """Degrees early to open the SSR on a normal run.
+
+        Calibration does not use this. A short window leaves the learned coast
+        unchanged so one jumped reading cannot move the shutoff.
+        """
+
+        return predicted_coast_f(
+            settings.learned_coast_f,
+            settings.learned_coast_seconds,
+            slope_f_per_sec(self._predict_samples),
+        )
+
+    def _forecast(self, settings: Settings) -> dict[str, float | None]:
+        """Time to the target while rising, and time to cool while falling."""
+
+        empty: dict[str, float | None] = {"seconds_to_target": None, "seconds_to_cooldown": None}
+        if self._mode not in ("running", "paused", "cooling"):
+            return empty
+        found = self._current_control(settings)
+        if found is None:
+            return empty
+        _, temp = found
+        rate = slope_f_per_sec(self._predict_samples)
+        coast = self._shutoff_coast(settings)
+        heating = any(
+            self._heaters[index] and settings.heaters[index].enabled for index in range(SLOT_COUNT)
+        )
+        rising = (
+            rate is not None
+            and rate >= PREDICT_MIN_RATE_F_PER_SEC
+            and temp < float(settings.target_temp_f)
+        )
+        if heating or rising:
+            return {
+                "seconds_to_target": _forecast_seconds(
+                    seconds_to_target(
+                        temp,
+                        float(settings.target_temp_f),
+                        coast,
+                        rate,
+                        settings.learned_coast_f,
+                        settings.learned_coast_seconds,
+                    )
+                ),
+                "seconds_to_cooldown": None,
+            }
+        return {
+            "seconds_to_target": None,
+            "seconds_to_cooldown": _forecast_seconds(
+                seconds_to_cooldown(
+                    temp,
+                    rate,
+                    learned_rate_f_per_min=settings.learned_cooldown_f_per_min,
+                )
+            ),
+        }
+
+    def _log_forecast(self, settings: Settings) -> None:
+        forecast = self._forecast(settings)
+        target = forecast["seconds_to_target"]
+        cool = forecast["seconds_to_cooldown"]
+        if target is None and cool is None:
+            return
+        logger.info(
+            "Temperature forecast: %s to target, %s to cool",
+            "n/a" if target is None else f"{target:.0f}s",
+            "n/a" if cool is None else f"{cool:.0f}s",
+        )
+
     def _hold_pulse(self, settings: Settings) -> tuple[float, float] | None:
         """Pulse length and reheat temperature, when a cooling rate can hold the target."""
 
@@ -1233,8 +1513,8 @@ class Controller:
         if duration is None:
             return None
         reheat = reheat_temperature(settings.target_temp_f, rate, duration)
-        cutoff = settings.target_temp_f - settings.early_cutoff_f
-        if reheat <= cutoff:
+        coast = settings.learned_coast_f or 0.0
+        if reheat <= settings.target_temp_f - coast:
             return None
         return duration, reheat
 
@@ -1251,7 +1531,8 @@ class Controller:
         duration, reheat = pulse
         target = float(settings.target_temp_f)
         enabled = [settings.heaters[index].enabled for index in range(SLOT_COUNT)]
-        coast_line = target - settings.early_cutoff_f
+        coast_f = self._shutoff_coast(settings)
+        coast_line = target - coast_f
         if primary <= coast_line:
             # Below the coast, including a deep sag, this is a fresh approach.
             self._pulse_until = None
@@ -1261,7 +1542,7 @@ class Controller:
                     primary,
                     settings.target_temp_f,
                     bool(self._heaters[index]),
-                    early_cutoff_f=settings.early_cutoff_f,
+                    early_cutoff_f=coast_f,
                 )
                 and enabled[index]
                 for index in range(SLOT_COUNT)
@@ -1292,9 +1573,10 @@ class Controller:
         """Physical heater mask. Index 0 is heater 1. Disabled slots stay off.
 
         The on/off choice itself, including why power is removed before the
-        setpoint, lives in :func:`heater_should_be_on`. Once a cooling rate
-        is known, the climb still shuts off at the learned coast. A short
-        pulse replaces the deadband only after that coast has already
+        setpoint, lives in :func:`heater_should_be_on`. The degrees early are
+        the learned coast, widened when the live rise is faster. Once a
+        cooling rate is known, the climb still shuts off at that coast. A
+        short pulse replaces the deadband only after that coast has already
         carried the probe up to the target and it sags back.
         """
 
@@ -1314,13 +1596,15 @@ class Controller:
         current = list(self._heaters[:SLOT_COUNT])
         while len(current) < SLOT_COUNT:
             current.append(False)
-        # A normal run stops early. Calibration heats until the probe is a
-        # little above the target, so the still can actually reach it.
-        cutoff = settings.early_cutoff_f
+        # A normal run stops at the learned coast, or sooner when the rise is
+        # fast. Calibration heats until the probe is a little above the target,
+        # so the still can actually reach it. Prediction stays out of that watch.
         if self._run_kind == "calibration":
             cutoff = -CALIBRATION_ABOVE_F
         elif (pulse := self._hold_pulse(settings)) is not None:
             return self._sustain_states(settings, primary, pulse)
+        else:
+            cutoff = self._shutoff_coast(settings)
         return [
             heater_should_be_on(
                 primary,
@@ -1347,6 +1631,7 @@ class Controller:
             heaters_on=heaters,
             target_temp_f=settings.target_temp_f,
         )
+        self._log_forecast(settings)
 
     def _live_overlay(self) -> dict | None:
         if self._run_id is None or self._mode == "idle":
@@ -1381,7 +1666,7 @@ class Controller:
                 1,
             ),
             "target_temp_f": self._target_value(settings),
-            "early_cutoff_f": settings.early_cutoff_f,
+            **self._forecast(settings),
             "learned_coast_f": settings.learned_coast_f,
             "learned_coast_seconds": settings.learned_coast_seconds,
             "learned_cooldown_f_per_min": settings.learned_cooldown_f_per_min,

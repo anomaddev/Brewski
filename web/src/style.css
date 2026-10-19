@@ -36,7 +36,8 @@ body {
 }
 
 body:has(.rail.active),
-body.setup-open { overflow: hidden; }
+body.setup-open,
+body.update-open { overflow: hidden; }
 
 a, button, input, label { touch-action: manipulation; }
 
@@ -298,6 +299,26 @@ button { cursor: pointer; }
 .setup-back[hidden] { display: none !important; }
 .setup-actions .action-btn { flex: none; min-width: 9.5rem; }
 .setup-card .boil-warning { margin-top: 8px; }
+.update-overlay { z-index: 90; }
+.update-overlay .setup-card { width: min(440px, 100%); }
+.update-bar {
+  height: 8px;
+  margin-top: 22px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.update-bar[hidden] { display: none; }
+.update-bar-fill {
+  display: block;
+  height: 100%;
+  width: 0%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent-strong), #9aa8ff);
+  transition: width 0.6s ease;
+}
+.update-overlay .setup-progress { margin-top: 14px; }
+.update-overlay .form-error { margin-top: 14px; }
 
 .container {
   width: min(1180px, calc(100% - 48px));
@@ -800,6 +821,7 @@ tr[data-href] { cursor: pointer; }
   border-radius: 14px;
   background: rgba(0, 0, 0, 0.16);
 }
+.settings-page .device { padding: 10px 12px 2px; }
 .device-head {
   display: flex;
   align-items: center;
@@ -807,7 +829,10 @@ tr[data-href] { cursor: pointer; }
   gap: 12px;
   margin-bottom: 12px;
 }
+.settings-page .device-head { margin-bottom: 8px; }
 .device-title { margin: 0; font-size: 0.98rem; font-weight: 720; letter-spacing: -0.02em; }
+.device-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.field-name { display: inline-flex; align-items: center; gap: 6px; }
 .switch {
   display: inline-flex;
   align-items: center;
@@ -932,11 +957,13 @@ tr[data-href] { cursor: pointer; }
 .settings-page {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 12px;
+  padding-bottom: 84px;
 }
+.settings-page .dashboard-card { padding: 14px; }
 .settings-page .lock-banner { margin-bottom: 0; }
 .settings-head h1 {
-  font-size: clamp(1.6rem, 2.4vw, 2rem);
+  font-size: clamp(1.35rem, 2vw, 1.6rem);
   font-weight: 720;
   letter-spacing: -0.045em;
 }
@@ -944,9 +971,59 @@ tr[data-href] { cursor: pointer; }
   display: grid;
   grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.85fr);
   gap: 18px;
-  align-items: start;
+  align-items: stretch;
 }
-.settings-card > .card-title { display: block; margin-bottom: 6px; }
+.settings-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  min-height: 100%;
+}
+.settings-stack > section:last-child {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+.settings-about {
+  margin-top: auto;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.settings-about .card-title { margin-bottom: 8px; }
+.about-list { margin: 0; }
+.about-list div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+}
+.about-list dt { color: var(--muted); font-weight: 650; }
+.about-list dd { margin: 0; font-weight: 680; font-variant-numeric: tabular-nums; }
+.about-line {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+.system-actions-list {
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.system-actions-list .setting-row { border-top: none; }
+.gpio-field.is-clash select { border-color: var(--warn); }
+.pin-warning {
+  color: var(--warn);
+  font-size: 0.75rem;
+  font-weight: 650;
+  line-height: 1.25;
+}
+.settings-card > .card-title { display: block; margin-bottom: 2px; }
+.settings-page .settings-card > .card-title.wiring-title,
+.settings-page .settings-card > .card-title.devices-title { margin-bottom: 16px; }
+.settings-page .column-title { margin-bottom: 4px; }
+.settings-page .panel-pins { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .settings-card > .card-title.with-tip,
 .column-title,
 .setting-copy h3 {
@@ -960,18 +1037,18 @@ tr[data-href] { cursor: pointer; }
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px 28px;
   align-items: center;
-  padding: 12px 0;
+  padding: 8px 0;
   border-top: 1px solid var(--line);
 }
 .setting-list .setting-row:first-child,
-.source-row { border-top: none; padding-top: 8px; }
+.source-row { border-top: none; padding-top: 0; }
 .setting-copy h3 {
   margin: 0;
   font-size: 0.98rem;
   font-weight: 720;
   letter-spacing: -0.02em;
 }
-.setting-control { width: 11.5rem; }
+.setting-control { width: max-content; max-width: 100%; }
 .tip {
   position: relative;
   display: inline-grid;
@@ -1037,12 +1114,16 @@ tr[data-href] { cursor: pointer; }
   margin-bottom: 6px;
   color: var(--muted);
 }
-.tip-rows { display: grid; }
-.tip-row {
+.tip-bubble:not(:has(.tip-rows)) .tip-lead { margin-bottom: 0; color: var(--text); }
+.tip-rows {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: max-content minmax(0, 1fr);
+  column-gap: 10px;
   align-items: baseline;
+}
+.tip-row { display: contents; }
+.tip-k,
+.tip-v {
   padding: 4px 0;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
@@ -1056,8 +1137,8 @@ tr[data-href] { cursor: pointer; }
 .tip:hover .tip-bubble,
 .tip:focus-visible .tip-bubble,
 .tip.is-open .tip-bubble { display: block; }
-.setting-row .field { margin-bottom: 0; }
-.setting-row .field input { margin-left: auto; }
+.setting-row .field { margin-bottom: 0; align-items: flex-start; }
+.setting-row .field input { margin-left: 0; }
 .setting-row .boil-warning { margin-top: 8px; }
 .source-row {
   grid-template-columns: minmax(0, 1fr);
@@ -1103,22 +1184,61 @@ tr[data-href] { cursor: pointer; }
   outline-offset: 2px;
 }
 .source-choice label:has(input:disabled) { opacity: 0.55; cursor: default; }
+.system-value {
+  margin: 0;
+  font-weight: 720;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+}
+.setting-copy .help { margin-top: 4px; }
+.setting-copy .help:empty { display: none; }
+.system-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.system-actions .action-btn {
+  flex: none;
+  min-width: 7.5rem;
+  margin-top: 0;
+}
 .wiring-subtitle { margin-top: 22px; }
-.settings-save {
+.settings-page .wiring-subtitle { margin-top: 12px; }
+.settings-footer {
+  position: fixed;
+  z-index: 6;
+  bottom: 16px;
+  left: calc(248px + 24px);
+  right: 24px;
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(16, 18, 24, 0.92);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(16px);
 }
-.settings-save .form-error,
-.settings-save .saved { margin-top: 0; }
-.settings-save .status-actions { margin: 0 0 0 auto; }
-.settings-save .action-btn { flex: none; min-width: 11rem; }
-.settings-page .reset-panel {
+.settings-footer-actions { display: flex; gap: 8px; }
+.settings-footer-status {
+  flex: 1;
+  min-width: 0;
+}
+.settings-footer .form-error,
+.settings-footer .saved { margin: 0; text-align: right; }
+.settings-footer #reboot-result:empty { display: none; }
+.settings-footer .action-btn {
+  flex: none;
+  min-width: 7.5rem;
   margin-top: 0;
-  padding-top: 0;
-  border-top: none;
 }
-.settings-page .reset-panel .card-title { margin-bottom: 8px; }
+.settings-footer .start-btn { margin-left: auto; }
+.ghost-btn {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+}
 
 @media (max-width: 980px) {
   .overview-stats, .detail-grid { grid-template-columns: 1fr 1fr; }
@@ -1278,11 +1398,17 @@ tr[data-href] { cursor: pointer; }
   .setup-back { width: 100%; min-height: 48px; }
   .overview-stats, .detail-grid, .device-columns, .settings-top { grid-template-columns: 1fr; }
   .setting-row { grid-template-columns: 1fr; gap: 10px; }
+  .settings-page .panel-pins { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .source-choice { width: 100%; }
   .source-choice label { flex: 1; }
-  .settings-save { flex-wrap: wrap; }
-  .settings-save .status-actions,
-  .settings-save .action-btn { width: 100%; }
+  .system-actions { width: 100%; }
+  .system-actions .action-btn { flex: 1; min-height: 48px; }
+  .settings-footer {
+    left: 16px;
+    right: 16px;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+  }
+  .settings-footer .action-btn { width: auto; min-width: 0; min-height: 44px; }
   .device-column { display: flex; flex-direction: column; grid-row: auto; gap: 16px; }
   .settings-card .choice-row { flex-wrap: wrap; width: 100%; }
   .settings-card .choice-row label {

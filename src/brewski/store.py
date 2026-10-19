@@ -29,11 +29,8 @@ HEATER_MIN_ON_DEFAULT_SECONDS = 1.0
 HEATER_MIN_OFF_DEFAULT_SECONDS = 1.0
 HEATER_DWELL_FLOOR_SECONDS = 0.5
 HEATER_DWELL_CEILING_SECONDS = 60.0
-# Degrees before the setpoint at which the element is turned off. The sheath
-# stays hot after the SSR opens and keeps heating the liquid, and the probe
-# lags the bulk, so waiting for the setpoint overshoots. 3°F (about 1.7°C)
-# is a starting point for a typical small still; 0 waits for the setpoint.
-EARLY_CUTOFF_DEFAULT_F = 3.0
+# Clamp on a measured or volume-scaled coast. Older databases still have an
+# early_cutoff_f column. It is left in place and is not read or written.
 EARLY_CUTOFF_MIN_F = 0.0
 EARLY_CUTOFF_MAX_F = 20.0
 # Gallons of liquid in the pot for a calibration. The coast scales with this.
@@ -67,7 +64,7 @@ CREATE TABLE IF NOT EXISTS settings (
     target_temp_f REAL NOT NULL,
     heater_min_on_seconds REAL NOT NULL DEFAULT 1,
     heater_min_off_seconds REAL NOT NULL DEFAULT 1,
-    early_cutoff_f REAL NOT NULL DEFAULT 3,
+    early_cutoff_f REAL NOT NULL DEFAULT 3, -- legacy, unused
     cabinet_limit_f REAL NOT NULL DEFAULT 170,
     learned_coast_f REAL,
     learned_coast_seconds REAL,
@@ -253,7 +250,6 @@ class Settings:
     target_temp_f: int
     heater_min_on_seconds: float = HEATER_MIN_ON_DEFAULT_SECONDS
     heater_min_off_seconds: float = HEATER_MIN_OFF_DEFAULT_SECONDS
-    early_cutoff_f: float = EARLY_CUTOFF_DEFAULT_F
     cabinet_limit_f: int = CABINET_LIMIT_DEFAULT_F
     learned_coast_f: float | None = None
     learned_coast_seconds: float | None = None
@@ -292,7 +288,6 @@ class Settings:
             "target_temp_f": self.target_temp_f,
             "heater_min_on_seconds": self.heater_min_on_seconds,
             "heater_min_off_seconds": self.heater_min_off_seconds,
-            "early_cutoff_f": self.early_cutoff_f,
             "cabinet_limit_f": self.cabinet_limit_f,
             "learned_coast_f": self.learned_coast_f,
             "learned_coast_seconds": self.learned_coast_seconds,
@@ -324,7 +319,6 @@ def default_settings() -> Settings:
         target_temp_f=165,
         heater_min_on_seconds=HEATER_MIN_ON_DEFAULT_SECONDS,
         heater_min_off_seconds=HEATER_MIN_OFF_DEFAULT_SECONDS,
-        early_cutoff_f=EARLY_CUTOFF_DEFAULT_F,
     )
 
 
@@ -341,7 +335,6 @@ def merge_settings(current: Settings, patch: dict) -> Settings:
         "target_temp_f",
         "heater_min_on_seconds",
         "heater_min_off_seconds",
-        "early_cutoff_f",
         "cabinet_limit_f",
         "learned_coast_f",
         "learned_coast_seconds",
@@ -378,7 +371,6 @@ def parse_settings(data: dict) -> Settings:
             "heater_min_off_seconds",
             HEATER_MIN_OFF_DEFAULT_SECONDS,
         ),
-        early_cutoff_f=_early_cutoff(data.get("early_cutoff_f")),
         cabinet_limit_f=_cabinet_limit(data.get("cabinet_limit_f")),
         learned_coast_f=_optional_setting(
             data.get("learned_coast_f"), "learned_coast_f", EARLY_CUTOFF_MIN_F, EARLY_CUTOFF_MAX_F
@@ -499,7 +491,7 @@ class Store:
                 UPDATE settings
                 SET heater_count = ?, sensor_count = ?, heater_names = ?,
                     sensor_names = ?, target_temp_f = ?, heater_min_on_seconds = ?,
-                    heater_min_off_seconds = ?, early_cutoff_f = ?, cabinet_limit_f = ?,
+                    heater_min_off_seconds = ?, cabinet_limit_f = ?,
                     learned_coast_f = ?, learned_coast_seconds = ?, learned_cooldown_f_per_min = ?,
                     charge_gallons = ?,
                     heaters = ?, sensors = ?, setup_complete = ?, gpio = ?,
@@ -722,10 +714,10 @@ class Store:
             INSERT INTO settings (
                 id, heater_count, sensor_count, heater_names, sensor_names,
                 target_temp_f, heater_min_on_seconds, heater_min_off_seconds,
-                early_cutoff_f, cabinet_limit_f, learned_coast_f, learned_coast_seconds,
+                cabinet_limit_f, learned_coast_f, learned_coast_seconds,
                 learned_cooldown_f_per_min, charge_gallons, heaters, sensors, setup_complete, gpio,
                 update_source
-            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             _settings_values(settings),
         )
@@ -947,7 +939,6 @@ def _settings_values(settings: Settings) -> tuple:
         settings.target_temp_f,
         settings.heater_min_on_seconds,
         settings.heater_min_off_seconds,
-        settings.early_cutoff_f,
         settings.cabinet_limit_f,
         settings.learned_coast_f,
         settings.learned_coast_seconds,
@@ -979,7 +970,6 @@ def _settings_from_row(row: sqlite3.Row) -> Settings:
         heater_min_off_seconds=_stored_float(
             row, "heater_min_off_seconds", HEATER_MIN_OFF_DEFAULT_SECONDS
         ),
-        early_cutoff_f=_stored_float(row, "early_cutoff_f", EARLY_CUTOFF_DEFAULT_F),
         cabinet_limit_f=_stored_cabinet_limit(row),
         learned_coast_f=_optional_float(row, "learned_coast_f"),
         learned_coast_seconds=_optional_float(row, "learned_coast_seconds"),
@@ -1416,19 +1406,6 @@ def _optional_setting(value: object, field: str, low: float, high: float) -> flo
     if number < low or number > high:
         raise SettingsError(f"{field} must be between {low:g} and {high:g}")
     return number
-
-
-def _early_cutoff(value: object) -> float:
-    if value is None:
-        return EARLY_CUTOFF_DEFAULT_F
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise SettingsError("early_cutoff_f must be a number of degrees")
-    degrees = round(float(value), 2)
-    if degrees < EARLY_CUTOFF_MIN_F or degrees > EARLY_CUTOFF_MAX_F:
-        raise SettingsError(
-            f"early_cutoff_f must be between {EARLY_CUTOFF_MIN_F:g} and {EARLY_CUTOFF_MAX_F:g}"
-        )
-    return degrees
 
 
 def _stored_target(value: object) -> int:

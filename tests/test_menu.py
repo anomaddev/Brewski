@@ -1,6 +1,6 @@
 """Software menu screens, and a Stop hold versus a short press."""
 
-from brewski.menu import SoftwareMenu
+from brewski.menu import SoftwareMenu, menu_title, scroll_hint
 from brewski.panel import HOLD_RELEASE_OFF_SECONDS, STOP_HOLD_SECONDS, Panel
 from brewski.updates import ReleaseInfo
 
@@ -255,22 +255,25 @@ def test_a_short_release_does_not_leave_a_hold_behind(monkeypatch):
 def test_software_menu_lines_and_leds():
     menu = SoftwareMenu()
     assert menu.lines("0.6.5") == [
-        "Software Menu",
+        menu_title("v"),
         "> About",
+        "  Networking",
         "  Check for Update",
-        "  Reboot",
     ]
+    assert len(menu.lines("0.6.5")[0]) == 20
     assert menu.leds() == (True, True)
-    assert menu.move(4) is True
-    assert menu.lines("0.6.5")[2] == "> Check for Update"
+    assert menu.move(2) is True
+    assert menu.lines("0.6.5")[3] == "> Check for Update"
     menu.index = 0
+    menu.top = 0
     assert menu.move(-1) is True
     assert menu.lines("0.6.5")[3] == "> Reboot"
+    assert menu.lines("0.6.5")[0] == menu_title("^")
     menu.select()
     assert menu.lines("0.6.5") == ["Reboot the Pi?", "START reboot", "STOP cancel", ""]
     assert menu.leds() == (True, True)
     assert menu.back() is True
-    assert menu.lines("0.6.5")[0] == "Software Menu"
+    assert menu.lines("0.6.5")[0].startswith("Software Menu")
 
     menu.index = 0
     menu.select()
@@ -279,7 +282,7 @@ def test_software_menu_lines_and_leds():
     assert menu.select() is None
 
     menu.back()
-    menu.index = 1
+    menu.index = 2
     assert menu.select() == "check"
     assert menu.lines("0.6.5")[1] == "Checking..."
     menu.show_release(
@@ -319,3 +322,42 @@ def test_software_menu_lines_and_leds():
     assert menu.lines("0.6.5")[0] == "Reboot failed"
     assert menu.lines("0.6.5")[1] == "No permission"
     assert menu.leds() == (False, True)
+
+
+def test_the_menu_scrolls_when_the_highlight_leaves_the_window():
+    menu = SoftwareMenu()
+    menu.move(3)
+    assert menu.lines("0.6.5") == [
+        menu_title("^"),
+        "  Networking",
+        "  Check for Update",
+        "> Reboot",
+    ]
+    menu.move(1)
+    opened = menu.lines("0.6.5")
+    assert opened[1] == "> About"
+    assert opened[0].endswith("v")
+    assert "Reboot" not in opened[1:]
+    assert scroll_hint(1, 3, 5) == "^v"
+    assert scroll_hint(0, 3, 3) == ""
+
+
+def test_networking_screen_shows_the_address_and_hostname():
+    menu = SoftwareMenu()
+    menu.index = 1
+    assert menu.select() is None
+    assert menu.screen == "networking"
+    assert menu.leds() == (False, True)
+    assert menu.lines("0.6.5", address="192.168.1.42:8080", hostname="stillpi") == [
+        "Networking",
+        "192.168.1.42:8080",
+        "Host:        stillpi",
+        "STOP back",
+    ]
+    clipped = menu.lines("0.6.5", address="", hostname="this-hostname-is-way-too-long")
+    assert clipped[1] == "No address"
+    assert clipped[2] == "Host: this-hostname-"
+    assert all(len(line) <= 20 for line in clipped)
+    assert menu.select() is None
+    assert menu.back() is True
+    assert menu.screen == "list"

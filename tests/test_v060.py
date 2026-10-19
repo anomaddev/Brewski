@@ -221,21 +221,21 @@ def test_stop_hold_opens_the_software_menu_without_changing_the_target(controlle
     controller._panel = _Panel((0, 0, 1, 1))
     assert controller._apply_panel() is True
     assert controller._display.lines == [
-        "Software Menu",
+        "Software Menu      v",
         "> About",
+        "  Networking",
         "  Check for Update",
-        "  Reboot",
     ]
     assert store.get_settings().target_temp_f == 165
     assert controller.status()["target_temp_f"] == 165
 
-    controller._panel = _Panel((0, 0, 0, 5))
+    controller._panel = _Panel((0, 0, 0, 3))
     controller._apply_panel()
     assert controller._display.lines[3] == "> Reboot"
     assert store.get_settings().target_temp_f == 165
     assert controller.status()["target_temp_f"] == 165
 
-    controller._panel = _Panel((0, 0, 0, -2))
+    controller._panel = _Panel((0, 0, 0, -3))
     controller._apply_panel()
     assert controller._display.lines[1] == "> About"
 
@@ -245,7 +245,7 @@ def test_stop_hold_opens_the_software_menu_without_changing_the_target(controlle
 
     controller._panel = _Panel((0, 1, 0, 0))
     controller._apply_panel()
-    assert controller._display.lines[0] == "Software Menu"
+    assert controller._display.lines[0].startswith("Software Menu")
 
     controller._panel = _Panel((0, 1, 0, 0))
     controller._apply_panel()
@@ -255,7 +255,7 @@ def test_stop_hold_opens_the_software_menu_without_changing_the_target(controlle
     controller._panel = _Panel((0, 0, 1, 0))
     controller._apply_panel()
     assert controller._menu is not None
-    assert controller._display.lines[0] == "Software Menu"
+    assert controller._display.lines[0].startswith("Software Menu")
 
 
 def test_stop_hold_during_a_run_does_not_stop_or_open_the_menu(controller):
@@ -275,7 +275,7 @@ def test_stop_hold_during_an_emergency_opens_the_software_menu(controller):
     controller._emergency = ["E01"]
     controller._panel = _Panel((0, 0, 1, 0))
     assert controller._apply_panel() is True
-    assert controller._display.lines[0] == "Software Menu"
+    assert controller._display.lines[0].startswith("Software Menu")
 
     controller._panel = _Panel((0, 1, 0, 0))
     controller._apply_panel()
@@ -290,14 +290,14 @@ def test_an_emergency_does_not_close_an_open_software_menu(controller):
     controller._panel = _Panel((0, 0, 0, 0))
     controller._apply_panel()
     assert controller._menu is not None
-    assert controller._display.lines[0] == "Software Menu"
+    assert controller._display.lines[0].startswith("Software Menu")
 
 
 def test_cooling_hold_opens_the_software_menu(controller):
     controller._mode = "cooling"
     controller._panel = _Panel((0, 0, 1, 0))
     assert controller._apply_panel() is True
-    assert controller._display.lines[0] == "Software Menu"
+    assert controller._display.lines[0].startswith("Software Menu")
 
 
 def test_software_menu_closes_when_a_run_starts(controller):
@@ -313,7 +313,7 @@ def test_software_menu_closes_when_a_run_starts(controller):
 def _open_update_item(controller):
     controller._panel = _Panel((0, 0, 1, 0))
     controller._apply_panel()
-    controller._panel = _Panel((0, 0, 0, 1))
+    controller._panel = _Panel((0, 0, 0, 2))
     controller._apply_panel()
     controller._panel = _Panel((1, 0, 0, 0))
     controller._apply_panel()
@@ -370,7 +370,26 @@ def test_menu_check_cancel_drops_a_late_result(controller, monkeypatch):
     controller._apply_panel()
     gate.set()
     controller._menu_check_thread.join(2)
-    assert controller._display.lines[0] == "Software Menu"
+    assert controller._display.lines[0].startswith("Software Menu")
+
+
+def test_networking_screen_shows_how_to_open_the_dashboard(controller, monkeypatch):
+    monkeypatch.setattr(
+        "brewski.controller.display_identity",
+        lambda: ("192.168.1.42:8080", "stillpi"),
+    )
+    controller._panel = _Panel((0, 0, 1, 0))
+    controller._apply_panel()
+    controller._panel = _Panel((0, 0, 0, 1))
+    controller._apply_panel()
+    controller._panel = _Panel((1, 0, 0, 0))
+    controller._apply_panel()
+    assert controller._display.lines == [
+        "Networking",
+        "192.168.1.42:8080",
+        "Host:        stillpi",
+        "STOP back",
+    ]
 
 
 def test_menu_reboot_confirms_then_reports_a_refusal(controller, monkeypatch):
@@ -392,4 +411,4 @@ def test_menu_reboot_confirms_then_reports_a_refusal(controller, monkeypatch):
     assert controller._display.lines[1] == "No permission"
     controller._panel = _Panel((0, 1, 0, 0))
     controller._apply_panel()
-    assert controller._display.lines[0] == "Software Menu"
+    assert controller._display.lines[0].startswith("Software Menu")

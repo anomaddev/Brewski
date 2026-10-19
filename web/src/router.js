@@ -6,6 +6,7 @@ import { mountRun } from './pages/run.js'
 import { mountSettings } from './pages/settings.js'
 import { mountSetup } from './setup.js'
 import { mountStatusStrip } from './status-strip.js'
+import { mountUpdateOverlay } from './update-overlay.js'
 
 let cleanup = () => {}
 
@@ -34,9 +35,11 @@ async function render() {
   const page = mountShell(route ? route.id : '')
   const stripCleanup = mountPageStatus(route)
   const setupCleanup = mountSetup()
+  const updateCleanup = mountUpdateOverlay()
   const release = () => {
     stripCleanup()
     setupCleanup()
+    updateCleanup()
   }
   if (!route) {
     page.innerHTML = `

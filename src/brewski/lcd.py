@@ -479,6 +479,8 @@ def status_lines(
     calibration_rise_f: float | None = None,
     calibration_peak_f: float | None = None,
     calibration_rate_f: float | None = None,
+    eta_seconds: float | None = None,
+    eta_kind: str | None = None,
 ) -> list[str]:
     """Four 20-column lines. Labels sit on the left and values on the right."""
 
@@ -526,9 +528,13 @@ def status_lines(
         head = _pair(label, clock)
     else:
         head = "Idle:"
+    if eta_seconds is None:
+        target_line = _value_line("Target:", _whole_temp(target_f))
+    else:
+        target_line = _pair(_whole_temp(target_f), _eta_label(eta_seconds, eta_kind))
     return [
         head,
-        _value_line("Target:", _whole_temp(target_f)),
+        target_line,
         probe_row,
         heater_row,
     ]
@@ -630,6 +636,22 @@ def _heater_token(index: int, enabled: bool, on: bool) -> str:
 
 def _whole_temp(value: float) -> str:
     return f"{int(round(float(value)))} F"
+
+
+def _eta_label(seconds: float, kind: str | None) -> str:
+    """Short clock for a 20-column line. ``cool 8m`` is a fall; ``~12m`` is a rise."""
+
+    total = max(0, int(round(float(seconds))))
+    if total >= 3600:
+        hours, minutes = divmod(total // 60, 60)
+        clock = f"{hours}h" if minutes == 0 else f"{hours}h{minutes}m"
+    elif total >= 60:
+        clock = f"{total // 60}m"
+    else:
+        clock = f"{total}s"
+    if kind == "cool":
+        return f"cool {clock}"
+    return f"~{clock}"
 
 
 def prompt_lines(current: str, latest: str, seconds_left: int) -> list[str]:

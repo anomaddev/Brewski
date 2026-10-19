@@ -50,6 +50,10 @@ def create_app(controller: Controller) -> Flask:
     def post_update():
         return jsonify(controller.start_update()), 202
 
+    @app.post("/api/reboot")
+    def post_reboot():
+        return jsonify(controller.reboot()), 202
+
     @app.get("/api/runs")
     def runs():
         return jsonify(controller.runs())

@@ -43,6 +43,7 @@ export function mountShell(active) {
         </main>
       </div>
       <div id="setup-host"></div>
+      <div id="update-host"></div>
     </div>
   `
   const sidebar = document.getElementById('sidebar')

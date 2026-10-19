@@ -48,6 +48,30 @@ die() {
   exit 1
 }
 
+github_token() {
+  if [[ -n "${BREWSKI_GITHUB_TOKEN:-}" ]]; then
+    printf '%s' "$BREWSKI_GITHUB_TOKEN"
+    return
+  fi
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    printf '%s' "$GITHUB_TOKEN"
+    return
+  fi
+  if [[ -f "${DATA_DIR}/github-token" ]]; then
+    tr -d '[:space:]' <"${DATA_DIR}/github-token"
+  fi
+}
+
+curl_github() {
+  local token
+  token=$(github_token)
+  if [[ -n "$token" ]]; then
+    curl -H "Authorization: Bearer ${token}" "$@"
+  else
+    curl "$@"
+  fi
+}
+
 service_user() {
   local existing=""
   if [[ -n "${BREWSKI_USER:-}" ]]; then
@@ -110,7 +134,7 @@ latest_release() {
   local payload status tag
   payload=$(mktemp)
   status=$(
-    curl -sS -L --retry 2 --max-time 30 -o "$payload" -w "%{http_code}" \
+    curl_github -sS -L --retry 2 --max-time 30 -o "$payload" -w "%{http_code}" \
       -H "Accept: application/vnd.github+json" \
       -H "X-GitHub-Api-Version: 2022-11-28" \
       "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" || true
@@ -119,6 +143,7 @@ latest_release() {
     rm -f "$payload"
     return 2
   fi
+  printf '%s' "$status" >"${TMPDIR:-/tmp}/brewski-github-status"
   if [[ "$status" != "200" ]]; then
     rm -f "$payload"
     return 1
@@ -153,6 +178,17 @@ fetch_release() {
     tag=$(latest_release) || rc=$?
   fi
   if [[ -z "${BREWSKI_UPDATE_REF:-}" && "$rc" -eq 1 ]]; then
+    local github_status=""
+    if [[ -f "${TMPDIR:-/tmp}/brewski-github-status" ]]; then
+      github_status=$(tr -d '[:space:]' <"${TMPDIR:-/tmp}/brewski-github-status")
+    fi
+    if [[ "$github_status" == "403" ]]; then
+      if [[ "$soft" == "1" ]]; then
+        echo "brewski: GitHub's rate limit is exhausted for this network. Starting the installed version."
+        exit 0
+      fi
+      die "GitHub's rate limit is exhausted for this network. Wait and run this again."
+    fi
     if [[ "$soft" == "1" ]]; then
       echo "brewski: GitHub is unreachable. Starting the installed version."
       exit 0
@@ -188,7 +224,7 @@ fetch_release() {
   fi
 
   status=$(
-    curl -sS -L -o "$tarball" -w "%{http_code}" \
+    curl_github -sS -L -o "$tarball" -w "%{http_code}" \
       -H "Accept: application/vnd.github+json" \
       -H "X-GitHub-Api-Version: 2022-11-28" \
       "$url" || true

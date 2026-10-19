@@ -12,8 +12,10 @@ from brewski.updates import (
     is_newer,
     offer_ends,
     progress_label,
+    report,
     run_boot_update,
     wait_for_choice,
+    write_status,
 )
 
 
@@ -353,6 +355,24 @@ def test_prompt_times_out_as_a_decline():
     )
     assert display.lines[2] == "START update"
     assert display.lines[0] == "Update available"
+
+
+def test_an_install_in_progress_does_not_ask_github_again(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr("brewski.updates.check_release", lambda **_kwargs: calls.append(True))
+    write_status(
+        phase="downloading",
+        current="0.6.25",
+        latest="abc1234",
+        error=None,
+        ref="abc1234deadbeef",
+        directory=tmp_path,
+    )
+    body = report(tmp_path)
+    assert calls == []
+    assert body["phase"] == "downloading"
+    assert body["latest"] == "abc1234"
+    assert body["ref"] == "abc1234deadbeef"
 
 
 def test_prompt_accepts_stop():

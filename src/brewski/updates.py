@@ -37,7 +37,7 @@ REVISION_PATH = Path("/opt/brewski/revision")
 INSTALL_SCRIPT = Path("/opt/brewski/install.sh")
 APPLY_UNIT = "brewski-apply-update.service"
 PROMPT_SECONDS = 60
-_CACHE_SECONDS = 20.0
+_CACHE_SECONDS = 300.0
 _cache_lock = threading.Lock()
 _cache: dict[str, tuple[float, ReleaseInfo]] = {}
 
@@ -158,8 +158,20 @@ def write_status(
 
 
 def report(directory: Path | None = None) -> dict:
-    release = check_release()
     status = read_status(directory)
+    if status["phase"] in {"downloading", "building", "installing"}:
+        return {
+            "current": status["current"] or __version__,
+            "latest": status["latest"] or None,
+            "available": True,
+            "reachable": True,
+            "apply_supported": apply_supported(),
+            "phase": status["phase"],
+            "error": status["error"],
+            "source": _saved_update_source(),
+            "ref": status.get("ref"),
+        }
+    release = check_release()
     return {
         "current": release.current,
         "latest": release.latest,
@@ -481,6 +493,49 @@ def _is_commit_sha(value: str | None) -> bool:
     return all(character in "0123456789abcdefABCDEF" for character in value)
 
 
+def _github_headers() -> dict[str, str]:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "brewski",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    token = _github_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _github_token() -> str:
+    """Fine-grained or classic token. Never logged.
+
+    The Pi keeps it in the data directory. A dev checkout can set
+    BREWSKI_GITHUB_TOKEN, or the same name in a gitignored .env file.
+    """
+
+    for key in ("BREWSKI_GITHUB_TOKEN", "GITHUB_TOKEN"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    for path in (Path("/var/lib/brewski/github-token"), Path(".env")):
+        token = _token_from_file(path)
+        if token:
+            return token
+    return ""
+
+
+def _token_from_file(path: Path) -> str:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    if path.name != ".env":
+        return text.strip()
+    for line in text.splitlines():
+        if line.startswith("BREWSKI_GITHUB_TOKEN="):
+            return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
+
+
 def _fetch_commit(opener, timeout: float) -> tuple[str | None, bool]:
     """Full SHA at the tip of the beta branch.
 
@@ -490,11 +545,7 @@ def _fetch_commit(opener, timeout: float) -> tuple[str | None, bool]:
 
     request = urllib.request.Request(
         f"https://api.github.com/repos/{GITHUB_REPO}/commits/beta",
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "brewski",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
+        headers=_github_headers(),
     )
     open_url = opener or urllib.request.urlopen
     try:
@@ -525,11 +576,7 @@ def _fetch_commit(opener, timeout: float) -> tuple[str | None, bool]:
 def _fetch_latest(opener, timeout: float) -> tuple[str | None, bool]:
     request = urllib.request.Request(
         f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "brewski",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
+        headers=_github_headers(),
     )
     open_url = opener or urllib.request.urlopen
     try:

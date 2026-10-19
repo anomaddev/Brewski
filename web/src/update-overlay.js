@@ -151,8 +151,11 @@ export function mountUpdateOverlay() {
   window.addEventListener('brewski-update-cancel', onCancel)
   window.addEventListener('brewski-rebooting', onRebooting)
   const timer = setInterval(() => {
-    poll().catch(() => {})
+    if (shown) poll().catch(() => {})
   }, 1000)
+  const idleTimer = setInterval(() => {
+    if (!shown) poll().catch(() => {})
+  }, 5 * 60 * 1000)
   const barTimer = setInterval(() => {
     if (shown && mode !== 'reboot') moveBar()
   }, 250)
@@ -161,6 +164,7 @@ export function mountUpdateOverlay() {
   return () => {
     stopped = true
     clearInterval(timer)
+    clearInterval(idleTimer)
     clearInterval(barTimer)
     window.removeEventListener('brewski-updating', onUpdating)
     window.removeEventListener('brewski-update-cancel', onCancel)

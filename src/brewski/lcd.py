@@ -292,14 +292,12 @@ def open_buttons(settings: Settings) -> ButtonReader | None:
             gpio.button_start,
             pull_up=True,
             bounce_time=None,
-            hold_time=None,
             pin_factory=factory,
         )
         stop = Button(
             gpio.button_stop,
             pull_up=True,
             bounce_time=None,
-            hold_time=None,
             pin_factory=factory,
         )
         return ButtonReader(start, stop)

@@ -73,12 +73,11 @@ class Panel:
     def _bind_button(self, button: object, on_down: object, on_up: object) -> None:
         # gpiozero's bounce timer drops edges. With no capacitor on the
         # switch, that sticks the pin after the first spike. PressPair does
-        # the debounce. hold_time is ours too; gpiozero's thread stays off.
-        for name in ("bounce_time", "hold_time"):
-            if not hasattr(button, name):
-                continue
+        # the debounce. hold_time stays at gpiozero's default: the library
+        # rejects None, and that exception was closing the whole panel.
+        if hasattr(button, "bounce_time"):
             try:
-                setattr(button, name, None)
+                button.bounce_time = None  # type: ignore[attr-defined]
             except Exception:
                 logger.exception("Button timing could not be configured")
         button.when_pressed = on_down  # type: ignore[attr-defined]
@@ -239,14 +238,12 @@ def open_panel(settings: Settings) -> Panel | None:
             gpio.button_start,
             pull_up=True,
             bounce_time=None,
-            hold_time=None,
             pin_factory=factory,
         )
         stop = Button(
             gpio.button_stop,
             pull_up=True,
             bounce_time=None,
-            hold_time=None,
             pin_factory=factory,
         )
         led_start = LED(gpio.led_start, active_high=LED_ACTIVE_HIGH, pin_factory=factory)

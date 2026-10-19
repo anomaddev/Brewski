@@ -21,7 +21,7 @@ export const api = {
   settings: () => request('/api/settings'),
   saveSettings: (body) => request('/api/settings', { method: 'PUT', body: JSON.stringify(body) }),
   resetData: () => request('/api/settings/reset', { method: 'POST' }),
-  updateStatus: () => request('/api/update'),
+  updateStatus: ({ fresh = false } = {}) => request(fresh ? '/api/update?fresh=1' : '/api/update'),
   applyUpdate: () => request('/api/update', { method: 'POST' }),
   reboot: () => request('/api/reboot', { method: 'POST' }),
   runs: () => request('/api/runs'),

@@ -630,8 +630,8 @@ class Controller:
         self._refresh_display()
         return saved
 
-    def update_status(self) -> dict:
-        return update_report(self.store.path.parent)
+    def update_status(self, *, fresh: bool = False) -> dict:
+        return update_report(self.store.path.parent, fresh=fresh)
 
     def start_update(self) -> dict:
         """Hand the install to the root oneshot. The database is already saved."""
@@ -1960,7 +1960,7 @@ class Controller:
 
     def _finish_menu_check(self, generation: int) -> None:
         try:
-            release = check_release()
+            release = check_release(fresh=True)
             can_apply = apply_supported()
         except Exception:
             logger.exception("Update check failed")

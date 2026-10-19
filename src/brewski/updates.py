@@ -84,12 +84,14 @@ def check_release(
     revision_path: Path | None = None,
     timeout: float = 30,
     source: str | None = None,
+    fresh: bool = False,
 ) -> ReleaseInfo:
     """Compare this install with the update selected in Settings.
 
     Main uses the latest GitHub release. Beta uses the tip of the beta branch.
     An explicit opener or revision path skips the short cache so tests stay isolated.
     The cache is kept per source, so switching Main to Beta does not reuse the other answer.
+    A fresh check asks GitHub even when a recent answer is saved, then replaces that answer.
     """
 
     chosen = source if source in {"main", "beta"} else None
@@ -102,10 +104,11 @@ def check_release(
         )
     chosen = chosen or _saved_update_source()
     now = time.monotonic()
-    with _cache_lock:
-        cached = _cache.get(chosen)
-    if cached is not None and now - cached[0] < _CACHE_SECONDS:
-        return cached[1]
+    if not fresh:
+        with _cache_lock:
+            cached = _cache.get(chosen)
+        if cached is not None and now - cached[0] < _CACHE_SECONDS:
+            return cached[1]
     info = _check_release(opener=None, revision_path=None, timeout=timeout, source=chosen)
     with _cache_lock:
         _cache[chosen] = (time.monotonic(), info)
@@ -160,7 +163,7 @@ def write_status(
         logger.warning("Could not write %s", path)
 
 
-def report(directory: Path | None = None) -> dict:
+def report(directory: Path | None = None, *, fresh: bool = False) -> dict:
     status = read_status(directory)
     if status["phase"] in {"downloading", "building", "installing"}:
         return {
@@ -174,7 +177,7 @@ def report(directory: Path | None = None) -> dict:
             "source": _saved_update_source(),
             "ref": status.get("ref"),
         }
-    release = check_release()
+    release = check_release(fresh=fresh)
     return {
         "current": release.current,
         "latest": release.latest,

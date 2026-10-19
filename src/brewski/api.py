@@ -52,7 +52,8 @@ def create_app(controller: Controller) -> Flask:
 
     @app.get("/api/update")
     def get_update():
-        return jsonify(controller.update_status())
+        fresh = request.args.get("fresh", "").lower() in {"1", "true", "yes"}
+        return jsonify(controller.update_status(fresh=fresh))
 
     @app.post("/api/update")
     def post_update():

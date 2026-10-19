@@ -48,6 +48,21 @@ def _opener(status, payload):
     return opener
 
 
+def test_a_fresh_check_asks_github_again(monkeypatch):
+    calls = []
+
+    def fake(**kwargs):
+        calls.append(kwargs["source"])
+        return ReleaseInfo(current="0.1.0", latest="v0.1.0", available=False, reachable=True, source=kwargs["source"])
+
+    monkeypatch.setattr("brewski.updates._cache", {})
+    monkeypatch.setattr("brewski.updates._check_release", fake)
+    check_release(source="beta")
+    check_release(source="beta")
+    check_release(source="beta", fresh=True)
+    assert calls == ["beta", "beta"]
+
+
 def test_version_compare():
     assert is_newer("v0.3.0", "0.2.0")
     assert is_newer("0.2.1", "v0.2.0")

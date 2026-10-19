@@ -311,7 +311,7 @@ export function mountSettings(root) {
     apply.hidden = true
     result.textContent = 'Checking...'
     try {
-      const update = await api.updateStatus()
+      const update = await api.updateStatus({ fresh: true })
       if (stopped) return
       result.textContent = describeUpdate(update)
       const canInstall = update.available && update.reachable && update.apply_supported

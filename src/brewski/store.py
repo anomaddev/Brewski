@@ -39,6 +39,10 @@ EARLY_CUTOFF_MAX_F = 20.0
 # Gallons of liquid in the pot for a calibration. The coast scales with this.
 CHARGE_MIN_GALLONS = 0.25
 CHARGE_MAX_GALLONS = 100.0
+# Where a Pi looks for the next Brewski update. Main is the latest published
+# release. Beta is the newest commit on the beta branch.
+UPDATE_SOURCES = ("main", "beta")
+DEFAULT_UPDATE_SOURCE = "main"
 # BCM defaults from the still wiring. Heaters drive the AC SSRs. Each probe is
 # one MAX31865: they share SPI, and each one takes its own chip select. Probe 2
 # is present and disabled until that second board is wired. The remaining pins
@@ -72,7 +76,8 @@ CREATE TABLE IF NOT EXISTS settings (
     heaters TEXT,
     sensors TEXT,
     setup_complete INTEGER NOT NULL DEFAULT 0,
-    gpio TEXT
+    gpio TEXT,
+    update_source TEXT NOT NULL DEFAULT 'main'
 );
 
 CREATE TABLE IF NOT EXISTS runs (
@@ -205,8 +210,9 @@ def default_gpio() -> GpioConfig:
         i2c_scl=3,
         encoder_a=27,
         encoder_b=22,
-        led_start=23,
-        led_stop=24,
+        # The first written map had these two relays backwards.
+        led_start=24,
+        led_stop=23,
         button_start=5,
         button_stop=6,
         i2c_devices=(
@@ -255,6 +261,7 @@ class Settings:
     charge_gallons: float | None = None
     setup_complete: bool = False
     gpio: GpioConfig | None = None
+    update_source: str = DEFAULT_UPDATE_SOURCE
 
     @property
     def heater_count(self) -> int:
@@ -292,6 +299,7 @@ class Settings:
             "learned_cooldown_f_per_min": self.learned_cooldown_f_per_min,
             "charge_gallons": self.charge_gallons,
             "setup_complete": self.setup_complete,
+            "update_source": self.update_source,
             "gpio": (self.gpio or default_gpio()).to_dict(),
             "heaters": [channel.to_dict() for channel in self.heaters],
             "sensors": [channel.to_dict() for channel in self.sensors],
@@ -341,6 +349,7 @@ def merge_settings(current: Settings, patch: dict) -> Settings:
         "charge_gallons",
         "setup_complete",
         "gpio",
+        "update_source",
     }
     unknown = sorted(set(patch) - allowed)
     if unknown:
@@ -386,6 +395,7 @@ def parse_settings(data: dict) -> Settings:
         charge_gallons=_optional_charge(data.get("charge_gallons")),
         setup_complete=_flag(data.get("setup_complete")),
         gpio=gpio,
+        update_source=_update_source(data.get("update_source")),
     )
 
 
@@ -492,7 +502,8 @@ class Store:
                     heater_min_off_seconds = ?, early_cutoff_f = ?, cabinet_limit_f = ?,
                     learned_coast_f = ?, learned_coast_seconds = ?, learned_cooldown_f_per_min = ?,
                     charge_gallons = ?,
-                    heaters = ?, sensors = ?, setup_complete = ?, gpio = ?
+                    heaters = ?, sensors = ?, setup_complete = ?, gpio = ?,
+                    update_source = ?
                 WHERE id = 1
                 """,
                 _settings_values(settings),
@@ -712,8 +723,9 @@ class Store:
                 id, heater_count, sensor_count, heater_names, sensor_names,
                 target_temp_f, heater_min_on_seconds, heater_min_off_seconds,
                 early_cutoff_f, cabinet_limit_f, learned_coast_f, learned_coast_seconds,
-                learned_cooldown_f_per_min, charge_gallons, heaters, sensors, setup_complete, gpio
-            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                learned_cooldown_f_per_min, charge_gallons, heaters, sensors, setup_complete, gpio,
+                update_source
+            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             _settings_values(settings),
         )
@@ -818,6 +830,8 @@ def _migrate(connection: sqlite3.Connection) -> None:
     adding_setup = "setup_complete" not in settings_columns
     _add_column(connection, "settings", "setup_complete", "INTEGER NOT NULL DEFAULT 0")
     _add_column(connection, "settings", "gpio")
+    _add_column(connection, "settings", "update_source", "TEXT NOT NULL DEFAULT 'main'")
+    _swap_documented_led_pins(connection)
     if not adding_setup or not _table_exists(connection, "runs"):
         return
     has_runs = connection.execute("SELECT 1 FROM runs LIMIT 1").fetchone()
@@ -826,6 +840,36 @@ def _migrate(connection: sqlite3.Connection) -> None:
     ).fetchone()
     if has_runs or has_coast:
         connection.execute("UPDATE settings SET setup_complete = 1")
+
+
+def _swap_documented_led_pins(connection: sqlite3.Connection) -> None:
+    """Correct a saved map that still has the lamp relays reversed.
+
+    Start is BCM 24 and Stop is BCM 23. Only that old pair is rewritten, and
+    only once: after the swap the row no longer matches.
+    """
+
+    if not _table_exists(connection, "settings"):
+        return
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(settings)")}
+    if "gpio" not in columns:
+        return
+    row = connection.execute("SELECT gpio FROM settings WHERE id = 1").fetchone()
+    if row is None or row[0] is None:
+        return
+    try:
+        gpio = json.loads(row[0])
+    except (TypeError, json.JSONDecodeError):
+        return
+    leds = gpio.get("leds") if isinstance(gpio, dict) else None
+    if not isinstance(leds, dict) or leds.get("start") != 23 or leds.get("stop") != 24:
+        return
+    leds["start"] = 24
+    leds["stop"] = 23
+    connection.execute(
+        "UPDATE settings SET gpio = ? WHERE id = 1",
+        (json.dumps(gpio),),
+    )
 
 
 def _seed_heater_meters(connection: sqlite3.Connection) -> None:
@@ -913,6 +957,7 @@ def _settings_values(settings: Settings) -> tuple:
         json.dumps([channel.to_dict() for channel in settings.sensors]),
         1 if settings.setup_complete else 0,
         json.dumps((settings.gpio or default_gpio()).to_dict()),
+        settings.update_source,
     )
 
 
@@ -942,6 +987,7 @@ def _settings_from_row(row: sqlite3.Row) -> Settings:
         charge_gallons=_optional_float(row, "charge_gallons"),
         setup_complete=_stored_flag(row, "setup_complete"),
         gpio=gpio,
+        update_source=_stored_update_source(row),
     )
 
 
@@ -1254,6 +1300,26 @@ def _i2c_devices(value: object) -> tuple[I2cDevice, ...]:
             )
         )
     return tuple(devices)
+
+
+def _update_source(value: object) -> str:
+    if value is None or value == "":
+        return DEFAULT_UPDATE_SOURCE
+    if not isinstance(value, str):
+        raise SettingsError("Update source must be main or beta")
+    source = value.strip().lower()
+    if source not in UPDATE_SOURCES:
+        raise SettingsError("Update source must be main or beta")
+    return source
+
+
+def _stored_update_source(row: sqlite3.Row) -> str:
+    if "update_source" not in row.keys() or not row["update_source"]:
+        return DEFAULT_UPDATE_SOURCE
+    source = str(row["update_source"]).strip().lower()
+    if source not in UPDATE_SOURCES:
+        return DEFAULT_UPDATE_SOURCE
+    return source
 
 
 def _flag(value: object) -> bool:

@@ -7,7 +7,7 @@ target dial moves the highlight, Start chooses the line, and Stop goes back.
 from __future__ import annotations
 
 from brewski.lcd import clip_line
-from brewski.updates import ReleaseInfo
+from brewski.updates import ReleaseInfo, offer_ends
 
 ITEMS = ("about", "update", "reboot")
 LABELS = {
@@ -129,7 +129,8 @@ class SoftwareMenu:
             return ["Check for Update", "GitHub unreachable", "", "STOP back"]
         if not release.available:
             return ["Check for Update", "Up to date", release.current or version, "STOP back"]
-        current = release.current or version
-        latest = release.latest or ""
+        left, right = offer_ends(release)
+        if not left:
+            left = version
         action = "START install" if self.can_apply else "Cannot install here"
-        return ["Update available", f"{current} -> {latest}", action, "STOP back"]
+        return ["Update available", f"{left} -> {right}", action, "STOP back"]

@@ -44,8 +44,8 @@ The circuits below are drawn so the current software still matches, with no pola
 | --- | --- | --- | --- | --- |
 | Heater 1 SSR | 12 | 32 | high | `active_high=True` in `sources/pi.py` |
 | Heater 2 SSR | 16 | 36 | high | same |
-| Start lamp | 23 | 16 | low | `LED_ACTIVE_HIGH = False` in `lcd.py` |
-| Stop lamp | 24 | 18 | low | same |
+| Start lamp | 24 | 18 | low | `LED_ACTIVE_HIGH = False` in `lcd.py` |
+| Stop lamp | 23 | 16 | low | same |
 | Start button | 5 | 29 | low (pressed to ground) | `pull_up=True` in `panel.py` |
 | Stop button | 6 | 31 | low (pressed to ground) | same |
 | Encoder A | 27 | 13 | quadrature | `RotaryEncoder` in `panel.py` |
@@ -157,7 +157,7 @@ A snubber across each phototriac, 39 Ω in series with 0.01 µF, is the network 
 | Optocoupler | OK1 MOC3063 | OK2 MOC3063 |
 | LED resistor | R1 220 Ω | R2 220 Ω |
 | Pull-up | R3 10 kΩ to 3.3 V | R4 10 kΩ to 3.3 V |
-| GPIO | BCM 23 | BCM 24 |
+| GPIO | BCM 24 | BCM 23 |
 | Snubber | R9 39 Ω, C3 0.01 µF | R10 39 Ω, C4 0.01 µF |
 
 J14 is the lamp supply screw terminal, labeled `LAMP L` and `LAMP N`. Both lamps share it, downstream of F1. J11 pins `L1` and `L2` are the Start lamp. J12 pins `L1` and `L2` are the Stop lamp.

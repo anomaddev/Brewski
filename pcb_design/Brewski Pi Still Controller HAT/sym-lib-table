@@ -1,5 +1,0 @@
-(sym_lib_table
-  (version 7)
-  (lib (name "ProtoFlow_Parts")(type "KiCad")(uri "${KIPRJMOD}/ProtoFlow_Parts.kicad_sym")(options "")(descr "Parts imported by ProtoFlow"))
-  (lib (name "ProtoFlow")(type "KiCad")(uri "${KIPRJMOD}/ProtoFlow.kicad_sym")(options "")(descr "ProtoFlow project symbols"))
-)

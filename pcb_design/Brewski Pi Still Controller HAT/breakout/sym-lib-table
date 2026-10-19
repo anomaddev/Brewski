@@ -1,4 +1,0 @@
-(sym_lib_table
-  (version 7)
-  (lib (name "ProtoFlow")(type "KiCad")(uri "${KIPRJMOD}/ProtoFlow.kicad_sym")(options "")(descr "ProtoFlow project symbols"))
-)

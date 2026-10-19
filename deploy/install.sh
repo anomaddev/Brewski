@@ -144,8 +144,15 @@ fetch_release() {
   fi
   local rc=0 tag="" installed="" dest tarball url status repo
   ensure_curl
-  tag=$(latest_release) || rc=$?
-  if [[ "$rc" -eq 1 ]]; then
+  if [[ -n "${BREWSKI_UPDATE_REF:-}" ]]; then
+    tag=$BREWSKI_UPDATE_REF
+    if [[ ! "$tag" =~ ^[A-Za-z0-9._+-]+$ ]]; then
+      die "the update ref is not a release tag or commit."
+    fi
+  else
+    tag=$(latest_release) || rc=$?
+  fi
+  if [[ -z "${BREWSKI_UPDATE_REF:-}" && "$rc" -eq 1 ]]; then
     if [[ "$soft" == "1" ]]; then
       echo "brewski: GitHub is unreachable. Starting the installed version."
       exit 0
@@ -174,7 +181,11 @@ fetch_release() {
   BREWSKI_SRC_TMP=$dest
   tarball=$dest/brewski.tar.gz
   url="https://api.github.com/repos/${GITHUB_REPO}/tarball/${tag}"
-  echo "Downloading ${GITHUB_REPO} release ${tag}..."
+  if [[ -n "${BREWSKI_UPDATE_REF:-}" ]]; then
+    echo "Downloading ${GITHUB_REPO} ${tag}..."
+  else
+    echo "Downloading ${GITHUB_REPO} release ${tag}..."
+  fi
 
   status=$(
     curl -sS -L -o "$tarball" -w "%{http_code}" \

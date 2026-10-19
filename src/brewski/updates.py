@@ -15,7 +15,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from brewski import __version__
@@ -28,7 +28,7 @@ from brewski.lcd import (
     prompt_lines,
 )
 from brewski.paths import data_directory
-from brewski.store import load_settings
+from brewski.store import DEFAULT_UPDATE_SOURCE, load_settings
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ APPLY_UNIT = "brewski-apply-update.service"
 PROMPT_SECONDS = 60
 _CACHE_SECONDS = 20.0
 _cache_lock = threading.Lock()
-_cache: tuple[float, ReleaseInfo] | None = None
+_cache: dict[str, tuple[float, ReleaseInfo]] = {}
 
 
 @dataclass(frozen=True)
@@ -49,6 +49,8 @@ class ReleaseInfo:
     available: bool
     reachable: bool
     revision: str | None = None
+    ref: str | None = None
+    source: str = DEFAULT_UPDATE_SOURCE
 
 
 def normalize_version(tag: str) -> tuple[int, int, int] | None:
@@ -78,23 +80,32 @@ def check_release(
     opener=None,
     revision_path: Path | None = None,
     timeout: float = 30,
+    source: str | None = None,
 ) -> ReleaseInfo:
-    """Compare the running version with the latest GitHub release.
+    """Compare this install with the update selected in Settings.
 
+    Main uses the latest GitHub release. Beta uses the tip of the beta branch.
     An explicit opener or revision path skips the short cache so tests stay isolated.
+    The cache is kept per source, so switching Main to Beta does not reuse the other answer.
     """
 
-    global _cache
+    chosen = source if source in {"main", "beta"} else None
     if opener is not None or revision_path is not None:
-        return _check_release(opener=opener, revision_path=revision_path, timeout=timeout)
+        return _check_release(
+            opener=opener,
+            revision_path=revision_path,
+            timeout=timeout,
+            source=chosen or DEFAULT_UPDATE_SOURCE,
+        )
+    chosen = chosen or _saved_update_source()
     now = time.monotonic()
     with _cache_lock:
-        cached = _cache
+        cached = _cache.get(chosen)
     if cached is not None and now - cached[0] < _CACHE_SECONDS:
         return cached[1]
-    info = _check_release(opener=None, revision_path=None, timeout=timeout)
+    info = _check_release(opener=None, revision_path=None, timeout=timeout, source=chosen)
     with _cache_lock:
-        _cache = (time.monotonic(), info)
+        _cache[chosen] = (time.monotonic(), info)
     return info
 
 
@@ -122,6 +133,7 @@ def read_status(directory: Path | None = None) -> dict:
         "current": data.get("current") or "",
         "latest": data.get("latest") or "",
         "error": data.get("error"),
+        "ref": data.get("ref") if isinstance(data.get("ref"), str) else None,
     }
 
 
@@ -132,9 +144,10 @@ def write_status(
     latest: str,
     error: str | None,
     directory: Path | None = None,
+    ref: str | None = None,
 ) -> None:
     path = status_path(directory)
-    payload = {"phase": phase, "current": current, "latest": latest, "error": error}
+    payload = {"phase": phase, "current": current, "latest": latest, "error": error, "ref": ref}
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(".json.tmp")
@@ -155,6 +168,8 @@ def report(directory: Path | None = None) -> dict:
         "apply_supported": apply_supported(),
         "phase": status["phase"],
         "error": status["error"],
+        "source": release.source,
+        "ref": release.ref,
     }
 
 
@@ -195,8 +210,8 @@ def run_boot_update() -> int:
         logger.warning("An update is available and the LCD could not be opened. Keeping this version.")
         display.close()
         return 0
-    latest = release.latest or ""
-    display.write(prompt_lines(release.current, latest, PROMPT_SECONDS))
+    left, right = offer_ends(release)
+    display.write(prompt_lines(left, right, PROMPT_SECONDS))
     buttons = open_buttons(settings)
     if buttons is None:
         logger.warning(
@@ -205,13 +220,13 @@ def run_boot_update() -> int:
             PROMPT_SECONDS,
         )
     leds = open_prompt_leds(settings)
-    logger.info("Update %s is available. Waiting %ss for Start or Stop.", latest, PROMPT_SECONDS)
+    logger.info("Update %s is available. Waiting %ss for Start or Stop.", right, PROMPT_SECONDS)
     try:
         choice = wait_for_choice(
             display,
             buttons.pressed if buttons is not None else (lambda: None),
-            current=release.current,
-            latest=latest,
+            current=left,
+            latest=right,
             seconds=PROMPT_SECONDS,
         )
     finally:
@@ -220,7 +235,7 @@ def run_boot_update() -> int:
         if buttons is not None:
             buttons.close()
     if choice != "start":
-        display.write(progress_lines("kept", release.current, release.latest or ""))
+        display.write(progress_lines("kept", left, right))
         time.sleep(1)
         display.close()
         return 0
@@ -238,6 +253,9 @@ def run_apply_update() -> int:
     directory = data_directory(False)
     settings = load_settings(directory)
     release = check_release()
+    saved_ref = read_status(directory).get("ref")
+    if isinstance(saved_ref, str) and saved_ref.strip():
+        release = replace(release, ref=saved_ref.strip())
     display = open_display(settings) if settings is not None else NullDisplay()
     try:
         ok = run_installer(display, release, directory)
@@ -285,14 +303,16 @@ def wait_for_choice(
 
 def run_installer(display: Display, release: ReleaseInfo, directory: Path) -> bool:
     latest = release.latest or ""
+    label = progress_label(release)
     write_status(
         phase="downloading",
         current=release.current,
         latest=latest,
         error=None,
+        ref=release.ref,
         directory=directory,
     )
-    display.write(progress_lines("downloading", release.current, latest))
+    display.write(progress_lines("downloading", release.current, label))
     stop = threading.Event()
 
     def mirror() -> None:
@@ -300,7 +320,7 @@ def run_installer(display: Display, release: ReleaseInfo, directory: Path) -> bo
         while not stop.is_set():
             phase = read_status(directory).get("phase") or "downloading"
             if phase != seen and phase != "idle":
-                display.write(progress_lines(str(phase), release.current, latest))
+                display.write(progress_lines(str(phase), release.current, label))
                 seen = str(phase)
             stop.wait(0.25)
 
@@ -309,6 +329,8 @@ def run_installer(display: Display, release: ReleaseInfo, directory: Path) -> bo
     try:
         env = dict(os.environ)
         env["BREWSKI_STATUS_FILE"] = str(status_path(directory))
+        if release.ref:
+            env["BREWSKI_UPDATE_REF"] = release.ref
         try:
             result = subprocess.run(
                 [str(INSTALL_SCRIPT), "--apply"],
@@ -327,9 +349,10 @@ def run_installer(display: Display, release: ReleaseInfo, directory: Path) -> bo
             current=release.current,
             latest=latest,
             error="The installer did not finish.",
+            ref=release.ref,
             directory=directory,
         )
-        display.write(progress_lines("failed", release.current, latest))
+        display.write(progress_lines("failed", release.current, label))
         logger.error("Brewski update failed. Keeping %s.", release.current)
         return False
     write_status(
@@ -337,9 +360,10 @@ def run_installer(display: Display, release: ReleaseInfo, directory: Path) -> bo
         current=release.current,
         latest=latest,
         error=None,
+        ref=release.ref,
         directory=directory,
     )
-    display.write(progress_lines("complete", release.current, latest))
+    display.write(progress_lines("complete", release.current, label))
     logger.info("Brewski updated to %s.", latest or release.current)
     return True
 
@@ -361,13 +385,45 @@ def request_reboot() -> None:
     subprocess.run(["sudo", "-n", systemctl, "reboot"], check=True)
 
 
-def _check_release(*, opener, revision_path: Path | None, timeout: float) -> ReleaseInfo:
+def offer_ends(release: ReleaseInfo) -> tuple[str, str]:
+    """Installed identity, then the offered release or commit, for one LCD line."""
+
+    left = release.current
+    if release.source == "beta" and _is_commit_sha(release.revision):
+        left = release.revision[:7]
+    return left, release.latest or ""
+
+
+def progress_label(release: ReleaseInfo) -> str:
+    """What the install screen shows while a download is in progress."""
+
+    if release.source == "beta":
+        left, right = offer_ends(release)
+        return f"{left} -> {right}" if right else left
+    return release.latest or ""
+
+
+def _check_release(*, opener, revision_path: Path | None, timeout: float, source: str) -> ReleaseInfo:
     revision = _read_revision(REVISION_PATH if revision_path is None else revision_path)
+    if source == "beta":
+        sha, reachable = _fetch_commit(opener, timeout)
+        available = bool(reachable and sha and revision != sha)
+        return ReleaseInfo(
+            current=__version__,
+            latest=sha[:7] if sha else None,
+            available=available,
+            reachable=reachable,
+            revision=revision,
+            ref=sha,
+            source="beta",
+        )
     latest, reachable = _fetch_latest(opener, timeout)
     available = False
     if reachable and latest:
         if revision is not None and revision == latest:
             available = False
+        elif _is_commit_sha(revision):
+            available = True
         else:
             available = is_newer(latest, __version__)
     return ReleaseInfo(
@@ -376,6 +432,8 @@ def _check_release(*, opener, revision_path: Path | None, timeout: float) -> Rel
         available=available,
         reachable=reachable,
         revision=revision,
+        ref=latest,
+        source="main",
     )
 
 
@@ -385,6 +443,63 @@ def _read_revision(path: Path) -> str | None:
     except OSError:
         return None
     return text or None
+
+
+def _saved_update_source() -> str:
+    try:
+        settings = load_settings(data_directory(False))
+    except Exception:
+        return DEFAULT_UPDATE_SOURCE
+    if settings is None or settings.update_source not in {"main", "beta"}:
+        return DEFAULT_UPDATE_SOURCE
+    return settings.update_source
+
+
+def _is_commit_sha(value: str | None) -> bool:
+    if value is None or len(value) != 40:
+        return False
+    return all(character in "0123456789abcdefABCDEF" for character in value)
+
+
+def _fetch_commit(opener, timeout: float) -> tuple[str | None, bool]:
+    """Full SHA at the tip of the beta branch.
+
+    A missing branch is reachable with nothing to install. Any other failure
+    means GitHub could not be read.
+    """
+
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{GITHUB_REPO}/commits/beta",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "brewski",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    open_url = opener or urllib.request.urlopen
+    try:
+        with open_url(request, timeout=timeout) as response:
+            status = getattr(response, "status", None) or response.getcode()
+            body = response.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None, True
+        logger.info("GitHub returned HTTP %s.", exc.code)
+        return None, False
+    except Exception:
+        logger.info("GitHub could not be reached.")
+        return None, False
+    if status == 404:
+        return None, True
+    if status != 200:
+        return None, False
+    try:
+        sha = json.loads(body)["sha"]
+    except (KeyError, TypeError, json.JSONDecodeError):
+        return None, False
+    if not _is_commit_sha(sha):
+        return None, False
+    return sha, True
 
 
 def _fetch_latest(opener, timeout: float) -> tuple[str | None, bool]:

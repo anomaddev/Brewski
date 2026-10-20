@@ -52,7 +52,7 @@ GROK_RISE_BAND_F = 1.0
 
 @dataclass
 class ThermalModel:
-    """Parabolas and the straight rate learned from one calibration."""
+    """Parabolas and the straight rate learned across calibrations."""
 
     cold_start_seconds: float | None = None
     # °F/s². While the sheath is soaking, ΔT = cold_start_quad * t².
@@ -64,6 +64,8 @@ class ThermalModel:
     # and the slope is zero at coast_seconds. v is the heating rate at shutoff.
     coast_quad: float | None = None
     cooldown_f_per_min: float | None = None
+    # How many calibrations have been folded into these numbers.
+    calibration_count: int | None = None
 
     def ready(self) -> bool:
         """True when a look-ahead has both a heating rate and a coast."""
@@ -76,7 +78,7 @@ class ThermalModel:
         )
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "cold_start_seconds": self.cold_start_seconds,
             "cold_start_quad": self.cold_start_quad,
             "linear_rate_f_per_sec": self.linear_rate_f_per_sec,
@@ -85,6 +87,9 @@ class ThermalModel:
             "coast_quad": self.coast_quad,
             "cooldown_f_per_min": self.cooldown_f_per_min,
         }
+        if self.calibration_count:
+            data["calibration_count"] = int(self.calibration_count)
+        return data
 
 
 def model_from_dict(data: dict | None) -> ThermalModel:
@@ -105,6 +110,14 @@ def model_from_dict(data: dict | None) -> ThermalModel:
             return None
         return number
 
+    count = data.get("calibration_count")
+    try:
+        calibration_count = int(count) if count is not None else None
+    except (TypeError, ValueError):
+        calibration_count = None
+    if calibration_count is not None and calibration_count <= 0:
+        calibration_count = None
+
     return ThermalModel(
         cold_start_seconds=optional("cold_start_seconds"),
         cold_start_quad=optional("cold_start_quad"),
@@ -113,6 +126,7 @@ def model_from_dict(data: dict | None) -> ThermalModel:
         coast_seconds=optional("coast_seconds"),
         coast_quad=optional("coast_quad"),
         cooldown_f_per_min=optional("cooldown_f_per_min"),
+        calibration_count=calibration_count,
     )
 
 
@@ -153,7 +167,60 @@ def scale_model(
         coast_seconds=model.coast_seconds,
         coast_quad=quad,
         cooldown_f_per_min=cool,
+        calibration_count=model.calibration_count,
     )
+
+
+_BLEND_FIELDS = (
+    ("cold_start_seconds", 2),
+    ("cold_start_quad", 6),
+    ("linear_rate_f_per_sec", 5),
+    ("coast_rise_f", 2),
+    ("coast_seconds", 2),
+    ("cooldown_f_per_min", 2),
+)
+
+
+def model_weight(model: ThermalModel) -> int:
+    """How many calibrations the saved numbers already speak for."""
+
+    if model.calibration_count and model.calibration_count > 0:
+        return int(model.calibration_count)
+    measured = [getattr(model, name) for name, _digits in _BLEND_FIELDS]
+    if any(value is not None for value in measured):
+        return 1
+    return 0
+
+
+def blend_model(prior: ThermalModel, measured: ThermalModel) -> ThermalModel:
+    """Fold one calibration into the model saved by the earlier ones.
+
+    Each calibration has the same weight. A stage this run did not measure
+    keeps the earlier number. The first calibration is stored as measured.
+    """
+
+    weight = model_weight(prior)
+    blended = ThermalModel()
+    used = False
+    for name, digits in _BLEND_FIELDS:
+        new = getattr(measured, name)
+        old = getattr(prior, name)
+        if new is None:
+            setattr(blended, name, old)
+            continue
+        used = True
+        if old is None or weight <= 0:
+            setattr(blended, name, round(float(new), digits))
+        else:
+            setattr(blended, name, round((float(old) * weight + float(new)) / (weight + 1), digits))
+    if blended.coast_rise_f is not None and blended.coast_seconds and blended.coast_seconds > 0:
+        blended.coast_quad = round(-blended.coast_rise_f / (blended.coast_seconds ** 2), 6)
+    else:
+        blended.coast_quad = measured.coast_quad if measured.coast_quad is not None else prior.coast_quad
+    if not used:
+        return prior
+    blended.calibration_count = weight + 1
+    return blended
 
 
 def endpoint_rate(samples: list[tuple[float, float]]) -> float | None:
@@ -380,12 +447,17 @@ def _coast_fraction(model: ThermalModel, on_seconds: float) -> float:
     return min(1.0, slope / full_slope)
 
 
-def remaining_coast_f(model: ThermalModel, slope_f_per_sec: float) -> float:
-    """Degrees left on the fixed crest when the shutoff slope is ``slope``.
+# A live rise steeper than the Stage I rate is still storing heat. Cap the
+# scale so one noisy sample cannot demand an enormous crest.
+COAST_SLOPE_SCALE_MAX = 3.0
 
-    The crest itself does not change. A linear-heat slope starts at the
-    beginning of it. A shallower slope, from a colder sheath or from time
-    already spent cooling, starts further along the same parabola.
+
+def remaining_coast_f(model: ThermalModel, slope_f_per_sec: float) -> float:
+    """Degrees the pot still climbs if the heaters open at this slope.
+
+    At the slope Stage I measured, the crest is the measured rise. A shallower
+    slope is further along that same curve. A steeper slope has not finished
+    storing heat, so the crest grows with the slope instead of staying capped.
     """
 
     rise = model.coast_rise_f or 0.0
@@ -394,8 +466,11 @@ def remaining_coast_f(model: ThermalModel, slope_f_per_sec: float) -> float:
     linear = model.linear_rate_f_per_sec or 0.0
     velocity, _quad, _duration = coast_curve(model)
     start = linear if linear > 0 else velocity
-    if start <= 0 or slope_f_per_sec >= start:
+    if start <= 0:
         return rise
+    if slope_f_per_sec > start:
+        scale = min(COAST_SLOPE_SCALE_MAX, slope_f_per_sec / start)
+        return rise * scale
     fraction = slope_f_per_sec / start
     return rise * fraction * fraction
 
@@ -459,7 +534,7 @@ def budgeted_coast_f(
     if linear <= 0:
         return now
     if slope_f_per_sec >= linear * 0.98:
-        return rise
+        return remaining_coast_f(model, slope_f_per_sec)
     accel = 2.0 * startup_quad(model)
     if accel <= 0:
         return now

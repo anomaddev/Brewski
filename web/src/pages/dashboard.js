@@ -2,7 +2,18 @@ import { api } from '../api.js'
 import { openPath } from '../router.js'
 import { createTempChart, setChartPoints } from '../chart.js'
 import {
-  activeSlots,
+  CONDENSE_AFTER_MS,
+  DEFAULT_SPAN_INDEX,
+  GAP_AFTER_MS,
+  TIMELINE_SPANS,
+  bindTimelinePan,
+  clampEnd,
+  formatOff,
+  mergeGaps,
+  toDisplay,
+  toReal,
+} from '../timeline.js'
+import {
   aboveBoiling,
   escapeHtml,
   formatDuration,
@@ -13,8 +24,6 @@ import {
   statusLabel,
 } from '../format.js'
 import { setAppVersion, setSourceBadge } from '../layout.js'
-
-const CHART_WINDOW_MS = 2 * 60 * 60 * 1000
 
 function forecastText(status) {
   const parts = []
@@ -52,11 +61,13 @@ function coastText(status) {
   const learned = `${Number(status.learned_coast_f).toFixed(1)}°F`
   const gallons = status.charge_gallons == null ? '' : ` at ${Number(status.charge_gallons)} gal`
   if (status.learned_cooldown_f_per_min == null) {
-    return withEta(`Learned coast ${learned}${gallons}. Calibrate again to measure how fast the pot cools.`)
+    return withEta(`Learned coast ${learned}${gallons}. Another calibration fine-tunes this model.`)
   }
   const rate = `${Number(status.learned_cooldown_f_per_min).toFixed(1)}°F/min`
+  const count = Number(status.calibration_count)
+  const tuned = count > 1 ? ` Tuned across ${count} calibrations.` : ''
   return withEta(
-    `Learned coast ${learned}${gallons}. Cooling is ${rate}. A full model turns the element off when the predicted crest reaches the target.`,
+    `Learned coast ${learned}${gallons}. Cooling is ${rate}.${tuned} Another calibration fine-tunes this model.`,
   )
 }
 
@@ -66,58 +77,42 @@ function runBadge(run) {
   return `<span class="status-badge status-calibration">Calibration</span> ${status}`
 }
 
-function clockLabel(at) {
-  return new Date(at).toLocaleTimeString('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-    second: '2-digit',
-  })
-}
-
-function runsInWindow(runs, now, cutoff) {
+function runsInWindow(runs, windowStart, windowEnd) {
   const visible = []
+  const wall = Date.now()
   for (const run of runs) {
     const start = Date.parse(run.started_at)
+    if (!Number.isFinite(start)) continue
     const cooling = run.cooldown_status === 'open'
     const finishedAt = run.cooldown_ended_at
       ? Date.parse(run.cooldown_ended_at)
       : run.ended_at
         ? Date.parse(run.ended_at)
-        : now
-    const last = cooling || !run.ended_at ? now : finishedAt
-    if (last < cutoff) break
-    if (start <= now) visible.push(run)
+        : wall
+    const last = cooling || !run.ended_at ? wall : finishedAt
+    if (last < windowStart) break
+    if (start <= windowEnd) visible.push(run)
   }
   return visible
 }
 
-function markersFor(runs, cutoff, now) {
+function markersFor(runs, windowStart, windowEnd) {
   const markers = []
   for (const run of runs) {
     const start = Date.parse(run.started_at)
-    if (start >= cutoff && start <= now) markers.push({ at: start, kind: 'start', label: 'Start' })
+    if (start >= windowStart && start <= windowEnd) markers.push({ at: start, kind: 'start', label: 'Start' })
     const named = Array.isArray(run.marks) ? run.marks : []
     const hasCooldown = named.some((mark) => mark.name === 'Cooldown')
     for (const mark of named) {
       if (mark.name === 'Start') continue
       const at = start + Number(mark.elapsed_seconds) * 1000
-      if (at >= cutoff && at <= now) markers.push({ at, kind: 'mark', label: mark.name })
+      if (at >= windowStart && at <= windowEnd) markers.push({ at, kind: 'mark', label: mark.name })
     }
     if (!run.ended_at || hasCooldown) continue
     const end = Date.parse(run.ended_at)
-    if (end >= cutoff && end <= now) markers.push({ at: end, kind: 'stop', label: 'Stop' })
+    if (end >= windowStart && end <= windowEnd) markers.push({ at: end, kind: 'stop', label: 'Stop' })
   }
   return markers
-}
-
-function tempsFor(sample, run, sensorNames) {
-  const slots = activeSlots(run, 'sensors')
-  return sensorNames.map((name) => {
-    const slot = slots.find((item) => item.name === name)
-    if (!slot) return null
-    const value = sample.temps_f[slot.index]
-    return value == null || Number.isNaN(Number(value)) ? null : Number(value)
-  })
 }
 
 export function mountDashboard(root) {
@@ -196,8 +191,16 @@ export function mountDashboard(root) {
       <section class="dashboard-card chart-card">
         <div class="card-title-with-timer">
           <h2 class="card-title">Temperature over time</h2>
+          <div class="chart-toolbar" role="group" aria-label="Chart time range">
+            <button type="button" class="chart-tool" id="chart-earlier" aria-label="Earlier">‹</button>
+            <button type="button" class="chart-tool" id="chart-later" aria-label="Later">›</button>
+            <button type="button" class="chart-tool" id="chart-shorter" aria-label="Show a shorter time span">−</button>
+            <span class="chart-span" id="chart-span">20 min</span>
+            <button type="button" class="chart-tool" id="chart-longer" aria-label="Show a longer time span">+</button>
+            <button type="button" class="chart-now" id="chart-now" hidden>Now</button>
+          </div>
         </div>
-        <div class="chart-container">
+        <div class="chart-container chart-timeline">
           <canvas id="temp-chart"></canvas>
         </div>
       </section>
@@ -230,9 +233,16 @@ export function mountDashboard(root) {
   `
 
   const chart = createTempChart(document.getElementById('temp-chart'), { timed: true })
-  const points = []
-  const seenSamples = new Set()
-  const settledRuns = new Set()
+  let spanIndex = DEFAULT_SPAN_INDEX
+  let follow = true
+  let viewEndReal = Date.now()
+  let listedRuns = []
+  let lastStatus = null
+  let timelineMeta = { earliest: null, latest: null, gaps: [] }
+  let timelineCache = null
+  let loadToken = 0
+  let loadTimer = null
+  let lastTimelineFetch = 0
   let renderedMode = null
   let calibrated = false
   let busy = false
@@ -286,6 +296,24 @@ export function mountDashboard(root) {
     busy = true
     try {
       await api.start({ target_temp_f: targetValue() })
+      clearError()
+      await refresh()
+    } catch (error) {
+      showError(error.message)
+    } finally {
+      busy = false
+    }
+  }
+
+  async function onCleanCalibration() {
+    if (busy) return
+    const confirmed = window.confirm(
+      'Clear the learned calibration? The heating model is erased and the next calibration starts from scratch. Past runs stay in the history.',
+    )
+    if (!confirmed) return
+    busy = true
+    try {
+      await api.cleanCalibration()
       clearError()
       await refresh()
     } catch (error) {
@@ -388,13 +416,15 @@ export function mountDashboard(root) {
     } else if (ready) {
       host.innerHTML = `
         <button class="action-btn start-btn" type="button" id="start-btn">Start</button>
-        <button class="action-btn calibrate-btn" type="button" id="calibrate-btn">Calibrate</button>`
+        <button class="action-btn calibrate-btn" type="button" id="calibrate-btn">Calibrate</button>
+        <button class="action-btn clean-btn" type="button" id="clean-btn">Clean Calibration</button>`
     } else {
       host.innerHTML = `
         <button class="action-btn start-btn" type="button" id="calibrate-btn">Calibrate</button>`
     }
     host.querySelector('#start-btn')?.addEventListener('click', onStart)
     host.querySelector('#calibrate-btn')?.addEventListener('click', onCalibrate)
+    host.querySelector('#clean-btn')?.addEventListener('click', onCleanCalibration)
     host.querySelector('#pause-btn')?.addEventListener('click', onPause)
     host.querySelector('#resume-btn')?.addEventListener('click', onResume)
     host.querySelector('#stop-btn')?.addEventListener('click', onStop)
@@ -558,56 +588,202 @@ export function mountDashboard(root) {
             : 'Run'
           : ''
 
+    listedRuns = history.runs
+    lastStatus = status
+    paintChart()
+    const refreshMs = TIMELINE_SPANS[spanIndex].ms > 6 * 60 * 60 * 1000 ? 30000 : 5000
+    if (follow && Date.now() - lastTimelineFetch > refreshMs) scheduleTimeline()
+  }
+
+  function axisGaps(now) {
+    const gaps = (timelineMeta.gaps || []).map((gap) => ({ from: gap.from, to: gap.to }))
+    if (timelineMeta.latest != null && now - timelineMeta.latest > GAP_AFTER_MS) {
+      gaps.push({ from: timelineMeta.latest, to: now })
+    }
+    return mergeGaps(gaps)
+  }
+
+  function neededRange(now) {
+    const span = TIMELINE_SPANS[spanIndex].ms
+    const gaps = axisGaps(now)
+    const end = follow ? now : viewEndReal
+    const endDisplay = toDisplay(end, gaps)
+    const earliest = timelineMeta.earliest
+    const lo = earliest == null ? end - span * 4 : Math.min(earliest, end)
+    const from = toReal(endDisplay - span * 2, gaps, lo - span, now)
+    const to = Math.min(now, toReal(endDisplay + span, gaps, lo, now))
+    return { from, to, span }
+  }
+
+  function cacheCovers(range) {
+    if (!timelineCache) return false
+    if (timelineCache.from > range.from + 500) return false
+    if (timelineCache.to < range.to - 500) return false
+    if (timelineCache.span > range.span) return false
+    return true
+  }
+
+  function scheduleTimeline() {
+    clearTimeout(loadTimer)
+    loadTimer = setTimeout(() => {
+      loadTimeline().catch((error) => showError(error.message))
+    }, 160)
+  }
+
+  async function loadTimeline() {
+    if (stopped) return
+    const token = ++loadToken
+    const first = neededRange(Date.now())
+    const cacheFresh = timelineCache && Date.now() - timelineCache.fetchedAt < 5000
+    const coversLiveEdge = first.to >= Date.now() - 10000
+    if (cacheCovers(first) && (!coversLiveEdge || cacheFresh)) {
+      lastTimelineFetch = Date.now()
+      return
+    }
+    let from = first.from
+    let to = Math.max(first.to, from + 1)
+    let data = await api.timeline(Math.floor(from), Math.ceil(to))
+    if (token !== loadToken || stopped) return
+    timelineMeta = {
+      earliest: data.earliest,
+      latest: data.latest,
+      gaps: data.gaps || [],
+    }
+    const again = neededRange(Date.now())
+    if (again.from < from - 1000) {
+      from = again.from
+      to = Math.max(again.to, from + 1)
+      data = await api.timeline(Math.floor(from), Math.ceil(to))
+      if (token !== loadToken || stopped) return
+      timelineMeta = {
+        earliest: data.earliest,
+        latest: data.latest,
+        gaps: data.gaps || [],
+      }
+    }
+    timelineCache = {
+      from,
+      to,
+      span: TIMELINE_SPANS[spanIndex].ms,
+      decimated: Boolean(data.decimated),
+      points: data.points || [],
+      fetchedAt: Date.now(),
+    }
+    lastTimelineFetch = Date.now()
+    paintChart()
+  }
+
+  function moveDisplay(displayDelta) {
     const now = Date.now()
-    const cutoff = now - CHART_WINDOW_MS
-    const visible = runsInWindow(history.runs, now, cutoff)
-    for (const summary of visible) {
-      const live = summary.id === status.run_id || summary.id === status.cooldown_run_id
-      if (!live && settledRuns.has(summary.id)) continue
-      const run = await api.run(summary.id)
-      mergeSamples(run, status.sensor_names)
-      const stillOpen = run.status === 'running' || run.status === 'paused' || run.cooldown_status === 'open'
-      if (!live && !stillOpen) settledRuns.add(summary.id)
+    if (follow) viewEndReal = now
+    const gaps = axisGaps(now)
+    const span = TIMELINE_SPANS[spanIndex].ms
+    const nextDisplay = toDisplay(viewEndReal, gaps) + displayDelta
+    const lo = timelineMeta.earliest == null ? now - span : Math.min(timelineMeta.earliest, now)
+    let nextReal = toReal(nextDisplay, gaps, lo - span, now)
+    nextReal = clampEnd(nextReal, span, gaps, timelineMeta.earliest, now)
+    if (now - nextReal <= 1500) {
+      follow = true
+      viewEndReal = now
+    } else {
+      follow = false
+      viewEndReal = nextReal
     }
-    addPoint({
-      at: now,
-      label: clockLabel(now),
-      temps: status.temps_f.slice(),
-      target: status.target_temp_f,
-    })
-    while (points.length && points[0].at < cutoff) points.shift()
-    setChartPoints(chart, points, status.sensor_names, markersFor(visible, cutoff, now))
+    paintChart()
+    scheduleTimeline()
   }
 
-  function addPoint(point) {
-    if (!Number.isFinite(point.at)) return
-    let lo = 0
-    let hi = points.length
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1
-      if (points[mid].at < point.at) lo = mid + 1
-      else hi = mid
-    }
-    const prev = points[lo - 1]
-    const next = points[lo]
-    if (prev && point.at - prev.at < 750) return
-    if (next && next.at - point.at < 750) return
-    points.splice(lo, 0, point)
+  function setSpan(index) {
+    spanIndex = Math.max(0, Math.min(TIMELINE_SPANS.length - 1, index))
+    paintChart()
+    scheduleTimeline()
   }
 
-  function mergeSamples(run, sensorNames) {
-    for (const sample of run.samples) {
-      if (seenSamples.has(sample.id)) continue
-      seenSamples.add(sample.id)
-      const at = Date.parse(sample.recorded_at)
-      addPoint({
+  function paintChart() {
+    if (!lastStatus) return
+    const now = Date.now()
+    const span = TIMELINE_SPANS[spanIndex].ms
+    if (follow) viewEndReal = now
+    const gaps = axisGaps(now)
+    viewEndReal = clampEnd(viewEndReal, span, gaps, timelineMeta.earliest, now)
+    const endDisplay = toDisplay(viewEndReal, gaps)
+    const startDisplay = endDisplay - span
+    const lo = timelineMeta.earliest == null ? viewEndReal - span : Math.min(timelineMeta.earliest, viewEndReal)
+    const startReal = toReal(startDisplay, gaps, lo - span, viewEndReal)
+    const points = []
+    for (const point of timelineCache?.points || []) {
+      const at = toDisplay(point.at, gaps)
+      if (at < startDisplay - 1000 || at > endDisplay + 1000) continue
+      points.push({
         at,
-        label: clockLabel(at),
-        temps: tempsFor(sample, run, sensorNames),
-        target: sample.target_temp_f,
+        temps: point.temps_f,
+        target: point.target_temp_f,
       })
     }
+    if (viewEndReal >= now - 2000) {
+      const liveAt = toDisplay(now, gaps)
+      const previous = points[points.length - 1]
+      if (!previous || liveAt > previous.at + 750) {
+        points.push({
+          at: liveAt,
+          temps: lastStatus.temps_f.slice(),
+          target: lastStatus.target_temp_f,
+        })
+      }
+    }
+    points.sort((left, right) => left.at - right.at)
+    const offSpans = gaps
+      .filter((gap) => gap.to > startReal && gap.from < viewEndReal && gap.to - gap.from > GAP_AFTER_MS)
+      .map((gap) => ({
+        from: toDisplay(Math.max(gap.from, startReal), gaps),
+        to: toDisplay(Math.min(gap.to, viewEndReal), gaps),
+        label: gap.to - gap.from > CONDENSE_AFTER_MS ? formatOff(gap.to - gap.from) : 'Off',
+      }))
+    const markers = markersFor(runsInWindow(listedRuns, startReal, viewEndReal), startReal, viewEndReal).map(
+      (marker) => ({ ...marker, at: toDisplay(marker.at, gaps) }),
+    )
+    setChartPoints(chart, points, lastStatus.sensor_names, markers, {
+      min: startDisplay,
+      max: endDisplay,
+      spans: offSpans,
+      spanMs: span,
+      connect: true,
+      toReal: (display) => toReal(display, gaps, lo - span, now),
+      hideTick: (real) =>
+        gaps.some((gap) => gap.to - gap.from > CONDENSE_AFTER_MS && real > gap.from && real < gap.to),
+    })
+    const spanLabel = document.getElementById('chart-span')
+    if (spanLabel) spanLabel.textContent = TIMELINE_SPANS[spanIndex].label
+    const nowButton = document.getElementById('chart-now')
+    if (nowButton) nowButton.hidden = follow
+    const later = document.getElementById('chart-later')
+    if (later) later.disabled = follow
+    const shorter = document.getElementById('chart-shorter')
+    const longer = document.getElementById('chart-longer')
+    if (shorter) shorter.disabled = spanIndex === 0
+    if (longer) longer.disabled = spanIndex === TIMELINE_SPANS.length - 1
   }
+
+  document.getElementById('chart-earlier').addEventListener('click', () => {
+    moveDisplay(-TIMELINE_SPANS[spanIndex].ms / 2)
+  })
+  document.getElementById('chart-later').addEventListener('click', () => {
+    moveDisplay(TIMELINE_SPANS[spanIndex].ms / 2)
+  })
+  document.getElementById('chart-shorter').addEventListener('click', () => setSpan(spanIndex - 1))
+  document.getElementById('chart-longer').addEventListener('click', () => setSpan(spanIndex + 1))
+  document.getElementById('chart-now').addEventListener('click', () => {
+    follow = true
+    viewEndReal = Date.now()
+    paintChart()
+    scheduleTimeline()
+  })
+  const unbindPan = bindTimelinePan(chart.canvas, (pixels) => {
+    const area = chart.chartArea
+    const width = area ? area.right - area.left : chart.canvas.clientWidth
+    if (!width) return
+    moveDisplay((-pixels / width) * TIMELINE_SPANS[spanIndex].ms)
+  })
 
   const timer = setInterval(() => {
     refresh().catch((error) => showError(error.message))
@@ -621,7 +797,9 @@ export function mountDashboard(root) {
   return () => {
     stopped = true
     clearInterval(timer)
+    clearTimeout(loadTimer)
     window.removeEventListener('brewski-refresh', onSetup)
+    unbindPan()
     chart.destroy()
   }
 }

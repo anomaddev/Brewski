@@ -63,6 +63,12 @@ def create_app(controller: Controller) -> Flask:
     def post_reboot():
         return jsonify(controller.reboot()), 202
 
+    @app.get("/api/timeline")
+    def timeline():
+        return jsonify(
+            controller.timeline(_timeline_ms("from"), _timeline_ms("to"), _timeline_max())
+        )
+
     @app.get("/api/runs")
     def runs():
         return jsonify(controller.runs())
@@ -70,6 +76,10 @@ def create_app(controller: Controller) -> Flask:
     @app.get("/api/runs/<int:run_id>")
     def run(run_id: int):
         return jsonify(controller.run(run_id))
+
+    @app.post("/api/calibration/clean")
+    def clean_calibration():
+        return jsonify(controller.clear_calibration())
 
     @app.post("/api/runs/start")
     def start_run():
@@ -111,6 +121,26 @@ def create_app(controller: Controller) -> Flask:
         return send_from_directory(dist, "index.html")
 
     return app
+
+
+def _timeline_ms(name: str) -> int:
+    raw = request.args.get(name)
+    if raw is None or raw == "":
+        raise ControllerError(f"Missing {name}", 400)
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ControllerError(f"{name} must be a timestamp in milliseconds", 400) from exc
+
+
+def _timeline_max() -> int:
+    raw = request.args.get("max")
+    if raw is None or raw == "":
+        return 1600
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ControllerError("max must be an integer", 400) from exc
 
 
 def _json_object() -> dict:

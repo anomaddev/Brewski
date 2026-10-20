@@ -2,6 +2,8 @@
 
 The loop is hardware-agnostic. It reads a :class:`HardwareSource`, decides
 whether the heaters should be on, and appends samples while a run is going.
+A timeline reading is saved on the same cadence whether or not a run is open,
+so the dashboard can scroll the controller clock after a reload.
 The first enabled probe is the one compared with the target. Once a
 calibration has saved a heating model, heaters turn off when the predicted
 crest reaches the target. Until then they turn off by the measured coast,
@@ -64,12 +66,14 @@ from brewski.thermal import (
     ThermalModel,
     accept_grok,
     apply_grok_value,
+    blend_model,
     hold_should_heat,
     model_from_dict,
     scale_model,
     seconds_to_landing,
     step_sheath_slope,
 )
+from brewski.timeline import TIMELINE_COMPACT_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -623,6 +627,8 @@ class Controller:
         self._run_id: int | None = None
         self._elapsed = 0.0
         self._since_sample = 0.0
+        self._since_timeline = 0.0
+        self._since_timeline_compact = 0.0
         self._cooldown_run_id: int | None = None
         self._cooldown_elapsed = 0.0
         self._cooldown_since_sample = 0.0
@@ -634,6 +640,9 @@ class Controller:
         self._charge_gallons: float | None = None
         self._session: CalibrationSession | None = None
         self._run_model: ThermalModel | None = None
+        # The model already saved when this calibration started. Later commits
+        # fold the new measurements into this copy, not into their own output.
+        self._calibration_prior: ThermalModel | None = None
         self._analysis_inbox: list[tuple[dict, object]] = []
         self._coast_f: float | None = None
         self._coast_seconds: float | None = None
@@ -691,6 +700,7 @@ class Controller:
             temp = self._cooldown_temp()
             if temp is not None and temp < SAFE_TEMP_F:
                 self._complete_cooldown(self.store.get_settings())
+        self._record_timeline_point()
 
     def start_loop(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -741,6 +751,13 @@ class Controller:
             listed = self.store.list_runs(self._live_overlay(), self._cooldown_overlay())
             listed["stats"]["heater_life_seconds"] = self._life_seconds()
             return listed
+
+    def timeline(self, start_ms: int, end_ms: int, max_points: int) -> dict:
+        if int(end_ms) < int(start_ms):
+            raise ControllerError("Timeline end is before the start", 400)
+        capped = min(5000, max(50, int(max_points)))
+        with self._lock:
+            return self.store.timeline(int(start_ms), int(end_ms), capped)
 
     def run(self, run_id: int) -> dict:
         with self._lock:
@@ -795,6 +812,36 @@ class Controller:
             self.store.reset_heater_life(slot)
             return self._status()
 
+    def clear_calibration(self) -> dict:
+        """Forget the learned heating model so the next calibration starts over.
+
+        Run history stays. A normal run stays locked until a new calibration
+        saves a coast.
+        """
+
+        with self._lock:
+            if self._mode in ("running", "paused"):
+                raise ControllerError("Stop the run before clearing the calibration", 409)
+            current = self.store.get_settings()
+            self.store.save_settings(
+                replace(
+                    current,
+                    learned_coast_f=None,
+                    learned_coast_seconds=None,
+                    learned_cooldown_f_per_min=None,
+                    thermal_model=None,
+                )
+            )
+            self._display_coast = None
+            self._display_rate = None
+            self._calibration_prior = None
+            self._run_model = None
+            self._coast_f = None
+            self._coast_seconds = None
+            status = self._status()
+        self._refresh_display()
+        return status
+
     def reset(self) -> dict:
         """Clear stored runs and return the controller to its first-boot state.
 
@@ -818,7 +865,9 @@ class Controller:
             self.store.reset()
             self._dial_target = None
             self._dial_dirty = False
+            self._since_timeline = 0.0
             self._live_temps = self.source.read_temperatures(SLOT_COUNT)
+            self._record_timeline_point()
             saved = self.store.get_settings().to_dict()
         self._refresh_display()
         return saved
@@ -917,6 +966,9 @@ class Controller:
                 gallons = settings.charge_gallons
             if kind == "calibration":
                 settings = self._scale_charge(settings, gallons)
+            self._calibration_prior = (
+                model_from_dict(settings.thermal_model) if kind == "calibration" else None
+            )
             self._run_kind = kind
             self._charge_gallons = gallons
             self._session = CalibrationSession() if kind == "calibration" else None
@@ -1154,6 +1206,10 @@ class Controller:
         self._live_temps = self.source.read_temperatures(SLOT_COUNT)
         self._sample_climate()
         self._emergency = self._emergency_codes(settings)
+        try:
+            self._note_timeline(dt, settings)
+        except Exception:
+            logger.exception("Timeline sample was not saved")
         if self._mode in ("running", "paused", "cooling"):
             if self._current_control(settings) is None:
                 self._predict_samples.clear()
@@ -1193,12 +1249,14 @@ class Controller:
         if session is not None:
             if session.model.coast_rise_f is not None or session.model.linear_rate_f_per_sec is not None:
                 self._commit_model(settings)
-            self._display_coast = session.model.coast_rise_f
-            self._display_rate = session.model.cooldown_f_per_min
+            saved = self.store.get_settings()
+            self._display_coast = saved.learned_coast_f
+            self._display_rate = saved.learned_cooldown_f_per_min
             self._calibration_settled = session.reached_target
             # The revision is for the next run. Detach this session first so
             # a live heater decision cannot pick the revised numbers up.
             self._session = None
+            self._calibration_prior = None
             self._queue_full_analysis(session)
         elif self._run_kind == "calibration" and self._coast_f is not None:
             self._display_coast = self._coast_f
@@ -1609,7 +1667,8 @@ class Controller:
         session = self._session
         if session is None:
             return
-        model = session.model
+        prior = self._calibration_prior if self._calibration_prior is not None else ThermalModel()
+        model = blend_model(prior, session.model)
         current = self.store.get_settings()
         coast = current.learned_coast_f
         seconds = current.learned_coast_seconds
@@ -2134,13 +2193,17 @@ class Controller:
         primary = float(raw)
         model = self._run_model
         if model is not None and model.ready():
+            live = slope_f_per_sec(self._predict_samples)
+            slope = self._sheath_slope
+            if live is not None and live > slope:
+                slope = live
             heat = hold_should_heat(
                 primary,
                 float(self._target_value(settings)),
                 self._pulse_on_seconds(settings),
                 model,
                 settings.heater_min_on_seconds,
-                slope_f_per_sec=self._sheath_slope,
+                slope_f_per_sec=slope,
             )
             return [heat and settings.heaters[index].enabled for index in range(SLOT_COUNT)]
         current = list(self._heaters[:SLOT_COUNT])
@@ -2161,6 +2224,27 @@ class Controller:
             and settings.heaters[index].enabled
             for index in range(SLOT_COUNT)
         ]
+
+    def _note_timeline(self, dt: float, settings: Settings) -> None:
+        """Save one reading per sample interval, in every mode.
+
+        A stalled clock can hand in a large ``dt``. That still records the
+        temperature we have now, not a burst of copies of the same reading.
+        """
+
+        self._since_timeline += dt
+        self._since_timeline_compact += dt
+        if self._since_timeline >= SAMPLE_INTERVAL_SECONDS:
+            self._since_timeline %= SAMPLE_INTERVAL_SECONDS
+            self._record_timeline_point(settings)
+        if self._since_timeline_compact >= TIMELINE_COMPACT_SECONDS:
+            self._since_timeline_compact = 0.0
+            self.store.compact_timeline()
+
+    def _record_timeline_point(self, settings: Settings | None = None) -> None:
+        if settings is None:
+            settings = self.store.get_settings()
+        self.store.add_timeline_point(self._sample_temps(), self._aim_temperature(settings))
 
     def _record_sample(self, settings: Settings) -> None:
         if self._run_id is None:
@@ -2218,6 +2302,7 @@ class Controller:
             "learned_coast_f": settings.learned_coast_f,
             "learned_coast_seconds": settings.learned_coast_seconds,
             "learned_cooldown_f_per_min": settings.learned_cooldown_f_per_min,
+            "calibration_count": model_from_dict(settings.thermal_model).calibration_count,
             "calibration_step": self._calibration_lcd().get("step"),
             "predicted_crest_f": None
             if self._session is None or self._session.predicted_crest is None

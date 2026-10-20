@@ -1,12 +1,15 @@
-"""SQLite storage for settings, runs, and the sample log."""
+"""SQLite storage for settings, runs, the sample log, and the timeline."""
 
 from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
+
+from brewski.timeline import GAP_AFTER_MS, iso_to_ms
 
 TARGET_MIN_F = 90.0
 TARGET_MAX_F = 240.0
@@ -128,6 +131,23 @@ CREATE TABLE IF NOT EXISTS samples (
 );
 
 CREATE INDEX IF NOT EXISTS samples_run_id ON samples(run_id, elapsed_seconds);
+
+CREATE TABLE IF NOT EXISTS timeline (
+    id INTEGER PRIMARY KEY,
+    recorded_ms INTEGER NOT NULL,
+    temps_f TEXT NOT NULL,
+    target_temp_f REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS timeline_recorded_ms ON timeline(recorded_ms);
+
+CREATE TABLE IF NOT EXISTS timeline_gaps (
+    id INTEGER PRIMARY KEY,
+    started_ms INTEGER NOT NULL,
+    ended_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS timeline_gaps_started ON timeline_gaps(started_ms);
 
 CREATE TABLE IF NOT EXISTS heater_meters (
     slot INTEGER PRIMARY KEY,
@@ -435,6 +455,8 @@ class Store:
             row = connection.execute("SELECT id FROM settings WHERE id = 1").fetchone()
             if row is None:
                 self._insert_settings(connection, default_settings())
+        self._backfill_timeline()
+        self.compact_timeline()
 
     def get_settings(self) -> Settings:
         with self._connect() as connection:
@@ -454,6 +476,8 @@ class Store:
             connection.execute("DELETE FROM run_marks")
             connection.execute("DELETE FROM samples")
             connection.execute("DELETE FROM runs")
+            connection.execute("DELETE FROM timeline_gaps")
+            connection.execute("DELETE FROM timeline")
             connection.execute("DELETE FROM settings")
             self._insert_settings(connection, default_settings())
 
@@ -608,6 +632,208 @@ class Store:
                     phase,
                 ),
             )
+
+    def add_timeline_point(
+        self,
+        temps_f: list[float | None],
+        target_temp_f: float,
+        recorded_ms: int | None = None,
+    ) -> None:
+        """Append one controller reading. A hole longer than 30 seconds is kept.
+
+        The chart collapses holes longer than 30 minutes. Those are the
+        stretches where this process was not running.
+        """
+
+        recorded_ms = int(time.time() * 1000) if recorded_ms is None else int(recorded_ms)
+        payload = json.dumps(
+            [None if value is None else round(float(value), 2) for value in temps_f]
+        )
+        with self._connect() as connection:
+            last = connection.execute("SELECT MAX(recorded_ms) AS at FROM timeline").fetchone()
+            previous = None if last is None or last["at"] is None else int(last["at"])
+            if previous is not None and recorded_ms - previous > GAP_AFTER_MS:
+                connection.execute(
+                    "INSERT INTO timeline_gaps (started_ms, ended_ms) VALUES (?, ?)",
+                    (previous, recorded_ms),
+                )
+            connection.execute(
+                """
+                INSERT INTO timeline (recorded_ms, temps_f, target_temp_f)
+                VALUES (?, ?, ?)
+                """,
+                (recorded_ms, payload, round(float(target_temp_f), 2)),
+            )
+
+    def timeline(self, start_ms: int, end_ms: int, max_points: int) -> dict:
+        """Readings in a real-time range, thinned to ``max_points`` when dense.
+
+        Gaps are every recorded hole, not only those inside the range. The
+        chart needs the whole list to place a window that crosses an outage.
+        """
+
+        max_points = max(1, int(max_points))
+        start_ms = int(start_ms)
+        end_ms = int(end_ms)
+        with self._connect() as connection:
+            bounds = connection.execute(
+                "SELECT MIN(recorded_ms) AS earliest, MAX(recorded_ms) AS latest FROM timeline"
+            ).fetchone()
+            gap_rows = connection.execute(
+                "SELECT started_ms, ended_ms FROM timeline_gaps ORDER BY started_ms, id"
+            ).fetchall()
+            count = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) AS n FROM timeline
+                    WHERE recorded_ms >= ? AND recorded_ms <= ?
+                    """,
+                    (start_ms, end_ms),
+                ).fetchone()["n"]
+            )
+            if count <= max_points:
+                rows = connection.execute(
+                    """
+                    SELECT id, recorded_ms, temps_f, target_temp_f
+                    FROM timeline
+                    WHERE recorded_ms >= ? AND recorded_ms <= ?
+                    ORDER BY recorded_ms, id
+                    """,
+                    (start_ms, end_ms),
+                ).fetchall()
+                decimated = False
+            else:
+                stride = max(1, (count + max_points - 1) // max_points)
+                rows = list(
+                    connection.execute(
+                        """
+                        WITH numbered AS (
+                            SELECT id, recorded_ms, temps_f, target_temp_f,
+                                   ROW_NUMBER() OVER (ORDER BY recorded_ms, id) AS n
+                            FROM timeline
+                            WHERE recorded_ms >= ? AND recorded_ms <= ?
+                        )
+                        SELECT id, recorded_ms, temps_f, target_temp_f
+                        FROM numbered
+                        WHERE n = 1 OR n = ? OR (n % ?) = 1
+                        ORDER BY recorded_ms, id
+                        """,
+                        (start_ms, end_ms, count, stride),
+                    ).fetchall()
+                )
+                decimated = True
+                have = {int(row["recorded_ms"]) for row in rows}
+                for gap in gap_rows:
+                    for edge in (int(gap["started_ms"]), int(gap["ended_ms"])):
+                        if edge < start_ms or edge > end_ms or edge in have:
+                            continue
+                        nearest = _nearest_timeline_row(connection, edge, start_ms, end_ms)
+                        if nearest is None or int(nearest["recorded_ms"]) in have:
+                            continue
+                        rows.append(nearest)
+                        have.add(int(nearest["recorded_ms"]))
+                rows.sort(key=lambda row: (int(row["recorded_ms"]), int(row["id"])))
+        settings = self.get_settings()
+        indexes = settings.enabled_sensor_indexes()
+        gaps = [
+            {"from": int(row["started_ms"]), "to": int(row["ended_ms"])} for row in gap_rows
+        ]
+        points = []
+        for row in rows:
+            stored = json.loads(row["temps_f"])
+            temps = []
+            for index in indexes:
+                value = stored[index] if index < len(stored) else None
+                temps.append(None if value is None else round(float(value), 2))
+            points.append(
+                {
+                    "at": int(row["recorded_ms"]),
+                    "temps_f": temps,
+                    "target_temp_f": row["target_temp_f"],
+                }
+            )
+        return {
+            "earliest": None if bounds["earliest"] is None else int(bounds["earliest"]),
+            "latest": None if bounds["latest"] is None else int(bounds["latest"]),
+            "gaps": gaps,
+            "points": points,
+            "decimated": decimated,
+        }
+
+    def compact_timeline(self, now_ms: int | None = None) -> None:
+        """Thin old readings. The last two days stay at the recorded rate.
+
+        A point that opens or closes a hole is kept, and so are the first and
+        last readings. Compaction does not invent holes.
+        """
+
+        now_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+        day = 24 * 60 * 60 * 1000
+        bands = (
+            (2 * day, 14 * day, 60 * 1000),
+            (14 * day, 180 * day, 5 * 60 * 1000),
+            (180 * day, None, 30 * 60 * 1000),
+        )
+        with self._connect() as connection:
+            for min_age, max_age, bucket in bands:
+                clauses = ["recorded_ms < ?"]
+                params: list[int] = [now_ms - min_age]
+                if max_age is not None:
+                    clauses.append("recorded_ms >= ?")
+                    params.append(now_ms - max_age)
+                where = " AND ".join(clauses)
+                connection.execute(
+                    f"""
+                    DELETE FROM timeline
+                    WHERE {where}
+                    AND recorded_ms != (SELECT MIN(recorded_ms) FROM timeline)
+                    AND recorded_ms != (SELECT MAX(recorded_ms) FROM timeline)
+                    AND recorded_ms NOT IN (
+                        SELECT started_ms FROM timeline_gaps
+                        UNION
+                        SELECT ended_ms FROM timeline_gaps
+                    )
+                    AND id NOT IN (
+                        SELECT MIN(id) FROM timeline
+                        WHERE {where}
+                        GROUP BY recorded_ms / ?
+                    )
+                    """,
+                    (*params, *params, bucket),
+                )
+
+    def _backfill_timeline(self) -> None:
+        """Copy an existing sample log once, so older runs still scroll."""
+
+        with self._connect() as connection:
+            if not _table_exists(connection, "timeline") or not _table_exists(connection, "samples"):
+                return
+            count = connection.execute("SELECT COUNT(*) AS n FROM timeline").fetchone()
+            if count is not None and int(count["n"]):
+                return
+            rows = connection.execute(
+                """
+                SELECT recorded_at, temps_f, target_temp_f
+                FROM samples
+                ORDER BY recorded_at, id
+                """
+            ).fetchall()
+            previous: int | None = None
+            for row in rows:
+                recorded_ms = iso_to_ms(row["recorded_at"])
+                if previous is not None and recorded_ms - previous > GAP_AFTER_MS:
+                    connection.execute(
+                        "INSERT INTO timeline_gaps (started_ms, ended_ms) VALUES (?, ?)",
+                        (previous, recorded_ms),
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO timeline (recorded_ms, temps_f, target_temp_f)
+                    VALUES (?, ?, ?)
+                    """,
+                    (recorded_ms, row["temps_f"], row["target_temp_f"]),
+                )
+                previous = recorded_ms
 
     def get_run(self, run_id: int) -> dict | None:
         with self._connect() as connection:
@@ -800,6 +1026,41 @@ class Store:
             """,
             _settings_values(settings),
         )
+
+
+def _nearest_timeline_row(
+    connection: sqlite3.Connection,
+    moment: int,
+    start_ms: int,
+    end_ms: int,
+) -> sqlite3.Row | None:
+    after = connection.execute(
+        """
+        SELECT id, recorded_ms, temps_f, target_temp_f
+        FROM timeline
+        WHERE recorded_ms >= ? AND recorded_ms <= ?
+        ORDER BY recorded_ms, id
+        LIMIT 1
+        """,
+        (moment, end_ms),
+    ).fetchone()
+    before = connection.execute(
+        """
+        SELECT id, recorded_ms, temps_f, target_temp_f
+        FROM timeline
+        WHERE recorded_ms <= ? AND recorded_ms >= ?
+        ORDER BY recorded_ms DESC, id DESC
+        LIMIT 1
+        """,
+        (moment, start_ms),
+    ).fetchone()
+    if after is None:
+        return before
+    if before is None:
+        return after
+    if abs(int(after["recorded_ms"]) - moment) < abs(int(before["recorded_ms"]) - moment):
+        return after
+    return before
 
 
 def heater_on_seconds(samples: list[dict], elapsed_seconds: float) -> list[float]:

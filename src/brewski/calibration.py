@@ -36,6 +36,7 @@ from brewski.thermal import (
 MARK_START = "Start"
 MARK_COLD_START = "Cold Start"
 MARK_HEATING = "Heating"
+MARK_COASTING = "Coasting"
 MARK_MOMENTUM = "Momentum"
 MARK_STAGE_II = "Stage II"
 MARK_STAGE_III = "Stage III"
@@ -96,6 +97,18 @@ class CalibrationSession:
         self._set_heat(elapsed, float(temp), max(0.0, on_seconds), max(0.0, min_on))
         self._watch_hold_crest(elapsed, float(temp))
         self.was_heating = self.heat
+
+    def _control_slope(self, elapsed: float) -> float:
+        """Sheath slope, raised when the probe is rising faster than that.
+
+        The sheath model stops at the Stage I rate. A probe that is still
+        steepening past that rate is storing a larger crest.
+        """
+
+        recent = [(stamp, reading) for stamp, reading in self.samples if stamp >= elapsed - 12.0]
+        rate = endpoint_rate(recent)
+        live = rate if rate is not None and rate > 0 else 0.0
+        return max(self.sheath_slope, live)
 
     def _since(self, origin: float | None) -> list[tuple[float, float]]:
         if origin is None:
@@ -162,6 +175,7 @@ class CalibrationSession:
             self.open_temp = temp
             self._reset_peak()
             self._enter("coast", elapsed)
+            self.pending_marks.append(MARK_COASTING)
             return
         if self.phase == "coast":
             self._track_peak(elapsed, temp)
@@ -240,7 +254,44 @@ class CalibrationSession:
                     self.live_rise = temp - self.open_temp
                 return
             goal = CALIBRATION_TEMP_F - APPROACH_MARGIN_F
-            rise = remaining_coast_f(self.model, self.sheath_slope)
+            slope = self._control_slope(elapsed)
+            rise = remaining_coast_f(self.model, slope)
+            # #region agent log
+            try:
+                import json
+                import time
+
+                _payload = {
+                    "sessionId": "dca23b",
+                    "hypothesisId": "B",
+                    "location": "calibration.py:_set_heat",
+                    "message": "approach shutoff",
+                    "data": {
+                        "temp": round(temp, 2),
+                        "goal": goal,
+                        "sheath_slope": round(self.sheath_slope, 4),
+                        "control_slope": round(slope, 4),
+                        "rise": round(rise, 2),
+                        "learned_rise": self.model.coast_rise_f,
+                        "learned_rate": self.model.linear_rate_f_per_sec,
+                        "heat": not (temp + rise >= goal or temp >= goal),
+                    },
+                    "timestamp": int(time.time() * 1000),
+                }
+                _line = json.dumps(_payload) + "\n"
+                for _path in (
+                    "/Volumes/VAB/Github/Brewski/.cursor/debug-dca23b.log",
+                    "/var/lib/brewski/debug-dca23b.log",
+                ):
+                    try:
+                        with open(_path, "a", encoding="utf-8") as _fh:
+                            _fh.write(_line)
+                        break
+                    except OSError:
+                        continue
+            except Exception:
+                pass
+            # #endregion
             self.predicted_crest = temp + rise
             if temp + rise >= goal or temp >= goal:
                 self.approach_coasting = True
@@ -252,8 +303,9 @@ class CalibrationSession:
             self.heat = True
             return
         if self.phase == "pulses":
+            slope = self._control_slope(elapsed)
             self.predicted_crest = temp + budgeted_coast_f(
-                self.model, self.sheath_slope, temp, CALIBRATION_TEMP_F
+                self.model, slope, temp, CALIBRATION_TEMP_F
             )
             self.heat = hold_should_heat(
                 temp,
@@ -261,12 +313,13 @@ class CalibrationSession:
                 on_seconds,
                 self.model,
                 min_on,
-                slope_f_per_sec=self.sheath_slope,
+                slope_f_per_sec=slope,
             )
             return
         if self.phase == "hold":
+            slope = self._control_slope(elapsed)
             self.predicted_crest = temp + budgeted_coast_f(
-                self.model, self.sheath_slope, temp, CALIBRATION_TEMP_F
+                self.model, slope, temp, CALIBRATION_TEMP_F
             )
             self.heat = hold_should_heat(
                 temp,
@@ -274,7 +327,7 @@ class CalibrationSession:
                 on_seconds,
                 self.model,
                 min_on,
-                slope_f_per_sec=self.sheath_slope,
+                slope_f_per_sec=slope,
             )
 
     def _watch_hold_crest(self, elapsed: float, temp: float) -> None:

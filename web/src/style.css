@@ -480,11 +480,13 @@ button { cursor: pointer; }
   margin: 0;
 }
 .gallons-field input { appearance: textfield; -moz-appearance: textfield; }
-.calibrate-btn {
+.calibrate-btn,
+.clean-btn {
   background: var(--sunken);
   color: var(--text);
   border: 1px solid rgba(255, 255, 255, 0.16);
 }
+.clean-btn { color: var(--muted); }
 .console .action-btn { flex: 0 0 auto; min-width: 8.75rem; }
 .board-title { font-size: 1.35rem; letter-spacing: -0.04em; font-weight: 680; }
 .eyebrow {
@@ -640,6 +642,45 @@ button { cursor: pointer; }
 .choice-row label:has(input:checked) { background: rgba(142, 162, 255, 0.22); color: white; }
 .choice-row label:has(input:disabled) { opacity: 0.55; }
 
+.chart-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-left: auto;
+}
+.chart-span {
+  min-width: 4.8rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-weight: 680;
+  font-size: 0.88rem;
+}
+.chart-tool,
+.chart-now {
+  height: 32px;
+  border: 1px solid var(--line);
+  background: var(--sunken);
+  color: var(--text);
+}
+.chart-tool {
+  width: 32px;
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 1.05rem;
+  line-height: 1;
+}
+.chart-tool:hover,
+.chart-now:hover { border-color: rgba(255, 255, 255, 0.18); color: var(--text); }
+.chart-tool:disabled { opacity: 0.35; cursor: default; }
+.chart-now {
+  border-radius: 999px;
+  padding: 0 12px;
+  color: var(--accent);
+  font-weight: 680;
+  font-size: 0.88rem;
+}
 .chart-container {
   position: relative;
   width: 100%;
@@ -647,6 +688,8 @@ button { cursor: pointer; }
   height: clamp(240px, calc(100vh - 560px), 340px);
   overflow: hidden;
 }
+.chart-timeline canvas { cursor: grab; touch-action: pan-y; }
+.chart-timeline canvas.is-panning { cursor: grabbing; }
 
 .status-details { display: flex; flex-direction: column; gap: 10px; }
 
@@ -757,7 +800,7 @@ input:focus, select:focus { outline: 2px solid rgba(142, 162, 255, 0.7); outline
 .num-step:has(input:disabled) { opacity: 0.55; }
 .num-step:has(input:disabled) .step-btn { pointer-events: none; }
 
-.status-actions { display: flex; gap: 10px; margin-top: 16px; }
+.status-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
 .console .status-actions { margin-top: 0; }
 .action-btn {
   flex: 1;
@@ -1464,6 +1507,8 @@ tr[data-href] { cursor: pointer; }
   }
   .step-btn svg { width: 16px; height: 10px; }
   .chart-container { height: 220px; }
+  .chart-tool, .chart-now { height: 44px; }
+  .chart-tool { width: 44px; }
   .view-all-btn { min-height: 44px; display: inline-flex; align-items: center; }
   .status-actions { flex-direction: column; }
   .console .status-actions,

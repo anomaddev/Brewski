@@ -345,6 +345,7 @@ def test_calibration_records_the_parabola_and_then_the_cooling_rate(store):
         "Start",
         "Cold Start",
         "Heating",
+        "Coasting",
         "Momentum",
         "Stage II",
     ]
@@ -865,3 +866,74 @@ def test_grok_can_replace_a_stage_slope_when_it_agrees(store, monkeypatch):
     kinds = {item["kind"]: item["accepted"] for item in controller.runs()["runs"][0]["analysis"]}
     assert kinds["linear"] is True
     assert kinds["full"] is True
+
+
+def test_a_later_calibration_averages_into_the_saved_model(store):
+    current = store.get_settings()
+    store.save_settings(
+        replace(
+            current,
+            learned_coast_f=2,
+            learned_coast_seconds=10,
+            learned_cooldown_f_per_min=1,
+            thermal_model={
+                "cold_start_seconds": 20,
+                "linear_rate_f_per_sec": 0.2,
+                "coast_rise_f": 2,
+                "coast_seconds": 10,
+                "coast_quad": -2 / 100,
+                "cooldown_f_per_min": 1,
+                "calibration_count": 1,
+            },
+        )
+    )
+    controller = Controller(store, StaticSource([70.0, 70.0]))
+    controller.start({"kind": "calibration"})
+    controller._session.model.linear_rate_f_per_sec = 0.4
+    controller._session.model.coast_rise_f = 4
+    controller._session.model.coast_seconds = 20
+    controller._session.model.cooldown_f_per_min = 3
+    controller._commit_model(store.get_settings())
+    saved = store.get_settings()
+    assert saved.thermal_model["linear_rate_f_per_sec"] == pytest.approx(0.3)
+    assert saved.thermal_model["coast_rise_f"] == pytest.approx(3)
+    assert saved.thermal_model["calibration_count"] == 2
+    assert saved.thermal_model["cold_start_seconds"] == pytest.approx(20)
+    assert saved.learned_coast_f == pytest.approx(3)
+
+    controller._session.model.coast_rise_f = 6
+    controller._commit_model(store.get_settings())
+    saved = store.get_settings()
+    assert saved.thermal_model["coast_rise_f"] == pytest.approx(4)
+    assert saved.thermal_model["calibration_count"] == 2
+
+
+def test_clean_calibration_forgets_the_model_and_locks_runs(store):
+    current = store.get_settings()
+    store.save_settings(
+        replace(
+            current,
+            learned_coast_f=4,
+            learned_coast_seconds=12,
+            learned_cooldown_f_per_min=2,
+            thermal_model={
+                "linear_rate_f_per_sec": 0.4,
+                "coast_rise_f": 4,
+                "calibration_count": 2,
+            },
+        )
+    )
+    controller = Controller(store, StaticSource([80.0, 70.0]))
+    controller.start()
+    with pytest.raises(ControllerError):
+        controller.clear_calibration()
+    controller.stop()
+    status = controller.clear_calibration()
+    assert status["learned_coast_f"] is None
+    assert status["learned_cooldown_f_per_min"] is None
+    assert status["calibration_count"] is None
+    assert store.get_settings().thermal_model is None
+    with pytest.raises(ControllerError):
+        controller.start()
+    started = controller.start({"kind": "calibration"})
+    assert started["run_kind"] == "calibration"

@@ -55,7 +55,7 @@ const runMarkersPlugin = {
       ctx.fillStyle = color
       ctx.font = "11px Inter, ui-sans-serif, system-ui, sans-serif"
       ctx.textBaseline = 'top'
-      const label = marker.label || (start ? 'Start' : 'Stop')
+      const label = marker.label || (start ? 'Start' : stop ? 'Stop' : 'Mark')
       const width = ctx.measureText(label).width
       const placeLeft = start
       ctx.textAlign = placeLeft ? 'right' : 'left'
@@ -72,6 +72,24 @@ const runMarkersPlugin = {
     })
     ctx.restore()
   },
+}
+
+function spanPixels(span, xScale, area) {
+  const start = xScale.getPixelForValue(span.from)
+  const end = xScale.getPixelForValue(span.to)
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null
+  let left = Math.max(area.left, Math.min(start, end))
+  let right = Math.min(area.right, Math.max(start, end))
+  // A collapsed outage can be only a sliver of a long window. Keep the break
+  // wide enough to read, without changing where the samples sit.
+  const minBand = 28
+  if (right - left < minBand) {
+    const mid = Math.min(area.right - minBand / 2, Math.max(area.left + minBand / 2, (left + right) / 2))
+    left = mid - minBand / 2
+    right = mid + minBand / 2
+  }
+  if (right - left < 1) return null
+  return { left, right }
 }
 
 function offLegendHidden(chart) {
@@ -93,14 +111,10 @@ const offSpansPlugin = {
     ctx.rect(area.left, area.top, area.right - area.left, area.bottom - area.top)
     ctx.clip()
     for (const span of spans) {
-      const start = xScale.getPixelForValue(span.from)
-      const end = xScale.getPixelForValue(span.to)
-      if (!Number.isFinite(start) || !Number.isFinite(end)) continue
-      const left = Math.max(area.left, Math.min(start, end))
-      const right = Math.min(area.right, Math.max(start, end))
-      if (right - left < 1) continue
+      const band = spanPixels(span, xScale, area)
+      if (!band) continue
       ctx.fillStyle = 'rgba(147, 160, 181, 0.14)'
-      ctx.fillRect(left, area.top, right - left, area.bottom - area.top)
+      ctx.fillRect(band.left, area.top, band.right - band.left, area.bottom - area.top)
     }
     ctx.restore()
   },
@@ -118,17 +132,18 @@ const offSpansPlugin = {
     ctx.font = "12px Inter, ui-sans-serif, system-ui, sans-serif"
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
-    const label = 'Off'
-    const textWidth = ctx.measureText(label).width
     const midY = (area.top + area.bottom) / 2
     for (const span of spans) {
-      const start = xScale.getPixelForValue(span.from)
-      const end = xScale.getPixelForValue(span.to)
-      if (!Number.isFinite(start) || !Number.isFinite(end)) continue
-      const left = Math.max(area.left, Math.min(start, end))
-      const right = Math.min(area.right, Math.max(start, end))
-      if (right - left < textWidth + 12) continue
-      ctx.fillText(label, (left + right) / 2, midY)
+      const band = spanPixels(span, xScale, area)
+      if (!band) continue
+      const text = span.label || 'Off'
+      const width = ctx.measureText(text).width
+      let x = (band.left + band.right) / 2
+      x = Math.min(area.right - width / 2 - 4, Math.max(area.left + width / 2 + 4, x))
+      ctx.fillStyle = 'rgba(16, 20, 27, 0.88)'
+      ctx.fillRect(x - width / 2 - 5, midY - 9, width + 10, 18)
+      ctx.fillStyle = OFF_LABEL
+      ctx.fillText(text, x, midY)
     }
     ctx.restore()
   },
@@ -136,12 +151,54 @@ const offSpansPlugin = {
 
 Chart.register(offSpansPlugin, runMarkersPlugin)
 
-function clockLabel(at) {
-  return new Date(at).toLocaleTimeString('en-US', {
+function clockLabel(at, spanMs) {
+  const date = new Date(at)
+  if (spanMs >= 24 * 60 * 60 * 1000) {
+    return date.toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      second: '2-digit',
+    })
+  }
+  return date.toLocaleTimeString('en-US', {
     hour: 'numeric',
     minute: '2-digit',
     second: '2-digit',
   })
+}
+
+function axisLabel(at, spanMs) {
+  const date = new Date(at)
+  if (!spanMs || spanMs < 24 * 60 * 60 * 1000) {
+    return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+  }
+  if (spanMs < 14 * 24 * 60 * 60 * 1000) {
+    return date.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric' })
+  }
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+function breakAtSpans(points, spans) {
+  if (!spans?.length || points.length < 2) return points
+  const ordered = [...spans].sort((left, right) => left.from - right.from)
+  const out = []
+  let spanIndex = 0
+  for (let index = 0; index < points.length; index += 1) {
+    const point = points[index]
+    out.push(point)
+    const next = points[index + 1]
+    if (!next) break
+    while (spanIndex < ordered.length && ordered[spanIndex].to <= point.at) spanIndex += 1
+    const span = ordered[spanIndex]
+    if (!span || point.break || next.break) continue
+    if (point.at <= span.from + 1 && next.at >= span.to - 1) {
+      out.push({ at: (span.from + span.to) / 2, temps: [], target: null, break: true })
+      spanIndex += 1
+    }
+  }
+  return out
 }
 
 function applyChartLayout(chart) {
@@ -194,8 +251,12 @@ export function createTempChart(canvas, { timed = false } = {}) {
           callbacks: timed
             ? {
                 title(items) {
-                  const value = items[0]?.parsed?.x
-                  return Number.isFinite(value) ? clockLabel(value) : ''
+                  const item = items[0]
+                  const value = item?.parsed?.x
+                  if (!Number.isFinite(value)) return ''
+                  const host = item.chart
+                  const real = host.$toReal ? host.$toReal(value) : value
+                  return clockLabel(real, host.$spanMs)
                 },
               }
             : {},
@@ -220,10 +281,10 @@ export function createTempChart(canvas, { timed = false } = {}) {
                 maxRotation: 0,
                 minRotation: 0,
                 callback(value) {
-                  return new Date(value).toLocaleTimeString('en-US', {
-                    hour: 'numeric',
-                    minute: '2-digit',
-                  })
+                  const host = this.chart
+                  const real = host.$toReal ? host.$toReal(value) : value
+                  if (host.$hideTick?.(real)) return ''
+                  return axisLabel(real, host.$spanMs)
                 },
               },
               grid: { display: false },
@@ -254,16 +315,25 @@ export function createTempChart(canvas, { timed = false } = {}) {
   return chart
 }
 
-export function setChartPoints(chart, points, sensorNames, markers = []) {
+function pointValue(point, index, timed) {
+  if (!timed) return point.break ? null : (point.temps[index] ?? null)
+  if (point.break) return { x: point.at, y: null }
+  return { x: point.at, y: point.temps[index] ?? null }
+}
+
+export function setChartPoints(chart, points, sensorNames, markers = [], view = null) {
   chart.$markers = markers
   const timed = Boolean(chart.$timed)
-  const spans = timed ? offSpans(points, OFF_GAP_MS) : []
+  const spans = view ? view.spans || [] : timed ? offSpans(points, OFF_GAP_MS) : []
   chart.$offSpans = spans
+  chart.$toReal = view?.toReal || null
+  chart.$spanMs = view?.spanMs || null
+  chart.$hideTick = view?.hideTick || null
+  const plotted = view?.connect ? breakAtSpans(points, spans) : points
+  const gapSpan = view?.connect ? false : OFF_GAP_MS
   const datasets = sensorNames.map((name, index) => ({
     label: `${name} (°F)`,
-    data: points.map((point) =>
-      timed ? { x: point.at, y: point.temps[index] ?? null } : (point.temps[index] ?? null),
-    ),
+    data: plotted.map((point) => pointValue(point, index, timed)),
     borderColor: SENSOR_COLORS[index % SENSOR_COLORS.length],
     backgroundColor: index === 0 ? 'rgba(125, 211, 252, 0.16)' : 'rgba(251, 191, 36, 0.08)',
     borderWidth: 2,
@@ -271,19 +341,23 @@ export function setChartPoints(chart, points, sensorNames, markers = []) {
     tension: 0.25,
     pointRadius: 0,
     pointHoverRadius: 4,
-    spanGaps: timed ? OFF_GAP_MS : true,
+    spanGaps: timed ? gapSpan : true,
   }))
-  if (points.length) {
+  if (plotted.length) {
     datasets.push({
       label: 'Target (°F)',
-      data: points.map((point) => (timed ? { x: point.at, y: point.target } : point.target)),
+      data: plotted.map((point) => {
+        if (!timed) return point.break ? null : point.target
+        if (point.break) return { x: point.at, y: null }
+        return { x: point.at, y: point.target }
+      }),
       borderColor: '#64748b',
       borderDash: [6, 4],
       borderWidth: 2,
       pointRadius: 0,
       fill: false,
       tension: 0,
-      spanGaps: timed ? OFF_GAP_MS : true,
+      spanGaps: timed ? gapSpan : true,
     })
   }
   if (spans.length) {
@@ -298,11 +372,14 @@ export function setChartPoints(chart, points, sensorNames, markers = []) {
       borderWidth: 0,
     })
   }
-  chart.data.labels = timed ? [] : points.map((point) => point.label)
+  chart.data.labels = timed ? [] : plotted.map((point) => point.label)
   chart.data.datasets = datasets
   if (timed) {
     const scale = chart.options.scales.x
-    if (points.length) {
+    if (view && Number.isFinite(view.min) && Number.isFinite(view.max)) {
+      scale.min = view.min
+      scale.max = view.max > view.min ? view.max : view.min + 1000
+    } else if (points.length) {
       let start = points[0].at
       let end = start
       for (const point of points) {

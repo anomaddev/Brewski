@@ -380,18 +380,94 @@ def _coast_fraction(model: ThermalModel, on_seconds: float) -> float:
     return min(1.0, slope / full_slope)
 
 
-def coast_rise_for(model: ThermalModel, on_seconds: float) -> float:
-    """Degrees the coast parabola adds after this on-interval.
+def remaining_coast_f(model: ThermalModel, slope_f_per_sec: float) -> float:
+    """Degrees left on the fixed crest when the shutoff slope is ``slope``.
 
-    A full characterization coasts ``coast_rise_f``. A shorter pulse leaves
-    with a shallower slope, so the same downward curve crests lower.
+    The crest itself does not change. A linear-heat slope starts at the
+    beginning of it. A shallower slope, from a colder sheath or from time
+    already spent cooling, starts further along the same parabola.
     """
 
-    full = model.coast_rise_f or 0.0
-    if full <= 0 or on_seconds <= 0:
+    rise = model.coast_rise_f or 0.0
+    if rise <= 0 or slope_f_per_sec <= 0:
         return 0.0
-    fraction = _coast_fraction(model, on_seconds)
-    return full * fraction * fraction
+    linear = model.linear_rate_f_per_sec or 0.0
+    velocity, _quad, _duration = coast_curve(model)
+    start = linear if linear > 0 else velocity
+    if start <= 0 or slope_f_per_sec >= start:
+        return rise
+    fraction = slope_f_per_sec / start
+    return rise * fraction * fraction
+
+
+def coast_rise_for(model: ThermalModel, on_seconds: float) -> float:
+    """Remaining crest if the shutoff slope is the slope at ``on_seconds``."""
+
+    if on_seconds <= 0:
+        return 0.0
+    return remaining_coast_f(model, rate_while_heating(model, on_seconds))
+
+
+def step_sheath_slope(
+    model: ThermalModel,
+    slope_f_per_sec: float,
+    *,
+    heating: bool,
+    dt: float,
+) -> float:
+    """Move the sheath slope for ``dt`` seconds of heating or cooling.
+
+    Heating accelerates toward the linear rate and does not start over at
+    zero when the SSR was already warm. Cooling walks down the fixed crest.
+    """
+
+    slope = max(0.0, slope_f_per_sec)
+    if dt <= 0:
+        return slope
+    linear = model.linear_rate_f_per_sec or 0.0
+    if heating:
+        if linear <= 0:
+            return slope
+        accel = 2.0 * startup_quad(model)
+        if (model.cold_start_seconds or 0.0) <= 0 or accel <= 0:
+            return linear
+        return min(linear, slope + accel * dt)
+    _velocity, quad, duration = coast_curve(model)
+    if quad >= 0 or duration <= 0:
+        return slope
+    return max(0.0, slope + 2.0 * quad * dt)
+
+
+def budgeted_coast_f(
+    model: ThermalModel,
+    slope_f_per_sec: float,
+    temp_f: float,
+    goal_f: float,
+) -> float:
+    """Crest to plan for if the heater stays on.
+
+    The slope right now may still be low. If the element would reach linear
+    heat before the probe got to ``goal_f``, the landing is the full crest,
+    so the shutoff has to use that crest now instead of running up to the goal.
+    """
+
+    rise = model.coast_rise_f or 0.0
+    if rise <= 0:
+        return 0.0
+    now = remaining_coast_f(model, slope_f_per_sec)
+    linear = model.linear_rate_f_per_sec or 0.0
+    if linear <= 0:
+        return now
+    if slope_f_per_sec >= linear * 0.98:
+        return rise
+    accel = 2.0 * startup_quad(model)
+    if accel <= 0:
+        return now
+    seconds_to_linear = (linear - max(0.0, slope_f_per_sec)) / accel
+    climb = (max(0.0, slope_f_per_sec) + linear) * 0.5 * seconds_to_linear
+    if temp_f + climb + rise >= goal_f:
+        return rise
+    return now
 
 
 def predicted_crest(
@@ -414,29 +490,58 @@ def predicted_crest(
     return crest
 
 
+def _pulse_temperature_gain(model: ThermalModel, slope_f_per_sec: float, seconds: float) -> float:
+    """Degrees the probe climbs while a pulse accelerates the sheath slope."""
+
+    if seconds <= 0:
+        return 0.0
+    end = step_sheath_slope(model, slope_f_per_sec, heating=True, dt=seconds)
+    return max(0.0, (max(0.0, slope_f_per_sec) + end) * 0.5 * seconds)
+
+
 def hold_should_heat(
     temp_f: float,
     target_f: float,
     on_seconds: float,
     model: ThermalModel,
     min_on_seconds: float,
+    slope_f_per_sec: float | None = None,
 ) -> bool:
-    """True when another moment of heat still lands on or under ``target_f``.
+    """True when the heater should be on so the fixed crest lands on target.
 
-    Far under the target the elements stay on until the crest catches it.
-    Close in, they wait until the shortest legal pulse would land on it.
+    Near the target the element pulses. It turns off once the crest from the
+    current sheath slope reaches the target, instead of staying on until the
+    probe itself reads the setpoint and then coasting past it.
     """
 
+    if slope_f_per_sec is None:
+        slope_f_per_sec = rate_while_heating(model, on_seconds) if on_seconds > 0 else 0.0
+    slope = max(0.0, slope_f_per_sec)
     if temp_f >= target_f and on_seconds <= 0:
         return False
     if on_seconds > 0:
-        return predicted_crest(temp_f, on_seconds, 0.0, model) < target_f
+        # Still on: stop when the crest being stored already covers the target.
+        # Close to the target that crest is the full one, so this is a pulse,
+        # not a run up to the reading.
+        rise = budgeted_coast_f(model, slope, temp_f, target_f)
+        return temp_f + rise < target_f
     minimum = max(0.0, min_on_seconds)
-    minimum_crest = predicted_crest(temp_f, 0.0, minimum, model)
-    if minimum_crest <= target_f:
-        return temp_f < target_f
-    rise = minimum_crest - temp_f
-    return temp_f <= target_f - rise
+    slope_after = step_sheath_slope(model, slope, heating=True, dt=minimum)
+    gain = _pulse_temperature_gain(model, slope, minimum)
+    rise = remaining_coast_f(model, slope_after)
+    return temp_f + gain + rise <= target_f and temp_f < target_f
+
+
+def _in_linear_heat(model: ThermalModel, on_seconds: float) -> bool:
+    """True once this on-interval has left the cold-start parabola.
+
+    From here the coast rise does not grow. More time on the straight line
+    stores the same crest.
+    """
+
+    if (model.linear_rate_f_per_sec or 0.0) <= 0:
+        return False
+    return on_seconds >= (model.cold_start_seconds or 0.0)
 
 
 def seconds_to_landing(
@@ -447,15 +552,44 @@ def seconds_to_landing(
     *,
     heating: bool,
     horizon: float,
+    off_seconds: float = 0.0,
+    slope_f_per_sec: float | None = None,
 ) -> float | None:
-    """Seconds until the look-ahead crest reaches ``target_f``."""
+    """Seconds until the probe reaches ``target_f``.
+
+    In linear heat the crest is the measured coast, added to the current
+    temperature. The straight rate covers the degrees before that crest, and
+    the coast parabola covers the crest itself. Before the rise is straight,
+    the crest still depends on how long the sheath has been on.
+    """
 
     if temp_f >= target_f:
         return 0.0
     if not model.ready():
         return None
+    if slope_f_per_sec is not None:
+        rise = budgeted_coast_f(model, slope_f_per_sec, temp_f, target_f)
+        full = model.coast_rise_f or 0.0
+        if full > 0 and rise >= full * 0.98 and (model.linear_rate_f_per_sec or 0.0) > 0:
+            return _seconds_from_fixed_crest(
+                temp_f,
+                target_f,
+                model,
+                heating=heating,
+                off_seconds=off_seconds,
+                horizon=horizon,
+            )
+    if _in_linear_heat(model, on_seconds):
+        return _seconds_from_fixed_crest(
+            temp_f,
+            target_f,
+            model,
+            heating=heating,
+            off_seconds=off_seconds,
+            horizon=horizon,
+        )
     if not heating:
-        return _seconds_on_coast(temp_f, target_f, on_seconds, 0.0, model, horizon)
+        return _seconds_on_coast(temp_f, target_f, on_seconds, off_seconds, model, horizon)
     if predicted_crest(temp_f, on_seconds, horizon, model) < target_f:
         return None
     lo = 0.0
@@ -470,6 +604,69 @@ def seconds_to_landing(
     opened_for = on_seconds + hi
     tail = _coast_duration(model, opened_for)
     return min(horizon, max(0.0, hi + tail))
+
+
+def _seconds_from_fixed_crest(
+    temp_f: float,
+    target_f: float,
+    model: ThermalModel,
+    *,
+    heating: bool,
+    off_seconds: float,
+    horizon: float,
+) -> float | None:
+    """Project the constant linear-heat crest forward from ``temp_f``."""
+
+    crest = model.coast_rise_f or 0.0
+    rate = model.linear_rate_f_per_sec or 0.0
+    need = target_f - temp_f
+    if need <= 0:
+        return 0.0
+    if heating:
+        if rate <= 0:
+            return None
+        before = need - crest
+        if before > 0:
+            if before / rate > horizon:
+                return None
+            tail = (model.coast_seconds or 0.0) if crest > 0 else 0.0
+            return min(horizon, before / rate + tail)
+        # This temperature plus the fixed crest already covers the target.
+        # Shut off now; the coast parabola climbs the rest.
+        return _crest_time_to_gain(model, need, 0.0, horizon)
+    return _crest_time_to_gain(model, need, off_seconds, horizon)
+
+
+def _crest_time_to_gain(
+    model: ThermalModel,
+    need_f: float,
+    off_seconds: float,
+    horizon: float,
+) -> float | None:
+    """Seconds for the fixed coast parabola to climb ``need_f`` more degrees."""
+
+    if need_f <= 0:
+        return 0.0
+    velocity, quad, duration = coast_curve(model)
+    if quad >= 0 or velocity <= 0 or duration <= 0:
+        return None
+    off = min(max(0.0, off_seconds), duration)
+    velocity_now = velocity + 2.0 * quad * off
+    if velocity_now <= PREDICT_MIN_RATE_F_PER_SEC:
+        return None
+    gained = velocity * off + quad * off * off
+    remaining = (model.coast_rise_f or 0.0) - gained
+    if need_f > remaining + 0.05:
+        return None
+    disc = velocity_now * velocity_now + 4.0 * quad * need_f
+    if disc < 0:
+        return None
+    root = (-velocity_now + math.sqrt(disc)) / (2.0 * quad)
+    if root < 0:
+        root = (-velocity_now - math.sqrt(disc)) / (2.0 * quad)
+    if root < 0:
+        return None
+    return min(horizon, max(0.0, root))
 
 
 def _coast_duration(model: ThermalModel, on_seconds: float) -> float:

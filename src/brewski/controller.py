@@ -68,6 +68,7 @@ from brewski.thermal import (
     model_from_dict,
     scale_model,
     seconds_to_landing,
+    step_sheath_slope,
 )
 
 logger = logging.getLogger(__name__)
@@ -658,6 +659,9 @@ class Controller:
         self._last_shutoff_coast = 0.0
         self._last_shutoff_rate: float | None = None
         self._heater_on_for = [0.0] * SLOT_COUNT
+        # Where the sheath sits on the fixed coast crest. Heating and cooling
+        # move it; opening the SSR does not put it back at zero.
+        self._sheath_slope = 0.0
         # Off-time at the moment each SSR last closed. Infinity is a cold start.
         self._off_when_closed = [math.inf] * SLOT_COUNT
         # On-time at the moment each SSR last opened, so the sheath can cool
@@ -917,6 +921,7 @@ class Controller:
             self._charge_gallons = gallons
             self._session = CalibrationSession() if kind == "calibration" else None
             self._run_model = None if kind == "calibration" else model_from_dict(settings.thermal_model)
+            self._sheath_slope = 0.0
             self._coast_f = None
             self._coast_seconds = None
             self._calibration_settled = False
@@ -1171,6 +1176,7 @@ class Controller:
         self._advance_calibration(settings)
         if self._mode != "running":
             return
+        self._step_sheath(dt, settings)
         self._command_heaters(settings)
         if self._mode != "running":
             return
@@ -1541,6 +1547,19 @@ class Controller:
         if session.finished:
             self._finish_run()
 
+    def _step_sheath(self, dt: float, settings: Settings) -> None:
+        """Move the crest entry for a normal run. Calibration steps its own."""
+
+        model = self._run_model
+        if self._session is not None or model is None or not model.ready():
+            return
+        self._sheath_slope = step_sheath_slope(
+            model,
+            self._sheath_slope,
+            heating=self._elements_on(settings),
+            dt=dt,
+        )
+
     def _pulse_on_seconds(self, settings: Settings) -> float:
         """How long the enabled elements that are on have been on."""
 
@@ -1552,6 +1571,32 @@ class Controller:
         if not ons:
             return 0.0
         return max(ons)
+
+    def _opened_on_seconds(self, settings: Settings) -> float:
+        """How long the elements had been on when they last opened."""
+
+        opened = [
+            self._on_when_opened[index]
+            for index in range(SLOT_COUNT)
+            if settings.heaters[index].enabled
+        ]
+        if not opened:
+            return 0.0
+        return max(opened)
+
+    def _coast_off_seconds(self, settings: Settings) -> float:
+        """How long the enabled elements have been off since they opened."""
+
+        offs = []
+        for index in range(SLOT_COUNT):
+            if not settings.heaters[index].enabled or self._heaters[index]:
+                continue
+            off = self._heater_off_for[index]
+            if math.isfinite(off):
+                offs.append(off)
+        if not offs:
+            return 0.0
+        return max(offs)
 
     def _add_mark(self, name: str) -> None:
         if self._run_id is None:
@@ -1916,13 +1961,23 @@ class Controller:
         rising = rate is not None and rate >= PREDICT_MIN_RATE_F_PER_SEC and temp < aim
         lookahead = self._lookahead_model()
         if lookahead is not None and (heating or rising):
+            # The crest is fixed. The sheath slope only picks where on it the
+            # shutoff starts, and the forecast climbs from there to the aim.
+            on_seconds = (
+                self._pulse_on_seconds(settings)
+                if heating
+                else self._opened_on_seconds(settings)
+            )
+            slope = self._session.sheath_slope if self._session is not None else self._sheath_slope
             seconds = seconds_to_landing(
                 temp,
                 aim,
-                self._pulse_on_seconds(settings),
+                on_seconds,
                 lookahead,
                 heating=heating,
+                off_seconds=0.0 if heating else self._coast_off_seconds(settings),
                 horizon=PREDICT_MAX_HORIZON_SECONDS,
+                slope_f_per_sec=slope,
             )
             return {
                 "seconds_to_target": _forecast_seconds(seconds),
@@ -2085,6 +2140,7 @@ class Controller:
                 self._pulse_on_seconds(settings),
                 model,
                 settings.heater_min_on_seconds,
+                slope_f_per_sec=self._sheath_slope,
             )
             return [heat and settings.heaters[index].enabled for index in range(SLOT_COUNT)]
         current = list(self._heaters[:SLOT_COUNT])

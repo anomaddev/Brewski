@@ -23,11 +23,13 @@ from brewski.thermal import (
     SETTLE_SECONDS,
     ThermalModel,
     endpoint_rate,
+    budgeted_coast_f,
     fit_startup_quad,
     hold_should_heat,
     linear_onset,
     nudge_model,
-    predicted_crest,
+    remaining_coast_f,
+    step_sheath_slope,
 )
 
 # One named line on the chart, in the order they are written.
@@ -69,6 +71,11 @@ class CalibrationSession:
         self.live_rise: float | None = None
         self.live_rate: float | None = None
         self.predicted_crest: float | None = None
+        # Slope of the fixed crest the sheath is on. Heating walks it toward
+        # the linear rate; cooling walks it toward the peak. It does not
+        # restart when the SSR cycles.
+        self.sheath_slope = 0.0
+        self._slope_elapsed = 0.0
 
     def observe(self, elapsed: float, temp: float, on_seconds: float, min_on: float) -> None:
         """Advance one reading. Marks and analysis requests land on this object."""
@@ -77,6 +84,14 @@ class CalibrationSession:
         self.pending_marks = []
         self.pending_analysis = []
         self.commit = False
+        dt = max(0.0, elapsed - self._slope_elapsed)
+        self._slope_elapsed = elapsed
+        self.sheath_slope = step_sheath_slope(
+            self.model,
+            self.sheath_slope,
+            heating=on_seconds > 0,
+            dt=dt,
+        )
         self._advance(elapsed, float(temp))
         self._set_heat(elapsed, float(temp), max(0.0, on_seconds), max(0.0, min_on))
         self._watch_hold_crest(elapsed, float(temp))
@@ -132,6 +147,9 @@ class CalibrationSession:
                 quad = self.model.cold_start_quad or 0.0
                 rate = 2.0 * quad * cold
             self.model.linear_rate_f_per_sec = round(max(0.0, float(rate)), 5)
+            # The rise just measured is the straight line, so the sheath is at
+            # the start of the fixed crest.
+            self.sheath_slope = self.model.linear_rate_f_per_sec
             if (self.model.cold_start_quad is None or self.model.cold_start_quad <= 0) and self.model.cold_start_seconds:
                 self.model.cold_start_quad = round(
                     self.model.linear_rate_f_per_sec / (2.0 * self.model.cold_start_seconds),
@@ -222,9 +240,9 @@ class CalibrationSession:
                     self.live_rise = temp - self.open_temp
                 return
             goal = CALIBRATION_TEMP_F - APPROACH_MARGIN_F
-            crest = predicted_crest(temp, on_seconds, 0.0, self.model)
-            self.predicted_crest = crest
-            if crest >= goal or temp >= goal:
+            rise = remaining_coast_f(self.model, self.sheath_slope)
+            self.predicted_crest = temp + rise
+            if temp + rise >= goal or temp >= goal:
                 self.approach_coasting = True
                 self.open_elapsed = elapsed
                 self.open_temp = temp
@@ -234,15 +252,29 @@ class CalibrationSession:
             self.heat = True
             return
         if self.phase == "pulses":
-            self.predicted_crest = predicted_crest(temp, on_seconds, 0.0, self.model)
+            self.predicted_crest = temp + budgeted_coast_f(
+                self.model, self.sheath_slope, temp, CALIBRATION_TEMP_F
+            )
             self.heat = hold_should_heat(
-                temp, CALIBRATION_TEMP_F, on_seconds, self.model, min_on
+                temp,
+                CALIBRATION_TEMP_F,
+                on_seconds,
+                self.model,
+                min_on,
+                slope_f_per_sec=self.sheath_slope,
             )
             return
         if self.phase == "hold":
-            self.predicted_crest = predicted_crest(temp, on_seconds, 0.0, self.model)
+            self.predicted_crest = temp + budgeted_coast_f(
+                self.model, self.sheath_slope, temp, CALIBRATION_TEMP_F
+            )
             self.heat = hold_should_heat(
-                temp, CALIBRATION_TEMP_F, on_seconds, self.model, min_on
+                temp,
+                CALIBRATION_TEMP_F,
+                on_seconds,
+                self.model,
+                min_on,
+                slope_f_per_sec=self.sheath_slope,
             )
 
     def _watch_hold_crest(self, elapsed: float, temp: float) -> None:

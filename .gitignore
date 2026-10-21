@@ -216,3 +216,6 @@ __marimo__/
 
 # KiCad / ProtoFlow PCB design (local for now)
 pcb_design/
+
+# Mac OS X
+.DS_Store

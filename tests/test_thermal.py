@@ -17,6 +17,7 @@ from brewski.thermal import (
     ThermalModel,
     blend_model,
     coast_entry_slope,
+    coast_temperature_scale,
     coast_rise_for,
     fit_coast_exponential,
     fit_heating_lag,
@@ -384,6 +385,29 @@ def test_the_coast_enters_at_the_heating_slope_for_this_on_time():
     steep = pulse_plan(100.0, 160.0, 30.0, model, 1.0, slope_f_per_sec=0.5, budgeted=False)
     assert steep["slope_f_per_sec"] == pytest.approx(0.5)
     assert steep["remaining_coast_f"] > longer["remaining_coast_f"]
+
+
+def test_a_warmer_shutoff_runs_further_than_the_measured_coast():
+    # Run 13: the learning coast opened at 111.8°F and rose 9.9°F. The proving
+    # pulse opened at 151.2°F on a 0.383°F/s slope and ran about 14°F.
+    model = ThermalModel(
+        linear_rate_f_per_sec=0.414,
+        coast_rise_f=9.9,
+        coast_tau_seconds=23.5,
+        coast_at_f=111.8,
+    )
+    cool = remaining_coast_f(model, 0.383, temp_f=111.8)
+    hot = remaining_coast_f(model, 0.383, temp_f=151.2)
+    assert cool == pytest.approx(0.383 * 23.5, abs=0.05)
+    assert hot == pytest.approx(cool * coast_temperature_scale(151.2, 111.8), abs=0.05)
+    assert hot == pytest.approx(13.5, abs=0.2)
+    # Same slope, no recorded temperature: the coast stays the measured one.
+    bare = ThermalModel(
+        linear_rate_f_per_sec=0.414,
+        coast_rise_f=9.9,
+        coast_tau_seconds=23.5,
+    )
+    assert remaining_coast_f(bare, 0.383, temp_f=151.2) == pytest.approx(cool, abs=0.05)
 
 
 def test_the_climb_pulse_stays_on_until_the_projection_crests_at_160():

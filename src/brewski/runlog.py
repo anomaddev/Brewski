@@ -90,6 +90,7 @@ def model_numbers(model: dict | None) -> dict | None:
         "coast_seconds",
         "coast_tau_seconds",
         "coast_quad",
+        "coast_at_f",
         "cooldown_f_per_min",
         "calibration_count",
     ):
@@ -500,6 +501,7 @@ _MODEL_EXPORT_KEYS = (
     "coast_seconds",
     "coast_tau_seconds",
     "coast_quad",
+    "coast_at_f",
     "cooldown_f_per_min",
     "calibration_count",
 )

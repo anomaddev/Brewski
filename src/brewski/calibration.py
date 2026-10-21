@@ -287,6 +287,8 @@ class CalibrationSession:
         self.guess.cooldown_f_per_min = round(per_min, 2)
         if self.guess.coast_tau_seconds:
             self.guess.coast_seconds = round(self.guess.coast_tau_seconds * 3.0, 2)
+        # The rise was measured at this shutoff. A warmer pot runs further.
+        self.guess.coast_at_f = round(float(opened), 2)
         self._copy_coast_to_model()
         self.pending_analysis.append(
             self._analysis("coast", "coast_rise_f", self.model.coast_rise_f, window)
@@ -302,6 +304,7 @@ class CalibrationSession:
         self.model.coast_rise_f = self.guess.coast_rise_f
         self.model.coast_tau_seconds = self.guess.coast_tau_seconds
         self.model.coast_seconds = self.guess.coast_seconds
+        self.model.coast_at_f = self.guess.coast_at_f
         self.model.soak_tau_seconds = self.guess.soak_tau_seconds
         self.model.cooldown_f_per_min = self.guess.cooldown_f_per_min
         if self.model.linear_rate_f_per_sec is None:

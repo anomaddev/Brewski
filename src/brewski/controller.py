@@ -2954,7 +2954,7 @@ class Controller:
         shutoff, opened = self._coast_origin()
         if shutoff <= 0 or opened is None:
             return None
-        full = remaining_coast_f(model, shutoff)
+        full = remaining_coast_f(model, shutoff, opened)
         climbed = max(0.0, temp_f - opened)
         return max(0.0, full - climbed)
 

@@ -89,6 +89,8 @@ class ThermalModel:
     coast_tau_seconds: float | None = None
     # °F/s², negative. Older calibrations stored the coast as a downward parabola.
     coast_quad: float | None = None
+    # Probe temperature where coast_rise_f was measured. A warmer shutoff runs further.
+    coast_at_f: float | None = None
     cooldown_f_per_min: float | None = None
     # How many calibrations have been folded into these numbers.
     calibration_count: int | None = None
@@ -113,6 +115,7 @@ class ThermalModel:
             "coast_seconds": self.coast_seconds,
             "coast_tau_seconds": self.coast_tau_seconds,
             "coast_quad": self.coast_quad,
+            "coast_at_f": self.coast_at_f,
             "cooldown_f_per_min": self.cooldown_f_per_min,
         }
         if self.calibration_count:
@@ -155,6 +158,7 @@ def model_from_dict(data: dict | None) -> ThermalModel:
         coast_seconds=optional("coast_seconds"),
         coast_tau_seconds=optional("coast_tau_seconds"),
         coast_quad=optional("coast_quad"),
+        coast_at_f=optional("coast_at_f"),
         cooldown_f_per_min=optional("cooldown_f_per_min"),
         calibration_count=calibration_count,
     )
@@ -200,6 +204,7 @@ def scale_model(
         coast_seconds=model.coast_seconds,
         coast_tau_seconds=model.coast_tau_seconds,
         coast_quad=quad,
+        coast_at_f=model.coast_at_f,
         cooldown_f_per_min=cool,
         calibration_count=model.calibration_count,
     )
@@ -215,6 +220,7 @@ _BLEND_FIELDS = (
     ("coast_rise_f", 2),
     ("coast_seconds", 2),
     ("coast_tau_seconds", 2),
+    ("coast_at_f", 2),
     ("cooldown_f_per_min", 2),
 )
 
@@ -571,6 +577,7 @@ def seed_model(prior: ThermalModel | None = None) -> ThermalModel:
             coast_seconds=prior.coast_seconds,
             coast_tau_seconds=prior.coast_tau_seconds,
             coast_quad=prior.coast_quad,
+            coast_at_f=prior.coast_at_f,
             cooldown_f_per_min=prior.cooldown_f_per_min,
             calibration_count=prior.calibration_count,
         )
@@ -922,12 +929,34 @@ def coast_entry_slope(
     return max(observed, rate_while_heating(model, on_seconds))
 
 
-def remaining_coast_f(model: ThermalModel, slope_f_per_sec: float) -> float:
+def coast_temperature_scale(temp_f: float | None, measured_at_f: float | None) -> float:
+    """How much further the pot runs when it is warmer than the measured coast.
+
+    ``measured_at_f`` is the shutoff temperature the rise was learned at.
+    Degrees above freezing are the same ratio on the Celsius scale. A shutoff
+    at that same temperature leaves the coast unchanged.
+    """
+
+    if temp_f is None or measured_at_f is None:
+        return 1.0
+    span = measured_at_f - 32.0
+    if span <= 1.0:
+        return 1.0
+    return max(0.0, float(temp_f) - 32.0) / span
+
+
+def remaining_coast_f(
+    model: ThermalModel,
+    slope_f_per_sec: float,
+    temp_f: float | None = None,
+) -> float:
     """Degrees the pot still climbs if the heaters open at this slope.
 
     The coast is ``slope · τ``. At the straight rate that is the measured
     rise. A shallower slope has stored less, in proportion to the slope. A
     steeper slope is still storing heat, so the rise grows with the slope.
+    A warmer pot than the one that coast was measured on runs further, in
+    proportion to its temperature above freezing.
     """
 
     if slope_f_per_sec <= 0:
@@ -939,16 +968,22 @@ def remaining_coast_f(model: ThermalModel, slope_f_per_sec: float) -> float:
     rise = model.coast_rise_f or 0.0
     if linear > 0 and slope_f_per_sec > linear and rise > 0:
         scale = min(COAST_SLOPE_SCALE_MAX, slope_f_per_sec / linear)
-        return rise * scale
-    return slope_f_per_sec * tau
+        base = rise * scale
+    else:
+        base = slope_f_per_sec * tau
+    return base * coast_temperature_scale(temp_f, model.coast_at_f)
 
 
-def coast_rise_for(model: ThermalModel, on_seconds: float) -> float:
+def coast_rise_for(
+    model: ThermalModel,
+    on_seconds: float,
+    temp_f: float | None = None,
+) -> float:
     """Remaining crest if the shutoff slope is the slope at ``on_seconds``."""
 
     if on_seconds <= 0:
         return 0.0
-    return remaining_coast_f(model, rate_while_heating(model, on_seconds))
+    return remaining_coast_f(model, rate_while_heating(model, on_seconds), temp_f)
 
 
 def step_sheath_slope(
@@ -998,15 +1033,15 @@ def budgeted_coast_f(
     so the shutoff has to use that crest now instead of running up to the goal.
     """
 
-    rise = model.coast_rise_f or 0.0
+    rise = (model.coast_rise_f or 0.0) * coast_temperature_scale(temp_f, model.coast_at_f)
     if rise <= 0:
         return 0.0
-    now = remaining_coast_f(model, slope_f_per_sec)
+    now = remaining_coast_f(model, slope_f_per_sec, temp_f)
     linear = model.linear_rate_f_per_sec or 0.0
     if linear <= 0:
         return now
     if slope_f_per_sec >= linear * 0.98:
-        return remaining_coast_f(model, slope_f_per_sec)
+        return remaining_coast_f(model, slope_f_per_sec, temp_f)
     tau = model.soak_tau_seconds or 0.0
     accel = 2.0 * startup_quad(model)
     if tau > 0 and accel <= 0:
@@ -1042,7 +1077,7 @@ def predicted_crest(
 
     future_on = max(0.0, on_seconds) + max(0.0, extra_on_seconds)
     at_open = temperature_after_heating(temp_f, on_seconds, extra_on_seconds, model)
-    crest = at_open + coast_rise_for(model, future_on)
+    crest = at_open + coast_rise_for(model, future_on, at_open)
     if future_on < PREDICT_MIN_SPAN_SECONDS:
         crest += EARLY_UNCERTAINTY_F
     return crest
@@ -1082,7 +1117,11 @@ def project_temperature(
         if tau <= 0 and slope > 0 and rise > 0:
             tau = rise / slope
     else:
-        rise = remaining_coast_f(model, slope) if model is not None and slope > 0 else 0.0
+        rise = (
+            remaining_coast_f(model, slope, temp_f)
+            if model is not None and slope > 0
+            else 0.0
+        )
         tau = (rise / slope) if slope > 0 and rise > 0 else 0.0
     # Three time constants deliver about 95% of the rise. After that the
     # line is the equilibrium, then the cooling rate.
@@ -1147,7 +1186,7 @@ def pulse_plan(
         rise = (
             budgeted_coast_f(model, slope, temp_f, target_f)
             if budgeted
-            else remaining_coast_f(model, slope)
+            else remaining_coast_f(model, slope, temp_f)
         )
         gain = 0.0
         crest = temp_f + rise
@@ -1156,7 +1195,7 @@ def pulse_plan(
         minimum = max(0.0, float(min_on_seconds))
         slope_after = step_sheath_slope(model, slope, heating=True, dt=minimum)
         gain = _pulse_temperature_gain(model, slope, minimum)
-        rise = remaining_coast_f(model, slope_after)
+        rise = remaining_coast_f(model, slope_after, temp_f)
         crest = temp_f + gain + rise
         heat = temp_f < target_f and crest <= target_f
     return {
@@ -1260,7 +1299,7 @@ def seconds_to_landing(
         return None
     if slope_f_per_sec is not None:
         rise = budgeted_coast_f(model, slope_f_per_sec, temp_f, target_f)
-        full = model.coast_rise_f or 0.0
+        full = (model.coast_rise_f or 0.0) * coast_temperature_scale(temp_f, model.coast_at_f)
         if full > 0 and rise >= full * 0.98 and (model.linear_rate_f_per_sec or 0.0) > 0:
             return _seconds_from_fixed_crest(
                 temp_f,
@@ -1318,7 +1357,7 @@ def _seconds_from_fixed_crest(
 ) -> float | None:
     """Project the leveling coast forward from ``temp_f``."""
 
-    crest = model.coast_rise_f or 0.0
+    crest = (model.coast_rise_f or 0.0) * coast_temperature_scale(temp_f, model.coast_at_f)
     rate = model.linear_rate_f_per_sec or 0.0
     tau = coast_tau_of(model)
     need = target_f - temp_f

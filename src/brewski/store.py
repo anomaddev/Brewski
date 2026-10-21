@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1068,8 +1069,50 @@ class Store:
             run_rows = connection.execute(
                 "SELECT * FROM runs ORDER BY started_at DESC, id DESC"
             ).fetchall()
-            sample_rows = connection.execute(
-                "SELECT * FROM samples ORDER BY run_id, elapsed_seconds, id"
+            # Heater time is the gap between samples. Summing it here keeps the
+            # dashboard from copying every reading into Python once a second.
+            on_rows = connection.execute(
+                """
+                WITH ordered AS (
+                    SELECT run_id, elapsed_seconds, heaters_on,
+                           LEAD(elapsed_seconds) OVER (
+                               PARTITION BY run_id ORDER BY elapsed_seconds, id
+                           ) AS next_elapsed
+                    FROM samples
+                    WHERE phase != 'cooldown'
+                )
+                SELECT run_id,
+                       SUM(
+                           CASE
+                               WHEN json_extract(heaters_on, '$[0]') = 1 AND next_elapsed IS NOT NULL
+                               THEN max(0, next_elapsed - elapsed_seconds)
+                               ELSE 0
+                           END
+                       ) AS on0,
+                       SUM(
+                           CASE
+                               WHEN json_extract(heaters_on, '$[1]') = 1 AND next_elapsed IS NOT NULL
+                               THEN max(0, next_elapsed - elapsed_seconds)
+                               ELSE 0
+                           END
+                       ) AS on1
+                FROM ordered
+                GROUP BY run_id
+                """
+            ).fetchall()
+            tail_rows = connection.execute(
+                """
+                SELECT run_id, elapsed_seconds, heaters_on
+                FROM (
+                    SELECT run_id, elapsed_seconds, heaters_on,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY run_id ORDER BY elapsed_seconds DESC, id DESC
+                           ) AS n
+                    FROM samples
+                    WHERE phase != 'cooldown'
+                )
+                WHERE n = 1
+                """
             ).fetchall()
             mark_rows = connection.execute(
                 """
@@ -1079,9 +1122,11 @@ class Store:
                 """
             ).fetchall()
 
-        samples_by_run: dict[int, list[dict]] = {}
-        for row in sample_rows:
-            samples_by_run.setdefault(int(row["run_id"]), []).append(_sample_dict(row))
+        on_by_run = {
+            int(row["run_id"]): [float(row["on0"] or 0.0), float(row["on1"] or 0.0)]
+            for row in on_rows
+        }
+        tail_by_run = {int(row["run_id"]): row for row in tail_rows}
         marks_by_run: dict[int, list[dict]] = {}
         for row in mark_rows:
             marks_by_run.setdefault(int(row["run_id"]), []).append(_mark_dict(row))
@@ -1096,8 +1141,12 @@ class Store:
             if live_cooldown is not None and live_cooldown["id"] == run["id"]:
                 run["cooldown_seconds"] = round(float(live_cooldown["cooldown_seconds"]), 2)
                 run["cooldown_status"] = live_cooldown["cooldown_status"]
-            samples = samples_by_run.get(run["id"], [])
-            run["heater_on_seconds"] = heater_on_seconds(samples, run["elapsed_seconds"])
+            totals = list(on_by_run.get(run["id"], [0.0, 0.0]))
+            tail = tail_by_run.get(run["id"])
+            if tail is not None:
+                dt = max(0.0, float(run["elapsed_seconds"]) - float(tail["elapsed_seconds"]))
+                _add_on_time(totals, json.loads(tail["heaters_on"]), dt)
+            run["heater_on_seconds"] = totals
             runs.append(run)
 
         production = [run for run in runs if run["kind"] == "run"]
@@ -1143,11 +1192,23 @@ class Store:
                 (utc_now(),),
             )
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path)
+    @contextmanager
+    def _connect(self):
+        """One short transaction. The file stays in WAL so a chart read does not block a sample write."""
+
+        connection = sqlite3.connect(self.path, timeout=5.0)
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+        try:
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute("PRAGMA synchronous = NORMAL")
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def _insert_settings(self, connection: sqlite3.Connection, settings: Settings) -> None:
         connection.execute(

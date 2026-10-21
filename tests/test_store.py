@@ -323,6 +323,14 @@ def test_heater_on_time_uses_the_gap_between_samples(store):
     assert listed["stats"]["average_duration_seconds"] == pytest.approx(10)
     assert listed["stats"]["heater_on_seconds"] == pytest.approx([10, 0])
 
+    cooling = store.create_run(settings)
+    store.add_sample(cooling["id"], 0, [70, 62], [True, False], 165)
+    store.add_sample(cooling["id"], 4, [68, 62], [False, False], 165, phase="cooldown")
+    store.add_sample(cooling["id"], 10, [80, 70], [False, True], 165)
+    store.update_run(cooling["id"], status="stopped", elapsed_seconds=12, ended_at=utc_now())
+    saved_tail = next(item for item in store.list_runs()["runs"] if item["id"] == cooling["id"])
+    assert saved_tail["heater_on_seconds"] == pytest.approx([10, 2])
+
     detail = store.get_run(run["id"])
     assert len(detail["samples"]) == 2
     assert detail["sensor_names"] == ["Boiler", "Column"]

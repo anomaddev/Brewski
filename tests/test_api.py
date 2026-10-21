@@ -1,5 +1,6 @@
 import io
 import logging
+import time
 import zipfile
 
 import pytest
@@ -28,6 +29,7 @@ def test_status_starts_idle(client):
     assert status["settings_locked"] is False
     assert status["temps_f"][0] == 70
     assert status["cabinet_enabled"] is True
+    assert status["now_ms"] == pytest.approx(time.time() * 1000, abs=5000)
 
 
 def test_status_names_the_installed_commit_when_beta_is_selected(client, controller, monkeypatch):

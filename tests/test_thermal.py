@@ -32,6 +32,7 @@ from brewski.thermal import (
     rate_while_heating,
     project_temperature,
     remaining_coast_f,
+    rolling_slopes,
     seconds_to_landing,
     seed_model,
     settled_linear_rate,
@@ -604,3 +605,22 @@ def test_a_hold_open_does_not_refit_the_coast():
     assert proving.phase == "pulse"
     assert proving.heat is False
     assert proving.pulse_coasting is True
+
+
+def test_rolling_slopes_match_a_full_window_scan():
+    samples = [(float(index), 70.0 + 0.2 * index) for index in range(40)]
+    samples[10] = (10.0, samples[10][1])
+    samples.insert(11, (10.0, 72.4))
+
+    def scanned(window):
+        found = []
+        for stamp, _value in samples:
+            points = [(t, reading) for t, reading in samples if stamp - window <= t <= stamp]
+            if len(points) < 4 or points[-1][0] - points[0][0] <= 0:
+                continue
+            if points[-1][0] - points[0][0] < window * 0.7:
+                continue
+            found.append((stamp, (points[-1][1] - points[0][1]) / (points[-1][0] - points[0][0])))
+        return found
+
+    assert rolling_slopes(samples, window=8) == pytest.approx(scanned(8))

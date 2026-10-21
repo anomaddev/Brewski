@@ -82,9 +82,9 @@ function runBadge(run) {
   return `${kindBadge(run.kind)}${status}`
 }
 
-function runsInWindow(runs, windowStart, windowEnd) {
+function runsInWindow(runs, windowStart, windowEnd, now) {
   const visible = []
-  const wall = Date.now()
+  const wall = now ?? Date.now()
   for (const run of runs) {
     const start = Date.parse(run.started_at)
     if (!Number.isFinite(start)) continue
@@ -251,6 +251,7 @@ export function mountDashboard(root) {
   let loadToken = 0
   let loadTimer = null
   let lastTimelineFetch = 0
+  let lastRunsFetch = 0
   let renderedMode = null
   let calibrated = false
   let busy = false
@@ -637,12 +638,6 @@ export function mountDashboard(root) {
     result.hidden = !review
     if (review) document.getElementById('test-review-copy').textContent = testSummary(status.test)
     document.getElementById('coast-readout').textContent = review ? '' : coastText(status)
-
-    const history = await api.runs()
-    renderRuns(history.runs.slice(0, 8))
-    const average = history.stats.average_cooldown_seconds
-    document.querySelector('#avg-cooldown strong').textContent =
-      average == null ? '—' : formatDuration(average)
     const caption = document.getElementById('timer-caption')
     caption.textContent =
       status.mode === 'cooling'
@@ -655,16 +650,34 @@ export function mountDashboard(root) {
               : 'Run'
           : ''
 
-    listedRuns = history.runs
     lastStatus = status
     paintChart()
+    if (Date.now() - lastRunsFetch > 5000) {
+      const history = await api.runs()
+      if (stopped) return
+      lastRunsFetch = Date.now()
+      renderRuns(history.runs.slice(0, 8))
+      const average = history.stats.average_cooldown_seconds
+      document.querySelector('#avg-cooldown strong').textContent =
+        average == null ? '—' : formatDuration(average)
+      listedRuns = history.runs
+      paintChart()
+    }
     const refreshMs = TIMELINE_SPANS[spanIndex].ms > 6 * 60 * 60 * 1000 ? 30000 : 5000
     if (follow && Date.now() - lastTimelineFetch > refreshMs) scheduleTimeline()
   }
 
+  function controllerNow() {
+    const stamp = Number(lastStatus?.now_ms)
+    return Number.isFinite(stamp) ? stamp : Date.now()
+  }
+
   function axisGaps(now) {
     const gaps = (timelineMeta.gaps || []).map((gap) => ({ from: gap.from, to: gap.to }))
-    if (timelineMeta.latest != null && now - timelineMeta.latest > GAP_AFTER_MS) {
+    // A running controller is not "Off" just because the browser clock is ahead
+    // of the last saved sample. That gap was covering the live trace.
+    const live = ['running', 'paused', 'cooling'].includes(lastStatus?.mode)
+    if (!live && timelineMeta.latest != null && now - timelineMeta.latest > GAP_AFTER_MS) {
       gaps.push({ from: timelineMeta.latest, to: now })
     }
     return mergeGaps(gaps)
@@ -700,9 +713,9 @@ export function mountDashboard(root) {
   async function loadTimeline() {
     if (stopped) return
     const token = ++loadToken
-    const first = neededRange(Date.now())
+    const first = neededRange(controllerNow())
     const cacheFresh = timelineCache && Date.now() - timelineCache.fetchedAt < 5000
-    const coversLiveEdge = first.to >= Date.now() - 10000
+    const coversLiveEdge = first.to >= controllerNow() - 10000
     if (cacheCovers(first) && (!coversLiveEdge || cacheFresh)) {
       lastTimelineFetch = Date.now()
       return
@@ -716,7 +729,7 @@ export function mountDashboard(root) {
       latest: data.latest,
       gaps: data.gaps || [],
     }
-    const again = neededRange(Date.now())
+    const again = neededRange(controllerNow())
     if (again.from < from - 1000) {
       from = again.from
       to = Math.max(again.to, from + 1)
@@ -741,7 +754,7 @@ export function mountDashboard(root) {
   }
 
   function moveDisplay(displayDelta) {
-    const now = Date.now()
+    const now = controllerNow()
     const horizon = now + FORECAST_MS
     if (follow) viewEndReal = horizon
     const gaps = axisGaps(now)
@@ -769,7 +782,7 @@ export function mountDashboard(root) {
 
   function paintChart() {
     if (!lastStatus) return
-    const now = Date.now()
+    const now = controllerNow()
     const span = TIMELINE_SPANS[spanIndex].ms
     const horizon = now + FORECAST_MS
     if (follow) viewEndReal = horizon
@@ -808,7 +821,7 @@ export function mountDashboard(root) {
         to: toDisplay(Math.min(gap.to, viewEndReal), gaps),
         label: gap.to - gap.from > CONDENSE_AFTER_MS ? formatOff(gap.to - gap.from) : 'Off',
       }))
-    const markers = markersFor(runsInWindow(listedRuns, startReal, viewEndReal), startReal, viewEndReal).map(
+    const markers = markersFor(runsInWindow(listedRuns, startReal, viewEndReal, now), startReal, viewEndReal).map(
       (marker) => ({ ...marker, at: toDisplay(marker.at, gaps) }),
     )
     const projection = (lastStatus.projection || [])
@@ -850,7 +863,7 @@ export function mountDashboard(root) {
   document.getElementById('chart-longer').addEventListener('click', () => setSpan(spanIndex + 1))
   document.getElementById('chart-now').addEventListener('click', () => {
     follow = true
-    viewEndReal = Date.now()
+    viewEndReal = controllerNow()
     paintChart()
     scheduleTimeline()
   })

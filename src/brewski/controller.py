@@ -859,17 +859,24 @@ class Controller:
             return self._status()
 
     def runs(self) -> dict:
+        # The history query used to run while this lock was held, so a dashboard
+        # refresh froze the sensor read, the LCD, and the chart samples.
         with self._lock:
-            listed = self.store.list_runs(self._live_overlay(), self._cooldown_overlay())
-            listed["stats"]["heater_life_seconds"] = self._life_seconds()
-            return listed
+            live = self._live_overlay()
+            cooldown = self._cooldown_overlay()
+            pending = list(self._heater_life_pending)
+        listed = self.store.list_runs(live, cooldown)
+        stored = self.store.heater_life_seconds()
+        listed["stats"]["heater_life_seconds"] = [
+            round(stored[index] + pending[index], 2) for index in range(SLOT_COUNT)
+        ]
+        return listed
 
     def timeline(self, start_ms: int, end_ms: int, max_points: int) -> dict:
         if int(end_ms) < int(start_ms):
             raise ControllerError("Timeline end is before the start", 400)
         capped = min(5000, max(50, int(max_points)))
-        with self._lock:
-            return self.store.timeline(int(start_ms), int(end_ms), capped)
+        return self.store.timeline(int(start_ms), int(end_ms), capped)
 
     def run(self, run_id: int, *, include_logs: bool = True) -> dict:
         with self._lock:
@@ -2911,6 +2918,7 @@ class Controller:
             "emergency_codes": list(self._emergency),
             "emergency": [{"code": code, "summary": summary(code)} for code in self._emergency],
             "update_source": settings.update_source,
+            "now_ms": int(time.time() * 1000),
         }
 
 

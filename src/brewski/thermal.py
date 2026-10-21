@@ -294,16 +294,28 @@ def rolling_slopes(
     *,
     window: float = SLOPE_WINDOW_SECONDS,
 ) -> list[tuple[float, float]]:
-    """End-point slope at each sample that closes a full window."""
+    """End-point slope at each sample that closes a full window.
+
+    ``samples`` are in time order. The slope only needs the first and last
+    point of each window, so a long Initial heating does not rescan the whole
+    curve on every reading.
+    """
 
     slopes: list[tuple[float, float]] = []
-    for stamp, _value in samples:
-        window_points = [(t, reading) for t, reading in samples if stamp - window <= t <= stamp]
-        if len(window_points) < PREDICT_MIN_SAMPLES:
+    start = 0
+    count = len(samples)
+    for end, (stamp, _value) in enumerate(samples):
+        limit = stamp - window
+        while start < end and samples[start][0] < limit:
+            start += 1
+        right = end
+        while right + 1 < count and samples[right + 1][0] <= stamp:
+            right += 1
+        if right - start + 1 < PREDICT_MIN_SAMPLES:
             continue
-        if window_points[-1][0] - window_points[0][0] < window * 0.7:
+        if samples[right][0] - samples[start][0] < window * 0.7:
             continue
-        rate = endpoint_rate(window_points)
+        rate = endpoint_rate((samples[start], samples[right]))
         if rate is None:
             continue
         slopes.append((stamp, rate))

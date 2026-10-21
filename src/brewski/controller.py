@@ -85,6 +85,7 @@ from brewski.store import (
 )
 from brewski.thermal import (
     CALIBRATION_TEMP_F,
+    LEARN_TEMP_F,
     GROK_RATE_BAND_F_PER_MIN,
     GROK_RATE_BAND_F_PER_SEC,
     GROK_RISE_BAND_F,
@@ -1116,7 +1117,9 @@ class Controller:
             )
             self._run_kind = kind
             self._charge_gallons = gallons
-            self._session = CalibrationSession() if kind == "calibration" else None
+            self._session = (
+                CalibrationSession(self._calibration_prior) if kind == "calibration" else None
+            )
             self._suite = InitialHeatingSession() if kind == "test" else None
             self._run_model = (
                 None if kind in ("calibration", "test") else model_from_dict(settings.thermal_model)
@@ -1138,8 +1141,8 @@ class Controller:
                 self._set_heaters([False] * SLOT_COUNT, release_off_dwell=True)
                 raise ControllerError("Emergency stop is active", 409)
             # Running before the first heater command so a calibration aims at
-            # 150°F on that command, not at the saved run setpoint. The first
-            # three seconds stay off; that settle is the Cold Start line.
+            # the learning temperature on that command, not at the saved run
+            # setpoint. The first three seconds stay off.
             self._mode = "running"
             self._elapsed = 0.0
             self._since_sample = 0.0
@@ -2075,11 +2078,11 @@ class Controller:
             and remote is not None
             and session is not None
             and self._run_id == run_id
-            and not (session.phase in {"pulses", "hold"} and heaters_on)
+            and not (session.phase in {"pulse", "pulses", "hold"} and heaters_on)
         ):
             apply_grok_value(session.model, field, remote)
             self._commit_model(self.store.get_settings())
-        elif accepted and remote is not None and session is not None and session.phase in {"pulses", "hold"} and heaters_on:
+        elif accepted and remote is not None and session is not None and session.phase in {"pulse", "pulses", "hold"} and heaters_on:
             with_value = dict(item)
             with_value["run_id"] = run_id
             self._analysis_inbox.append((with_value, remote))
@@ -2288,7 +2291,7 @@ class Controller:
         return float(learned)
 
     def _lookahead_model(self) -> ThermalModel | None:
-        """The parabola model, once Stage I has finished or a run loaded one."""
+        """The heating model, once the learning coast has finished or a run loaded one."""
 
         if self._run_model is not None and self._run_model.ready():
             return self._run_model
@@ -2296,7 +2299,7 @@ class Controller:
         if (
             session is not None
             and session.model.ready()
-            and session.phase in {"approach", "pulses", "hold"}
+            and session.phase in {"pulse", "pulses", "hold"}
         ):
             return session.model
         return None
@@ -2304,12 +2307,16 @@ class Controller:
     def _aim_temperature(self, settings: Settings) -> float:
         """Temperature the heaters are aiming at.
 
-        A calibration always aims at 150°F. The dial and the saved setpoint
-        still belong to the next real run.
+        A calibration scores the learning coast against 140°F, then pulses
+        and holds at 160°F. The dial and the saved setpoint still belong to
+        the next real run.
         """
 
         if self._run_kind == "calibration" and self._mode in ("running", "paused"):
-            return CALIBRATION_TEMP_F
+            session = self._session
+            if session is not None and session.phase in {"pulse", "pulses", "hold"}:
+                return CALIBRATION_TEMP_F
+            return LEARN_TEMP_F
         return float(self._target_value(settings))
 
     def _forecast(self, settings: Settings) -> dict[str, float | None]:
@@ -2858,6 +2865,8 @@ class Controller:
         """Coast the chart should use, from this run or the last one saved."""
 
         session = self._session
+        if session is not None and (session.guess.coast_rise_f or 0.0) > 0:
+            return session.guess
         if session is not None and (session.model.coast_rise_f or 0.0) > 0:
             return session.model
         if self._run_model is not None and (self._run_model.coast_rise_f or 0.0) > 0:

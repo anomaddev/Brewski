@@ -49,15 +49,16 @@ function coastText(status) {
       status.predicted_crest_f == null ? '' : ` Predicted crest ${Number(status.predicted_crest_f).toFixed(1)}°F.`
     const steps = {
       settle: 'Settling with the elements off.',
-      cold_start: 'Cold start. The temperature is still bending upward.',
-      linear: 'Heating in a straight line.',
-      coast: 'Elements are off. The climb is coasting on a downward curve.',
-      momentum: 'Peak saved. Measuring how fast the pot cools.',
-      approach: 'Heating until the stored coast will reach 150°F.',
-      pulses: 'Pulsing until the stored coast will reach 150°F.',
-      hold: 'Holding 150°F.',
+      initial: 'Initial heating. Learning the exponential soak.',
+      cold_start: 'Initial heating. Learning the exponential soak.',
+      linear: 'Linear heating. The elements are soaked.',
+      coast: 'Coasting under 140°F with the heaters off.',
+      adjust: 'Scoring the coast against 140°F.',
+      pulse: 'One predicted pulse toward 160°F.',
+      pulses: 'One predicted pulse toward 160°F.',
+      hold: 'Holding 160°F.',
     }
-    const line = steps[status.calibration_step] || 'Calibrating toward 150°F.'
+    const line = steps[status.calibration_step] || 'Calibrating. Learning under 140°F, then holding 160°F.'
     return withEta(`${line}${crest}`)
   }
   if (status.learned_coast_f == null) {
@@ -601,7 +602,7 @@ export function mountDashboard(root) {
       cabinetOn ? 'Cabinet and heaters' : 'Heaters',
     )
     const target = document.getElementById('target-input')
-    // Status reports 150°F while calibrating. That is the aim, not the setpoint.
+    // Status reports 140°F, then 160°F, while calibrating. That is the aim, not the setpoint.
     if (status.run_kind !== 'calibration' && document.activeElement !== target) {
       target.value = String(Math.round(Number(status.target_temp_f)))
     }

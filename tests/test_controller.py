@@ -5,6 +5,7 @@ import pytest
 
 from brewski.controller import (
     CALIBRATION_TEMP_F,
+    LEARN_TEMP_F,
     PREDICT_MAX_HORIZON_SECONDS,
     Controller,
     ControllerError,
@@ -57,7 +58,7 @@ def test_the_live_chart_projects_one_minute_of_cutoff_coast(controller):
     controller._live_temps = [100.0, 90.0]
     points = {item["offset_s"]: item["temp_f"] for item in controller.status()["projection"]}
     assert points[0] == pytest.approx(100, abs=0.05)
-    assert points[60] == pytest.approx(108, abs=0.1)
+    assert points[60] == pytest.approx(100 + 8 * (1 - math.exp(-3)), abs=0.1)
     assert 60 in points
 
     controller._heaters = [False, False]
@@ -329,67 +330,45 @@ def _drive(controller, source, profile, limit: int, step: str) -> dict:
     raise AssertionError(controller.status()["calibration_step"])
 
 
-def test_calibration_records_the_parabola_and_then_the_cooling_rate(store):
+def test_calibration_learns_the_soak_then_opens_under_140(store):
     source = StaticSource([70.0, 70.0])
     controller = Controller(store, source)
     controller.start({"kind": "calibration", "charge_gallons": 5, "target_temp_f": 190})
     assert store.get_settings().target_temp_f == 165
-    assert controller.status()["target_temp_f"] == CALIBRATION_TEMP_F
+    assert controller.status()["target_temp_f"] == LEARN_TEMP_F
     assert controller.status()["calibration_step"] == "settle"
     assert source.heaters[:2] == [False, False]
 
-    cold = _drive(controller, source, _heating_temp, 10, "cold_start")
-    assert cold["elapsed_seconds"] == pytest.approx(3)
+    initial = _drive(controller, source, _heating_temp, 10, "initial")
+    assert initial["elapsed_seconds"] == pytest.approx(3)
+    assert initial["target_temp_f"] == LEARN_TEMP_F
     assert source.heaters[:2] == [True, True]
     paused = controller.pause()
     controller.tick(5)
     assert controller.status()["elapsed_seconds"] == paused["elapsed_seconds"]
     assert source.heaters[:2] == [False, False]
     controller.resume()
-    assert controller.status()["calibration_step"] == "cold_start"
+    assert controller.status()["calibration_step"] == "initial"
 
-    _drive(controller, source, _heating_temp, 80, "linear")
-    assert controller._panel_lines(store.get_settings())[0].startswith("Heating:")
+    linear = _drive(controller, source, _heating_temp, 80, "linear")
+    assert linear["target_temp_f"] == LEARN_TEMP_F
+    assert controller._panel_lines(store.get_settings())[0].startswith("Linear:")
     coast = _drive(controller, source, _heating_temp, 40, "coast")
+    assert coast["target_temp_f"] == LEARN_TEMP_F
     assert source.heaters[:2] == [False, False]
+    assert coast["temps_f"][0] < LEARN_TEMP_F
     assert controller._panel_lines(store.get_settings())[0].startswith("Coast:")
-    opened = coast["elapsed_seconds"]
-    base = _heating_temp(opened)
-
-    def coasting(elapsed: float) -> float:
-        age = elapsed - opened
-        if age <= 12:
-            return base + 0.2 * age
-        return base + 0.2 * 12 - 1.2
-
-    momentum = _drive(controller, source, coasting, 140, "momentum")
-    assert controller._panel_lines(store.get_settings())[0].startswith("Momentum:")
     settings = store.get_settings()
-    assert settings.learned_coast_f == pytest.approx(1.58, abs=0.3)
-    assert settings.learned_coast_seconds > 0
+    assert settings.learned_coast_f == 3
     model = settings.thermal_model
-    assert model["cold_start_quad"] == pytest.approx(0.01, abs=0.003)
     assert model["linear_rate_f_per_sec"] == pytest.approx(0.4, abs=0.05)
-    assert model["coast_quad"] < 0
-
-    fallen = source.temps[0]
-
-    def cooling(elapsed: float) -> float:
-        return fallen - (2.0 / 60.0) * (elapsed - momentum["elapsed_seconds"])
-
-    approach = _drive(controller, source, cooling, 150, "approach")
-    assert approach["calibration_step"] == "approach"
-    settings = store.get_settings()
-    assert settings.learned_cooldown_f_per_min == pytest.approx(2.0, abs=0.4)
-    assert settings.charge_gallons == 5
-    run = store.get_run(approach["run_id"])
+    assert model["coast_rise_f"] is None
+    run = store.get_run(coast["run_id"])
     assert [mark["name"] for mark in run["marks"]] == [
         "Start",
-        "Cold Start",
-        "Heating",
+        "Initial heating",
+        "Linear heating",
         "Coasting",
-        "Momentum",
-        "Stage II",
     ]
     assert all(item["grok"] is None and item["accepted"] is False for item in run["analysis"])
 
@@ -1044,11 +1023,11 @@ def test_calibration_log_follows_the_stage_and_the_heaters(store):
         for item in opened
     )
 
-    _drive(controller, source, _heating_temp, 10, "cold_start")
+    _drive(controller, source, _heating_temp, 10, "initial")
     logs = store.get_run(run_id)["logs"]
     phases = [item for item in logs if item["event"] == "phase"]
-    assert phases[-1]["detail"]["phase"] == "cold_start"
-    assert "Cold Start" in phases[-1]["message"]
+    assert phases[-1]["detail"]["phase"] == "initial"
+    assert "Initial heating" in phases[-1]["message"]
     heats = [item for item in logs if item["event"] == "heat"]
     assert heats[-1]["detail"]["heaters_on"] == [True, True]
     assert heats[-1]["detail"]["temp_f"] == pytest.approx(70)

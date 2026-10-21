@@ -551,15 +551,19 @@ def status_lines(
 def _calibration_step_name(step: str | None) -> str:
     return {
         "settle": "Settle",
-        "cold_start": "Cold Start",
-        "linear": "Heating",
-        "coast": "Coast",
-        "momentum": "Momentum",
-        "approach": "Stage II",
-        "pulses": "Pulses",
-        "hold": "Holding",
+        "initial": "Initial heating",
+        "cold_start": "Initial heating",
+        "linear": "Linear heating",
+        "heating": "Heating",
+        "coast": "Coasting",
         "coasting": "Coast",
+        "adjust": "Adjusted",
+        "momentum": "Adjusted",
         "falling": "Momentum",
+        "approach": "Pulse",
+        "pulse": "Pulse",
+        "pulses": "Pulse",
+        "hold": "Holding",
     }.get(step or "", "Heating")
 
 
@@ -580,13 +584,16 @@ def _calibration_head(
         else:
             detail = _pair("Rate:", _degrees_per_min(rate_f))
         return [_pair("Momentum:", clock), detail]
-    if step == "cold_start":
-        return [_pair("Cold Start:", clock), _value_line("Target:", _whole_temp(target_f))]
+    if step in {"initial", "cold_start"}:
+        return [_pair("Initial:", clock), _value_line("Target:", _whole_temp(target_f))]
     label = {
         "settle": "Settle:",
-        "linear": "Heating:",
-        "approach": "Stage II:",
-        "pulses": "Pulses:",
+        "linear": "Linear:",
+        "heating": "Heating:",
+        "adjust": "Adjust:",
+        "approach": "Pulse:",
+        "pulse": "Pulse:",
+        "pulses": "Pulse:",
         "hold": "Holding:",
     }.get(step or "", "Heating:")
     if name and step in {"settle", "linear", "approach", "pulses", "hold", "heating", None}:

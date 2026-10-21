@@ -56,7 +56,7 @@ function openSetup(host, settings) {
             ${busFields(settings.gpio)}
           </section>
           <section class="setup-panel" data-step="target">
-            <p class="setup-lead">This is the setpoint for a later run. Calibration always heats water to 150°F. It measures the cold-start curve, the straight heating rate, and how far the pot coasts after the element turns off.</p>
+            <p class="setup-lead">This is the setpoint for a later run. Calibration learns the soak, the straight heating rate, and the coast while the pot is still under 140°F, then pulses to 160°F and holds it for ten minutes.</p>
             <label class="field">Temperature (°F)
               ${numberStepper(`<input name="target_temp_f" id="setup-target" type="number" min="90" max="240" step="1" inputmode="numeric" required value="${Math.round(Number(settings.target_temp_f))}" />`)}
             </label>

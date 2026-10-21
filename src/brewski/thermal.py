@@ -1,12 +1,10 @@
 """Heating model and look-ahead used by calibration and later runs.
 
-Cold start and coasting are parabolas. With the sheath still cold, temperature
-climbs as ``a t²``: the slope starts near zero and steepens until the rise
-goes straight. After the SSR opens, temperature climbs as ``v t + c t²`` with
-``c`` negative, so the slope falls through zero at the crest. The straight
-line between those two curves is the linear heating rate. Stage II and a
-normal run play that shape forward and open the SSR when the predicted crest
-reaches the aim.
+Soak is an exponential lag: the slope climbs as ``R (1 - e^{-t/τ})`` until
+the rise is straight. After the SSR opens, temperature climbs as
+``S τ (1 - e^{-t/τ})`` and levels at an equilibrium. Calibration learns those
+shapes while the probe is still under 140°F, then one predicted pulse climbs
+to 160°F and a ten-minute hold stays there.
 """
 
 from __future__ import annotations
@@ -14,8 +12,25 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-# Calibration always aims here. The dial setpoint belongs to the next real run.
-CALIBRATION_TEMP_F = 150.0
+# The learning coast is scored against this after the heaters are already off.
+LEARN_TEMP_F = 140.0
+# The climb pulse and the ten-minute hold aim here. The dial setpoint belongs
+# to the next real run.
+CALIBRATION_TEMP_F = 160.0
+# First guess when no saved model exists, from the open-loop capture in run 10.
+SEED_LINEAR_RATE_F_PER_SEC = 0.40
+SEED_SOAK_TAU_SECONDS = 37.0
+SEED_COAST_TAU_SECONDS = 35.0
+SEED_COAST_RISE_F = 14.0
+# A heat that never shows a settled linear rate still opens under 140°F.
+LEARN_HEAT_MAX_SECONDS = 15 * 60.0
+# One probe reading may move a variable only this far.
+TUNE_DEADBAND_F = 0.3
+TUNE_SLOPE_DEADBAND = 0.01
+TUNE_FRACTION = 0.10
+TUNE_RATE_CAP_F_PER_SEC = 0.01
+TUNE_TAU_CAP_SECONDS = 2.0
+TUNE_RISE_CAP_F = 0.4
 # A cooldown is over, and the pot is safe to handle, under this temperature.
 SAFE_TEMP_F = 90.0
 SETTLE_SECONDS = 3.0
@@ -32,8 +47,10 @@ LINEAR_ACCEL_MAX = 0.001
 # the shallow start, and the rate can keep climbing after that.
 LINEAR_CONFIRM_SECONDS = 45.0
 LINEAR_RISE_SECONDS = 15.0
-# °F/s² over the recent slope window. Above this, the rise is still steepening.
-LINEAR_SETTLED_ACCEL = 0.0002
+# °F/s² of the least-squares line through the watched slopes. Above this, the
+# rise is still steepening. A short pair of noisy samples can look steeper
+# than this without the sheath still soaking.
+LINEAR_SETTLED_ACCEL = 0.0005
 # °F/s. The settled rate has to sit with the steepest rate already seen.
 LINEAR_SETTLED_BAND = 0.02
 PREDICT_MIN_SAMPLES = 4
@@ -58,16 +75,19 @@ GROK_RISE_BAND_F = 1.0
 
 @dataclass
 class ThermalModel:
-    """Parabolas and the straight rate learned across calibrations."""
+    """Exponential soak, straight rate, and leveling coast learned across calibrations."""
 
     cold_start_seconds: float | None = None
-    # °F/s². While the sheath is soaking, ΔT = cold_start_quad * t².
+    # °F/s². Older calibrations stored the soak as ΔT = cold_start_quad * t².
     cold_start_quad: float | None = None
+    # Seconds. While the sheath is soaking, the slope climbs as R (1 - e^{-t/τ}).
+    soak_tau_seconds: float | None = None
     linear_rate_f_per_sec: float | None = None
     coast_rise_f: float | None = None
     coast_seconds: float | None = None
-    # °F/s², negative. After the SSR opens, ΔT = v t + coast_quad * t²
-    # and the slope is zero at coast_seconds. v is the heating rate at shutoff.
+    # Seconds. After the SSR opens, ΔT = S τ (1 - e^{-t/τ}) and levels at S τ.
+    coast_tau_seconds: float | None = None
+    # °F/s², negative. Older calibrations stored the coast as a downward parabola.
     coast_quad: float | None = None
     cooldown_f_per_min: float | None = None
     # How many calibrations have been folded into these numbers.
@@ -87,9 +107,11 @@ class ThermalModel:
         data = {
             "cold_start_seconds": self.cold_start_seconds,
             "cold_start_quad": self.cold_start_quad,
+            "soak_tau_seconds": self.soak_tau_seconds,
             "linear_rate_f_per_sec": self.linear_rate_f_per_sec,
             "coast_rise_f": self.coast_rise_f,
             "coast_seconds": self.coast_seconds,
+            "coast_tau_seconds": self.coast_tau_seconds,
             "coast_quad": self.coast_quad,
             "cooldown_f_per_min": self.cooldown_f_per_min,
         }
@@ -124,16 +146,20 @@ def model_from_dict(data: dict | None) -> ThermalModel:
     if calibration_count is not None and calibration_count <= 0:
         calibration_count = None
 
-    return ThermalModel(
+    model = ThermalModel(
         cold_start_seconds=optional("cold_start_seconds"),
         cold_start_quad=optional("cold_start_quad"),
+        soak_tau_seconds=optional("soak_tau_seconds"),
         linear_rate_f_per_sec=optional("linear_rate_f_per_sec"),
         coast_rise_f=optional("coast_rise_f"),
         coast_seconds=optional("coast_seconds"),
+        coast_tau_seconds=optional("coast_tau_seconds"),
         coast_quad=optional("coast_quad"),
         cooldown_f_per_min=optional("cooldown_f_per_min"),
         calibration_count=calibration_count,
     )
+    ensure_time_constants(model)
+    return model
 
 
 def scale_model(
@@ -165,24 +191,30 @@ def scale_model(
     quad = scaled(model.coast_quad, 6)
     if rise is not None and model.coast_seconds and model.coast_seconds > 0:
         quad = round(-rise / (model.coast_seconds ** 2), 6)
-    return ThermalModel(
+    scaled_model = ThermalModel(
         cold_start_seconds=model.cold_start_seconds,
         cold_start_quad=scaled(model.cold_start_quad, 6),
+        soak_tau_seconds=model.soak_tau_seconds,
         linear_rate_f_per_sec=scaled(model.linear_rate_f_per_sec),
         coast_rise_f=rise,
         coast_seconds=model.coast_seconds,
+        coast_tau_seconds=model.coast_tau_seconds,
         coast_quad=quad,
         cooldown_f_per_min=cool,
         calibration_count=model.calibration_count,
     )
+    ensure_time_constants(scaled_model)
+    return scaled_model
 
 
 _BLEND_FIELDS = (
     ("cold_start_seconds", 2),
     ("cold_start_quad", 6),
+    ("soak_tau_seconds", 2),
     ("linear_rate_f_per_sec", 5),
     ("coast_rise_f", 2),
     ("coast_seconds", 2),
+    ("coast_tau_seconds", 2),
     ("cooldown_f_per_min", 2),
 )
 
@@ -223,6 +255,7 @@ def blend_model(prior: ThermalModel, measured: ThermalModel) -> ThermalModel:
         blended.coast_quad = round(-blended.coast_rise_f / (blended.coast_seconds ** 2), 6)
     else:
         blended.coast_quad = measured.coast_quad if measured.coast_quad is not None else prior.coast_quad
+    ensure_time_constants(blended)
     if not used:
         return prior
     blended.calibration_count = weight + 1
@@ -254,7 +287,7 @@ def rolling_slopes(
         window_points = [(t, reading) for t, reading in samples if stamp - window <= t <= stamp]
         if len(window_points) < PREDICT_MIN_SAMPLES:
             continue
-        if window_points[-1][0] - window_points[0][0] < window * 0.8:
+        if window_points[-1][0] - window_points[0][0] < window * 0.7:
             continue
         rate = endpoint_rate(window_points)
         if rate is None:
@@ -283,6 +316,21 @@ def linear_onset(samples: list[tuple[float, float]]) -> bool:
     return acceleration <= LINEAR_ACCEL_MAX
 
 
+def _ols_slope(samples: list[tuple[float, float]]) -> float:
+    """°F per second of the least-squares line through ``samples``."""
+
+    count = len(samples)
+    if count < 2:
+        return 0.0
+    mean_x = sum(stamp for stamp, _rate in samples) / count
+    mean_y = sum(rate for _stamp, rate in samples) / count
+    numerator = sum((stamp - mean_x) * (rate - mean_y) for stamp, rate in samples)
+    denominator = sum((stamp - mean_x) ** 2 for stamp, _rate in samples)
+    if denominator <= 0:
+        return 0.0
+    return numerator / denominator
+
+
 def slope_has_settled(samples: list[tuple[float, float]]) -> bool:
     """True once the heating rate has stopped getting steeper.
 
@@ -300,17 +348,21 @@ def slope_has_settled(samples: list[tuple[float, float]]) -> bool:
         return False
     end = slopes[-1][0]
     recent = [(stamp, rate) for stamp, rate in slopes if stamp >= end - LINEAR_RISE_SECONDS]
-    if len(recent) < 2 or recent[-1][0] - recent[0][0] < LINEAR_RISE_SECONDS - 1:
+    if len(recent) < 2 or recent[-1][0] - recent[0][0] < LINEAR_RISE_SECONDS * 0.8:
         return False
     if any(rate < PREDICT_MIN_RATE_F_PER_SEC for _stamp, rate in recent):
         return False
-    span = recent[-1][0] - recent[0][0]
-    if span <= 0:
+    confirm = [(stamp, rate) for stamp, rate in slopes if stamp >= end - LINEAR_CONFIRM_SECONDS]
+    if len(confirm) < 4 or confirm[-1][0] - confirm[0][0] < LINEAR_CONFIRM_SECONDS - 1:
         return False
-    if (recent[-1][1] - recent[0][1]) / span > LINEAR_SETTLED_ACCEL:
+    # A straight line through the watched slopes. One noisy pair at the ends
+    # of a short window is not a climb.
+    if _ols_slope(confirm) > LINEAR_SETTLED_ACCEL:
         return False
-    peak = max(rate for _stamp, rate in slopes)
-    return recent[-1][1] >= peak - LINEAR_SETTLED_BAND
+    rates = sorted(rate for _stamp, rate in slopes)
+    peak = rates[min(len(rates) - 1, int(len(rates) * 0.9))]
+    recent_rate = sum(rate for _stamp, rate in recent) / len(recent)
+    return recent_rate >= peak - LINEAR_SETTLED_BAND
 
 
 def _lag_rise(elapsed: float, tau: float) -> float:
@@ -425,6 +477,250 @@ def heating_lag_coast(rate_f_per_sec: float, tau_seconds: float, heated_seconds:
     return rate_f_per_sec * tau_seconds * soaked
 
 
+def ensure_time_constants(model: ThermalModel) -> None:
+    """Fill a missing coast time constant from the rise and the straight rate."""
+
+    rate = model.linear_rate_f_per_sec or 0.0
+    rise = model.coast_rise_f or 0.0
+    if (model.coast_tau_seconds is None or model.coast_tau_seconds <= 0) and rate > 0 and rise > 0:
+        model.coast_tau_seconds = round(rise / rate, 2)
+
+
+def coast_tau_of(model: ThermalModel) -> float:
+    """Seconds the coast takes to spend its slope. Zero when that is unknown."""
+
+    if model.coast_tau_seconds is not None and model.coast_tau_seconds > 0:
+        return model.coast_tau_seconds
+    rate = model.linear_rate_f_per_sec or 0.0
+    rise = model.coast_rise_f or 0.0
+    if rate > 0 and rise > 0:
+        return rise / rate
+    return 0.0
+
+
+def settled_linear_rate(samples: list[tuple[float, float]]) -> float | None:
+    """°F/s once the heating rate has stopped getting steeper."""
+
+    if not slope_has_settled(samples):
+        return None
+    slopes = rolling_slopes(samples)
+    if not slopes:
+        return None
+    end = slopes[-1][0]
+    recent = [rate for stamp, rate in slopes if stamp >= end - LINEAR_RISE_SECONDS]
+    if not recent:
+        return None
+    return sum(recent) / len(recent)
+
+
+def fit_coast_exponential(
+    samples: list[tuple[float, float]],
+    shutoff_slope: float,
+) -> tuple[float, float] | None:
+    """``(rise °F, τ seconds)`` for ``ΔT = S0 · τ · (1 - e^{-t/τ})``.
+
+    ``S0`` is the slope at shutoff. The curve approaches ``S0 · τ`` and stays
+    there. Returns None until the window can see the bend.
+    """
+
+    if shutoff_slope <= 0 or len(samples) < 4:
+        return None
+    origin_t, origin_v = samples[0]
+    points: list[tuple[float, float]] = []
+    for stamp, reading in samples[1:]:
+        elapsed = stamp - origin_t
+        if elapsed <= 0:
+            continue
+        points.append((elapsed, reading - origin_v))
+    if len(points) < 4 or points[-1][0] < 8.0:
+        return None
+    best: tuple[float, float, float] | None = None
+    tau = 4.0
+    while tau <= 180.0:
+        rise = shutoff_slope * tau
+        error = 0.0
+        for elapsed, gained in points:
+            miss = gained - rise * (1.0 - math.exp(-elapsed / tau))
+            error += miss * miss
+        if best is None or error < best[0]:
+            best = (error, rise, tau)
+        tau *= 1.08
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
+def seed_model(prior: ThermalModel | None = None) -> ThermalModel:
+    """The projection a calibration starts from.
+
+    A saved model is that guess. With nothing saved, the numbers are the
+    open-loop capture from run 10.
+    """
+
+    if (
+        prior is not None
+        and (prior.linear_rate_f_per_sec or 0.0) > 0
+        and (prior.coast_rise_f or 0.0) > 0
+    ):
+        seeded = ThermalModel(
+            cold_start_seconds=prior.cold_start_seconds,
+            cold_start_quad=prior.cold_start_quad,
+            soak_tau_seconds=prior.soak_tau_seconds,
+            linear_rate_f_per_sec=prior.linear_rate_f_per_sec,
+            coast_rise_f=prior.coast_rise_f,
+            coast_seconds=prior.coast_seconds,
+            coast_tau_seconds=prior.coast_tau_seconds,
+            coast_quad=prior.coast_quad,
+            cooldown_f_per_min=prior.cooldown_f_per_min,
+            calibration_count=prior.calibration_count,
+        )
+        if seeded.soak_tau_seconds is None or seeded.soak_tau_seconds <= 0:
+            seeded.soak_tau_seconds = SEED_SOAK_TAU_SECONDS
+        ensure_time_constants(seeded)
+        return seeded
+    return ThermalModel(
+        linear_rate_f_per_sec=SEED_LINEAR_RATE_F_PER_SEC,
+        soak_tau_seconds=SEED_SOAK_TAU_SECONDS,
+        coast_tau_seconds=SEED_COAST_TAU_SECONDS,
+        coast_rise_f=SEED_COAST_RISE_F,
+        coast_seconds=round(SEED_COAST_TAU_SECONDS * 3.0, 2),
+    )
+
+
+def _tune_step(error: float, deadband: float, value: float, cap: float, *, same_units: bool) -> float:
+    """A capped step in the direction of ``error``. Zero inside the deadband."""
+
+    if abs(error) <= deadband:
+        return 0.0
+    limit = cap
+    if value:
+        limit = min(cap, abs(value) * TUNE_FRACTION)
+    if limit <= 0:
+        return 0.0
+    magnitude = min(abs(error), limit) if same_units else limit
+    return magnitude if error > 0 else -magnitude
+
+
+def tune_model(
+    model: ThermalModel,
+    *,
+    heat_delta_f: float | None = None,
+    slope_delta: float | None = None,
+    coast_delta_f: float | None = None,
+    crest_delta_f: float | None = None,
+) -> bool:
+    """Move the guess toward the probe. One call stays inside the delta caps.
+
+    A hotter pot raises the rate or the rise. A slope that is still
+    steepening lengthens the soak time. A coast that is ahead of the formula
+    shortens the coast time and raises the rise. ``crest_delta_f`` is the
+    equilibrium minus the check temperature: short lowers the rise, high
+    raises it.
+    """
+
+    changed = False
+    if heat_delta_f is not None and model.linear_rate_f_per_sec is not None:
+        step = _tune_step(
+            heat_delta_f,
+            TUNE_DEADBAND_F,
+            model.linear_rate_f_per_sec,
+            TUNE_RATE_CAP_F_PER_SEC,
+            same_units=False,
+        )
+        if step:
+            model.linear_rate_f_per_sec = round(max(0.0, model.linear_rate_f_per_sec + step), 5)
+            changed = True
+    if slope_delta is not None and model.soak_tau_seconds is not None:
+        step = _tune_step(
+            slope_delta,
+            TUNE_SLOPE_DEADBAND,
+            model.soak_tau_seconds,
+            TUNE_TAU_CAP_SECONDS,
+            same_units=False,
+        )
+        if step:
+            model.soak_tau_seconds = round(max(1.0, model.soak_tau_seconds + step), 2)
+            changed = True
+    if coast_delta_f is not None and abs(coast_delta_f) > TUNE_DEADBAND_F:
+        if model.coast_tau_seconds is not None:
+            # Ahead of the formula means the bend arrived early.
+            step = _tune_step(
+                -coast_delta_f,
+                TUNE_DEADBAND_F,
+                model.coast_tau_seconds,
+                TUNE_TAU_CAP_SECONDS,
+                same_units=False,
+            )
+            if step:
+                model.coast_tau_seconds = round(max(1.0, model.coast_tau_seconds + step), 2)
+                changed = True
+        if model.coast_rise_f is not None:
+            step = _tune_step(
+                coast_delta_f,
+                TUNE_DEADBAND_F,
+                model.coast_rise_f,
+                TUNE_RISE_CAP_F,
+                same_units=True,
+            )
+            if step:
+                model.coast_rise_f = round(max(0.0, model.coast_rise_f + step), 2)
+                changed = True
+    if crest_delta_f is not None and model.coast_rise_f is not None:
+        step = _tune_step(
+            crest_delta_f,
+            TUNE_DEADBAND_F,
+            model.coast_rise_f,
+            TUNE_RISE_CAP_F,
+            same_units=True,
+        )
+        if step:
+            model.coast_rise_f = round(max(0.0, model.coast_rise_f + step), 2)
+            changed = True
+    if changed and coast_delta_f is not None:
+        _pull_rise_toward_rate(model)
+    return changed
+
+
+def _pull_rise_toward_rate(model: ThermalModel) -> None:
+    """After a full soak, the rise and ``R · τ`` describe the same coast."""
+
+    rate = model.linear_rate_f_per_sec or 0.0
+    tau = model.coast_tau_seconds or 0.0
+    rise = model.coast_rise_f
+    if rate <= 0 or tau <= 0 or rise is None:
+        return
+    gap = rate * tau - rise
+    step = _tune_step(gap, TUNE_DEADBAND_F, rise, TUNE_RISE_CAP_F, same_units=True)
+    if step:
+        model.coast_rise_f = round(max(0.0, rise + step), 2)
+
+
+def heating_formula_temp(origin_f: float, on_seconds: float, model: ThermalModel) -> float:
+    """Probe temperature the soak-then-linear formula expects."""
+
+    rate = model.linear_rate_f_per_sec or 0.0
+    elapsed = max(0.0, on_seconds)
+    if rate <= 0 or elapsed == 0:
+        return origin_f
+    tau = model.soak_tau_seconds or 0.0
+    if tau <= 0:
+        return origin_f + rate * elapsed
+    return origin_f + rate * _lag_rise(elapsed, tau)
+
+
+def formula_slope(on_seconds: float, model: ThermalModel) -> float:
+    """°F/s the soak formula expects after ``on_seconds`` of heat."""
+
+    rate = model.linear_rate_f_per_sec or 0.0
+    if rate <= 0:
+        return 0.0
+    tau = model.soak_tau_seconds or 0.0
+    elapsed = max(0.0, on_seconds)
+    if tau <= 0:
+        return rate
+    return rate * (1.0 - math.exp(-elapsed / tau))
+
+
 def fit_startup_quad(samples: list[tuple[float, float]]) -> float | None:
     """Least-squares ``a`` in ``ΔT = a t²`` from the first sample.
 
@@ -526,13 +822,17 @@ def startup_quad(model: ThermalModel) -> float:
 def rate_while_heating(model: ThermalModel, on_seconds: float) -> float:
     """°F/s at ``on_seconds`` into the current on-interval.
 
-    On the startup parabola the slope is ``2 a t``. Past the cold start it is
-    the straight-line rate.
+    With a soak time constant the slope is ``R (1 - e^{-t/τ})``. On an older
+    parabola the slope is ``2 a t`` until the rise is straight.
     """
 
+    elapsed = max(0.0, on_seconds)
+    tau = model.soak_tau_seconds or 0.0
+    linear = model.linear_rate_f_per_sec or 0.0
+    if tau > 0 and linear > 0:
+        return max(0.0, linear * (1.0 - math.exp(-elapsed / tau)))
     cold = model.cold_start_seconds or 0.0
     quad = startup_quad(model)
-    elapsed = max(0.0, on_seconds)
     if cold > 0 and elapsed < cold and quad > 0:
         return max(0.0, 2.0 * quad * elapsed)
     if model.linear_rate_f_per_sec is not None and model.linear_rate_f_per_sec > 0:
@@ -603,24 +903,22 @@ COAST_SLOPE_SCALE_MAX = 3.0
 def remaining_coast_f(model: ThermalModel, slope_f_per_sec: float) -> float:
     """Degrees the pot still climbs if the heaters open at this slope.
 
-    At the slope Stage I measured, the crest is the measured rise. A shallower
-    slope is further along that same curve. A steeper slope has not finished
-    storing heat, so the crest grows with the slope instead of staying capped.
+    The coast is ``slope · τ``. At the straight rate that is the measured
+    rise. A shallower slope has stored less, in proportion to the slope. A
+    steeper slope is still storing heat, so the rise grows with the slope.
     """
 
-    rise = model.coast_rise_f or 0.0
-    if rise <= 0 or slope_f_per_sec <= 0:
+    if slope_f_per_sec <= 0:
+        return 0.0
+    tau = coast_tau_of(model)
+    if tau <= 0:
         return 0.0
     linear = model.linear_rate_f_per_sec or 0.0
-    velocity, _quad, _duration = coast_curve(model)
-    start = linear if linear > 0 else velocity
-    if start <= 0:
-        return rise
-    if slope_f_per_sec > start:
-        scale = min(COAST_SLOPE_SCALE_MAX, slope_f_per_sec / start)
+    rise = model.coast_rise_f or 0.0
+    if linear > 0 and slope_f_per_sec > linear and rise > 0:
+        scale = min(COAST_SLOPE_SCALE_MAX, slope_f_per_sec / linear)
         return rise * scale
-    fraction = slope_f_per_sec / start
-    return rise * fraction * fraction
+    return slope_f_per_sec * tau
 
 
 def coast_rise_for(model: ThermalModel, on_seconds: float) -> float:
@@ -650,23 +948,19 @@ def step_sheath_slope(
         return slope
     linear = model.linear_rate_f_per_sec or 0.0
     if heating:
+        tau = model.soak_tau_seconds or 0.0
+        if tau > 0 and linear > 0:
+            return max(0.0, linear - (linear - slope) * math.exp(-dt / tau))
         if linear <= 0:
             return slope
         accel = 2.0 * startup_quad(model)
         if (model.cold_start_seconds or 0.0) <= 0 or accel <= 0:
             return linear
         return min(linear, slope + accel * dt)
-    duration = model.coast_seconds or 0.0
-    if duration > 0 and linear > 0:
-        # A full-rate shutoff has delivered its coast when the measured crest
-        # arrives. The coast parabola's own starting slope is shallower than
-        # the linear rate, and decaying on that shallower slope leaves a
-        # phantom coast after the pot has already stopped rising.
-        return max(0.0, slope - (linear / duration) * dt)
-    _velocity, quad, curve_duration = coast_curve(model)
-    if quad >= 0 or curve_duration <= 0:
-        return slope
-    return max(0.0, slope + 2.0 * quad * dt)
+    tau = coast_tau_of(model)
+    if tau > 0:
+        return slope * math.exp(-dt / tau)
+    return slope
 
 
 def budgeted_coast_f(
@@ -691,7 +985,18 @@ def budgeted_coast_f(
         return now
     if slope_f_per_sec >= linear * 0.98:
         return remaining_coast_f(model, slope_f_per_sec)
+    tau = model.soak_tau_seconds or 0.0
     accel = 2.0 * startup_quad(model)
+    if tau > 0 and accel <= 0:
+        gap = max(0.0, linear - max(0.0, slope_f_per_sec))
+        if gap <= 0.02 * linear:
+            seconds_to_linear = 0.0
+        else:
+            seconds_to_linear = tau * math.log(gap / (0.02 * linear))
+        climb = (max(0.0, slope_f_per_sec) + linear) * 0.5 * seconds_to_linear
+        if temp_f + climb + rise >= goal_f:
+            return rise
+        return now
     if accel <= 0:
         return now
     seconds_to_linear = (linear - max(0.0, slope_f_per_sec)) / accel
@@ -737,10 +1042,10 @@ def project_temperature(
 ) -> list[tuple[float, float]]:
     """Temperature for the next ``seconds`` if the heaters are open from now.
 
-    A rising slope is the entry onto the coast parabola: the line climbs
-    ``remaining_coast_f`` and then follows the cooling rate. A falling slope
-    keeps falling. This is the shutoff the control loop is weighing, not a
-    projection that keeps the elements on.
+    A rising slope is the entry onto the negative-exponential coast: the line
+    climbs toward ``temp + slope · τ`` and then follows the cooling rate. A
+    falling slope keeps falling. This is the shutoff the control loop is
+    weighing, not a projection that keeps the elements on.
     """
 
     horizon = max(0.0, seconds)
@@ -748,16 +1053,19 @@ def project_temperature(
     slope = slope_f_per_sec
     rise = remaining_coast_f(model, slope) if model is not None and slope > 0 else 0.0
     cool = max(0.0, cooldown_f_per_min or 0.0) / 60.0
-    duration = (2.0 * rise / slope) if slope > 0 and rise > 0 else 0.0
-    quad = (-rise / (duration * duration)) if duration > 0 else 0.0
+    tau = (rise / slope) if slope > 0 and rise > 0 else 0.0
+    # Three time constants deliver about 95% of the rise. After that the
+    # line is the equilibrium, then the cooling rate.
+    settled = 3.0 * tau if tau > 0 else 0.0
     points: list[tuple[float, float]] = []
     stamp = 0.0
     while True:
-        if slope > 0 and duration > 0:
-            if stamp <= duration:
-                reading = temp_f + slope * stamp + quad * stamp * stamp
+        if slope > 0 and tau > 0:
+            if stamp <= settled:
+                reading = temp_f + rise * (1.0 - math.exp(-stamp / tau))
             else:
-                reading = temp_f + rise - cool * (stamp - duration)
+                arrived = temp_f + rise * (1.0 - math.exp(-settled / tau))
+                reading = arrived - cool * (stamp - settled)
         else:
             rate = slope if slope < 0 else -cool
             reading = temp_f + rate * stamp
@@ -954,6 +1262,16 @@ def seconds_to_landing(
     return min(horizon, max(0.0, hi + tail))
 
 
+def _exponential_coast_time(need_f: float, remaining_f: float, tau_seconds: float) -> float | None:
+    """Seconds for ``remaining · (1 - e^{-t/τ})`` to gain ``need_f`` degrees."""
+
+    if need_f <= 0:
+        return 0.0
+    if remaining_f <= 0 or tau_seconds <= 0 or need_f >= remaining_f:
+        return None
+    return -tau_seconds * math.log(1.0 - need_f / remaining_f)
+
+
 def _seconds_from_fixed_crest(
     temp_f: float,
     target_f: float,
@@ -963,10 +1281,11 @@ def _seconds_from_fixed_crest(
     off_seconds: float,
     horizon: float,
 ) -> float | None:
-    """Project the constant linear-heat crest forward from ``temp_f``."""
+    """Project the leveling coast forward from ``temp_f``."""
 
     crest = model.coast_rise_f or 0.0
     rate = model.linear_rate_f_per_sec or 0.0
+    tau = coast_tau_of(model)
     need = target_f - temp_f
     if need <= 0:
         return 0.0
@@ -977,44 +1296,16 @@ def _seconds_from_fixed_crest(
         if before > 0:
             if before / rate > horizon:
                 return None
-            tail = (model.coast_seconds or 0.0) if crest > 0 else 0.0
+            # The shutoff equilibrium is the target, so the probe approaches
+            # it. Count the time to come within half a degree.
+            tail = _exponential_coast_time(max(0.0, crest - 0.5), crest, tau) or 0.0
             return min(horizon, before / rate + tail)
-        # This temperature plus the fixed crest already covers the target.
-        # Shut off now; the coast parabola climbs the rest.
-        return _crest_time_to_gain(model, need, 0.0, horizon)
-    return _crest_time_to_gain(model, need, off_seconds, horizon)
-
-
-def _crest_time_to_gain(
-    model: ThermalModel,
-    need_f: float,
-    off_seconds: float,
-    horizon: float,
-) -> float | None:
-    """Seconds for the fixed coast parabola to climb ``need_f`` more degrees."""
-
-    if need_f <= 0:
-        return 0.0
-    velocity, quad, duration = coast_curve(model)
-    if quad >= 0 or velocity <= 0 or duration <= 0:
-        return None
-    off = min(max(0.0, off_seconds), duration)
-    velocity_now = velocity + 2.0 * quad * off
-    if velocity_now <= PREDICT_MIN_RATE_F_PER_SEC:
-        return None
-    gained = velocity * off + quad * off * off
-    remaining = (model.coast_rise_f or 0.0) - gained
-    if need_f > remaining + 0.05:
-        return None
-    disc = velocity_now * velocity_now + 4.0 * quad * need_f
-    if disc < 0:
-        return None
-    root = (-velocity_now + math.sqrt(disc)) / (2.0 * quad)
-    if root < 0:
-        root = (-velocity_now - math.sqrt(disc)) / (2.0 * quad)
-    if root < 0:
-        return None
-    return min(horizon, max(0.0, root))
+        return _exponential_coast_time(need, crest, tau)
+    remaining = crest
+    if tau > 0 and off_seconds > 0 and crest > 0:
+        gained = crest * (1.0 - math.exp(-min(off_seconds, tau * 8.0) / tau))
+        remaining = max(0.0, crest - gained)
+    return _exponential_coast_time(need, remaining, tau)
 
 
 def _coast_duration(model: ThermalModel, on_seconds: float) -> float:
@@ -1062,30 +1353,13 @@ def _seconds_on_coast(
 
 
 def nudge_model(model: ThermalModel, miss_f: float) -> bool:
-    """Shrink or grow the climb after a hold pulse misses the target.
+    """Move the rise after a crest misses its check temperature.
 
-    ``miss_f`` is the crest minus the target. Positive means the pulse was
-    hot. Returns whether the model changed.
+    ``miss_f`` is the crest minus the target. Positive means the coast landed
+    high, so the stored rise grows and the next pulse opens sooner.
     """
 
-    if abs(miss_f) < 0.2:
-        return False
-    span = max(1.0, model.coast_rise_f or 1.0)
-    adjust = max(-0.25, min(0.25, miss_f / span))
-    factor = 1.0 - adjust
-    changed = False
-    if model.linear_rate_f_per_sec is not None:
-        model.linear_rate_f_per_sec = round(max(0.0, model.linear_rate_f_per_sec * factor), 5)
-        changed = True
-    if model.cold_start_quad is not None:
-        model.cold_start_quad = round(max(0.0, model.cold_start_quad * factor), 6)
-        changed = True
-    if model.coast_rise_f is not None:
-        model.coast_rise_f = round(max(0.0, model.coast_rise_f * factor), 2)
-        if model.coast_seconds and model.coast_seconds > 0:
-            model.coast_quad = round(-model.coast_rise_f / (model.coast_seconds ** 2), 6)
-        changed = True
-    return changed
+    return tune_model(model, crest_delta_f=miss_f)
 
 
 def accept_grok(local: float | None, remote: float | None, *, band: float) -> bool:

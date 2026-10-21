@@ -85,8 +85,8 @@ def test_a_run_line_shows_the_shutoff_coast_and_a_held_heater():
 
 
 def test_start_and_model_lines_name_the_numbers_a_run_began_with():
-    assert start_message("calibration", 150, None, None) == (
-        "Calibration started at 150°F. No prior heating model."
+    assert start_message("calibration", 140, None, None) == (
+        "Calibration started at 140°F. No prior heating model."
     )
     assert start_message("test", 165, None, 3) == "Initial Heating test started."
     assert suite_result_message(

@@ -14,14 +14,18 @@ import math
 # Names that match the lines drawn on the run chart.
 PHASE_LABELS = {
     "settle": "Settle",
-    "cold_start": "Cold Start",
-    "linear": "Heating",
+    "initial": "Initial heating",
+    "cold_start": "Initial heating",
+    "linear": "Linear heating",
     "coast": "Coasting",
-    "momentum": "Momentum",
-    "approach": "Stage II",
-    "approach_coast": "Stage II coast",
-    "pulses": "Pulses",
-    "hold": "Stage III",
+    "adjust": "Adjusted",
+    "momentum": "Adjusted",
+    "approach": "Pulse",
+    "approach_coast": "Pulse coast",
+    "pulse": "Pulse",
+    "pulse_coast": "Pulse coast",
+    "pulses": "Pulse",
+    "hold": "Holding",
     "heating": "Initial Heating",
     "run": "Run",
     "cutoff": "Run",
@@ -80,9 +84,11 @@ def model_numbers(model: dict | None) -> dict | None:
     for key in (
         "cold_start_seconds",
         "cold_start_quad",
+        "soak_tau_seconds",
         "linear_rate_f_per_sec",
         "coast_rise_f",
         "coast_seconds",
+        "coast_tau_seconds",
         "coast_quad",
         "cooldown_f_per_min",
         "calibration_count",
@@ -247,15 +253,20 @@ def format_control(detail: dict) -> str:
         return f"{title}. No control-probe reading. {heat_phrase(detail)}."
     if path == "settle":
         return f"Settle. {_temp(detail)} Heaters off while the probes stabilize."
-    if path == "cold_start":
+    if path in {"initial", "cold_start"}:
         return _join(
-            "Cold Start.",
+            "Initial heating.",
             _temp(detail),
             heat_phrase(detail) + ".",
             _slope_sentence(detail),
         ) + _eta(detail)
     if path == "linear":
-        return _join("Heating.", _temp(detail), heat_phrase(detail) + ".", _slope_sentence(detail)) + _eta(detail)
+        return _join(
+            "Linear heating.",
+            _temp(detail),
+            heat_phrase(detail) + ".",
+            _slope_sentence(detail),
+        ) + _eta(detail)
     if path == "coast":
         rise = _deg(detail.get("live_rise_f"))
         climbed = "" if rise is None else f"Rise since shutoff {rise}°F."
@@ -264,9 +275,9 @@ def format_control(detail: dict) -> str:
         rate = _deg(detail.get("live_rate_f_per_min"))
         cooling = "" if rate is None else f"Cooling {rate}°F/min."
         return _join("Momentum.", _temp(detail), heat_phrase(detail) + ".", cooling, _slope_sentence(detail)) + _eta(detail)
-    if path == "approach":
+    if path in {"approach", "pulse"}:
         return _approach(detail, coasting=False)
-    if path == "approach_coast":
+    if path in {"approach_coast", "pulse_coast"}:
         return _approach(detail, coasting=True)
     if path in {"pulses", "hold", "model"}:
         return _crest_sentence(detail)
@@ -295,7 +306,7 @@ def _approach(detail: dict, *, coasting: bool) -> str:
         if crest and goal:
             crest_text = f"Crest {crest}°F has reached the {goal}°F step."
         return _join(
-            "Stage II coast.",
+            "Pulse coast.",
             "" if temp is None else f"{temp}°F.",
             crest_text,
             heat_phrase(detail) + ".",
@@ -303,18 +314,18 @@ def _approach(detail: dict, *, coasting: bool) -> str:
         ) + _eta(detail)
     if temp and rise and crest and goal:
         body = (
-            f"Stage II. {temp}°F + {rise}°F coast = crest {crest}°F, under the {goal}°F step. "
+            f"Pulse. {temp}°F + {rise}°F coast = crest {crest}°F, under the {goal}°F step. "
             f"{heat_phrase(detail)}."
         )
     else:
-        body = _generic(detail, title="Stage II")
+        body = _generic(detail, title="Pulse")
         return body
     return _join(body, _slope_sentence(detail)) + _eta(detail)
 
 
 def _crest_sentence(detail: dict) -> str:
     path = str(detail.get("path") or "run")
-    title = {"pulses": "Pulses", "hold": "Stage III", "model": "Run"}.get(path, "Run")
+    title = {"pulses": "Pulse", "pulse": "Pulse", "hold": "Holding", "model": "Run"}.get(path, "Run")
     temp = _deg(detail.get("temp_f"))
     crest = _deg(detail.get("predicted_crest_f"))
     target = _deg(detail.get("target_f"), 0)
@@ -483,9 +494,11 @@ def _deg(value: object, digits: int = 1) -> str | None:
 _MODEL_EXPORT_KEYS = (
     "cold_start_seconds",
     "cold_start_quad",
+    "soak_tau_seconds",
     "linear_rate_f_per_sec",
     "coast_rise_f",
     "coast_seconds",
+    "coast_tau_seconds",
     "coast_quad",
     "cooldown_f_per_min",
     "calibration_count",

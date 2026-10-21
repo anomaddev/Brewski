@@ -5,9 +5,19 @@ import pytest
 from brewski.calibration import CalibrationSession
 from brewski.thermal import (
     CALIBRATION_TEMP_F,
+    LEARN_TEMP_F,
+    SEED_COAST_RISE_F,
+    SEED_COAST_TAU_SECONDS,
+    SEED_LINEAR_RATE_F_PER_SEC,
+    SEED_SOAK_TAU_SECONDS,
+    TUNE_FRACTION,
+    TUNE_RATE_CAP_F_PER_SEC,
+    TUNE_RISE_CAP_F,
+    TUNE_TAU_CAP_SECONDS,
     ThermalModel,
     blend_model,
     coast_rise_for,
+    fit_coast_exponential,
     fit_heating_lag,
     fit_startup_quad,
     heating_lag_coast,
@@ -17,7 +27,10 @@ from brewski.thermal import (
     project_temperature,
     remaining_coast_f,
     seconds_to_landing,
+    seed_model,
+    settled_linear_rate,
     step_sheath_slope,
+    tune_model,
 )
 
 
@@ -65,8 +78,8 @@ def test_cold_start_is_a_parabola_and_a_shorter_coast_crests_lower():
     )
     assert coast_rise_for(model, 40) == pytest.approx(8)
     assert predicted_crest(100, 40, 0, model) == pytest.approx(108)
-    # Half the shutoff slope stores a quarter of the coast rise.
-    assert coast_rise_for(model, 10) == pytest.approx(2)
+    # Half the straight rate stores half the coast rise.
+    assert coast_rise_for(model, 10) == pytest.approx(4)
 
 
 def test_linear_heat_projects_the_same_crest_from_the_current_temp():
@@ -78,16 +91,18 @@ def test_linear_heat_projects_the_same_crest_from_the_current_temp():
         coast_seconds=20,
         coast_quad=-4 / 400,
     )
-    # 61°F of straight heat, then the same 4°F crest over 20s.
+    # 61°F of straight heat, then the coast approaches the last 4°F.
+    tau = 4 / 0.4
+    tail = -tau * math.log(1 - 3.5 / 4)
     assert seconds_to_landing(100, 165, 40, model, heating=True, horizon=1000) == pytest.approx(
-        61 / 0.4 + 20
+        61 / 0.4 + tail
     )
-    # Already inside that crest. Shut off now; 3°F of the 4°F parabola is 10s.
-    assert seconds_to_landing(162, 165, 40, model, heating=True, horizon=1000) == pytest.approx(10)
-    # A hotter point uses the same crest, so less of the parabola is left.
+    # Already inside that crest. The exponential covers the last 3°F.
+    inside = -tau * math.log(1 - 3 / 4)
+    assert seconds_to_landing(162, 165, 40, model, heating=True, horizon=1000) == pytest.approx(inside)
     later = seconds_to_landing(163, 165, 80, model, heating=True, horizon=1000)
-    assert later == pytest.approx(5.858, abs=0.01)
-    assert later < 10
+    assert later == pytest.approx(-tau * math.log(1 - 2 / 4))
+    assert later < inside
 
 
 def test_hold_pulses_instead_of_running_to_the_target():
@@ -121,13 +136,13 @@ def test_stage_three_holds_the_pulse_until_the_stored_coast_reaches_the_target()
     )
     # Cold sheath: nothing is stored yet, so the pulse keeps going.
     assert coast_sized_should_heat(146, 150, 5.0, model, 1.0, slope_f_per_sec=0.0) is True
-    # Slope 0.2 stores 2°F. 146 + 2 is still short of 150.
-    assert coast_sized_should_heat(146, 150, 12.0, model, 1.0, slope_f_per_sec=0.2) is True
-    # Slope 0.3 stores 4.5°F, so opening now coasts to the target.
+    # Slope 0.2 stores half of 8°F. 146 + 4 lands on 150, so the pulse opens.
+    assert coast_sized_should_heat(146, 150, 12.0, model, 1.0, slope_f_per_sec=0.2) is False
+    # Slope 0.3 stores 6°F, so opening now coasts past the target.
     assert coast_sized_should_heat(146, 150, 16.0, model, 1.0, slope_f_per_sec=0.3) is False
-    # The same slope rule ends a pulse sooner when the gap is only 1°F.
-    assert coast_sized_should_heat(149, 150, 4.0, model, 1.0, slope_f_per_sec=0.1) is True
-    assert coast_sized_should_heat(149, 150, 6.0, model, 1.0, slope_f_per_sec=0.15) is False
+    # A 1°F gap opens as soon as the slope stores that degree.
+    assert coast_sized_should_heat(149, 150, 4.0, model, 1.0, slope_f_per_sec=0.04) is True
+    assert coast_sized_should_heat(149, 150, 6.0, model, 1.0, slope_f_per_sec=0.05) is False
     # Straight heat far below the target stays on until temp plus the full crest.
     assert coast_sized_should_heat(141, 150, 40.0, model, 1.0, slope_f_per_sec=0.4) is True
     assert coast_sized_should_heat(142, 150, 50.0, model, 1.0, slope_f_per_sec=0.4) is False
@@ -139,14 +154,14 @@ def test_stage_three_holds_the_pulse_until_the_stored_coast_reaches_the_target()
 
     session = CalibrationSession()
     session.phase = "hold"
-    session.model = model
+    session.guess = model
     session.sheath_slope = 0.0
     session._set_heat(10.0, 146.0, 5.0, 1.0)
     assert session.heat is True
-    session.sheath_slope = 0.3
-    session._set_heat(20.0, 146.0, 15.0, 1.0)
+    session.sheath_slope = 0.4
+    session._set_heat(20.0, 152.0, 15.0, 1.0)
     assert session.heat is False
-    assert session.predicted_crest == pytest.approx(150.5, abs=0.05)
+    assert session.predicted_crest == pytest.approx(160.0, abs=0.05)
 
 
 def test_the_next_minute_is_the_coast_from_cutting_the_heaters_off_now():
@@ -158,12 +173,12 @@ def test_the_next_minute_is_the_coast_from_cutting_the_heaters_off_now():
     )
     points = dict(project_temperature(100, 0.4, model, 1.2))
     assert points[0] == pytest.approx(100)
-    # Full crest at 40s, then 20s of the 1.2°F/min fall. Not 100 + 0.4*60.
-    assert points[40] == pytest.approx(108, abs=0.05)
-    assert points[60] == pytest.approx(107.6, abs=0.05)
-    # Half the shutoff slope stores a quarter of the crest, so the minute ends lower.
+    # τ = 20s. At 40s the exponential has delivered most of the 8°F, not 100 + 0.4*60.
+    assert points[40] == pytest.approx(100 + 8 * (1 - math.exp(-2)), abs=0.05)
+    assert points[60] == pytest.approx(100 + 8 * (1 - math.exp(-3)), abs=0.05)
+    # Half the shutoff slope stores half the rise.
     shorter = dict(project_temperature(100, 0.2, model, 1.2))
-    assert shorter[20] == pytest.approx(102, abs=0.05)
+    assert shorter[20] == pytest.approx(100 + 4 * (1 - math.exp(-1)), abs=0.05)
     assert shorter[60] < points[60]
     falling = dict(project_temperature(150, -0.01, model, 1.2))
     assert falling[60] == pytest.approx(149.4, abs=0.02)
@@ -205,72 +220,191 @@ def test_a_steeper_live_slope_keeps_the_heaters_off_before_the_stage_one_crest()
     assert remaining_coast_f(model, 0.32917) == pytest.approx(13.96, abs=0.05)
     steeper = remaining_coast_f(model, 0.5)
     assert steeper == pytest.approx(13.96 * (0.5 / 0.32917), abs=0.05)
-    assert 130 + steeper >= CALIBRATION_TEMP_F
+    assert 130 + steeper >= LEARN_TEMP_F
 
+
+def test_sheath_slope_decays_on_the_coast_time_constant():
+    model = ThermalModel(
+        linear_rate_f_per_sec=0.346,
+        coast_rise_f=14.31,
+        coast_seconds=198.77,
+    )
+    tau = 14.31 / 0.346
+    assert step_sheath_slope(model, 0.346, heating=False, dt=198.77) == pytest.approx(
+        0.346 * math.exp(-198.77 / tau), abs=1e-4
+    )
+    assert step_sheath_slope(model, 0.346, heating=False, dt=tau) == pytest.approx(
+        0.346 / math.e, abs=1e-4
+    )
+
+
+# Run 10, heat kept about every 2 seconds and the coast about every 8.
+# Heaters opened at 184.6s while the probe was still climbing.
+_RUN10_HEAT = [
+    (3.8, 81.92), (5.8, 81.86), (7.9, 81.92), (9.9, 81.92), (11.9, 81.92),
+    (13.9, 81.98), (15.9, 82.04), (17.9, 82.1), (19.9, 82.16), (22.0, 82.22),
+    (24.0, 82.34), (26.0, 82.59), (28.0, 82.83), (30.0, 83.32), (32.1, 83.99),
+    (34.1, 84.42), (36.1, 84.9), (38.1, 85.51), (40.1, 86.06), (42.2, 86.61),
+    (44.2, 87.28), (46.2, 87.89), (48.2, 88.62), (50.3, 89.29), (52.3, 90.03),
+    (54.3, 90.7), (56.3, 91.43), (58.3, 92.16), (60.3, 92.83), (62.4, 93.63),
+    (64.4, 94.48), (66.4, 95.21), (68.4, 95.95), (70.4, 96.68), (72.4, 97.47),
+    (74.5, 98.21), (76.5, 98.94), (79.0, 99.67), (81.0, 100.53), (83.0, 101.39),
+    (85.1, 102.18), (87.1, 102.91), (89.1, 103.71), (91.1, 104.38), (93.1, 105.18),
+    (95.2, 105.97), (97.2, 106.65), (99.2, 107.44), (101.2, 108.11), (103.2, 108.85),
+    (105.3, 109.71), (107.3, 110.62), (109.3, 111.36), (111.3, 112.09), (113.3, 112.95),
+    (115.4, 113.75), (117.4, 114.48), (119.4, 115.34), (121.5, 116.14), (123.5, 116.87),
+    (125.5, 117.67), (127.5, 118.47), (129.6, 119.33), (131.6, 120.06), (133.6, 120.8),
+    (135.6, 121.59), (137.6, 122.33), (139.6, 123.07), (141.6, 123.93), (143.7, 124.72),
+    (145.7, 125.52), (147.7, 126.5), (149.8, 127.24), (151.8, 127.98), (153.8, 128.9),
+    (155.8, 129.76), (157.8, 130.49), (159.8, 131.36), (161.8, 132.09), (164.3, 132.89),
+    (166.3, 133.63), (168.3, 134.43), (170.4, 135.35), (172.4, 136.33), (174.4, 137.13),
+    (176.5, 137.81), (178.5, 138.67), (180.6, 139.53), (182.6, 140.33), (183.6, 140.7),
+]
+_RUN10_COAST = [
+    (184.6, 141.13), (192.7, 144.39), (200.8, 147.54), (208.9, 149.63),
+    (217.0, 151.17), (225.1, 152.34), (233.6, 153.27), (241.7, 153.76),
+    (249.8, 154.32), (257.9, 154.56), (265.9, 154.75), (274.0, 154.99),
+    (282.1, 155.12), (290.1, 155.24), (298.2, 155.36), (306.3, 155.36),
+    (314.4, 155.61), (322.7, 155.55), (331.6, 155.61), (339.7, 155.67),
+    (347.8, 155.49), (355.9, 155.55), (364.0, 155.49),
+]
+
+
+def test_run_10_fits_soak_linear_heat_and_an_exponential_coast():
+    fitted = fit_heating_lag(_RUN10_HEAT)
+    assert fitted is not None
+    rate, tau = fitted
+    assert rate == pytest.approx(0.41, abs=0.03)
+    assert tau == pytest.approx(37, rel=0.15)
+    linear = settled_linear_rate(_RUN10_HEAT)
+    assert linear == pytest.approx(0.40, abs=0.02)
+    coast_fit = fit_coast_exponential(_RUN10_COAST, 0.407)
+    assert coast_fit is not None
+    rise, coast_tau = coast_fit
+    assert coast_tau == pytest.approx(35, abs=8)
+    assert rise == pytest.approx(14, abs=1.5)
+    assert _RUN10_COAST[-1][1] - _RUN10_COAST[0][1] == pytest.approx(14.3, abs=0.5)
+    origin_t, origin_v = _RUN10_COAST[0]
+    misses = []
+    for stamp, reading in _RUN10_COAST[1:]:
+        age = stamp - origin_t
+        predicted = origin_v + 0.407 * coast_tau * (1.0 - math.exp(-age / coast_tau))
+        misses.append(reading - predicted)
+    residual = math.sqrt(sum(miss * miss for miss in misses) / len(misses))
+    assert residual < 0.75
+
+
+def test_tune_model_ignores_a_miss_inside_the_deadband_and_caps_one_step():
+    quiet = seed_model()
+    tune_model(quiet, heat_delta_f=0.1, slope_delta=0.005, coast_delta_f=0.1)
+    assert quiet.linear_rate_f_per_sec == pytest.approx(SEED_LINEAR_RATE_F_PER_SEC)
+    assert quiet.soak_tau_seconds == pytest.approx(SEED_SOAK_TAU_SECONDS)
+    assert quiet.coast_rise_f == pytest.approx(SEED_COAST_RISE_F)
+
+    hot = seed_model()
+    tune_model(hot, heat_delta_f=5, slope_delta=0.05)
+    assert hot.linear_rate_f_per_sec - SEED_LINEAR_RATE_F_PER_SEC <= TUNE_RATE_CAP_F_PER_SEC + 1e-9
+    assert hot.linear_rate_f_per_sec <= SEED_LINEAR_RATE_F_PER_SEC * (1 + TUNE_FRACTION) + 1e-9
+    assert hot.soak_tau_seconds - SEED_SOAK_TAU_SECONDS <= TUNE_TAU_CAP_SECONDS + 1e-9
+    assert hot.linear_rate_f_per_sec > SEED_LINEAR_RATE_F_PER_SEC
+    assert hot.soak_tau_seconds > SEED_SOAK_TAU_SECONDS
+
+    ahead = seed_model()
+    tune_model(ahead, coast_delta_f=4)
+    assert SEED_COAST_TAU_SECONDS - ahead.coast_tau_seconds <= TUNE_TAU_CAP_SECONDS + 1e-9
+    assert ahead.coast_tau_seconds < SEED_COAST_TAU_SECONDS
+    assert abs(ahead.coast_rise_f - SEED_COAST_RISE_F) <= TUNE_RISE_CAP_F + 1e-9
+
+    cold = seed_model()
+    tune_model(cold, heat_delta_f=-5, crest_delta_f=-8)
+    assert SEED_LINEAR_RATE_F_PER_SEC - cold.linear_rate_f_per_sec <= TUNE_RATE_CAP_F_PER_SEC + 1e-9
+    assert SEED_COAST_RISE_F - cold.coast_rise_f <= TUNE_RISE_CAP_F + 1e-9
+    assert cold.linear_rate_f_per_sec < SEED_LINEAR_RATE_F_PER_SEC
+    assert cold.coast_rise_f < SEED_COAST_RISE_F
+
+
+def test_a_string_of_updates_pulls_a_stale_seed_toward_run_10():
+    model = seed_model()
+    model.linear_rate_f_per_sec = 0.25
+    model.coast_rise_f = 8
+    for _ in range(25):
+        tune_model(
+            model,
+            heat_delta_f=(0.40 - model.linear_rate_f_per_sec) * 30,
+            crest_delta_f=14 - model.coast_rise_f,
+        )
+    assert model.linear_rate_f_per_sec == pytest.approx(0.40, abs=0.015)
+    assert model.coast_rise_f == pytest.approx(14, abs=0.5)
+
+
+def test_learning_coast_opens_while_the_probe_is_still_under_140():
     session = CalibrationSession()
-    session.phase = "approach"
-    session.model = model
-    session.sheath_slope = 0.32917
-    session.samples = [(float(t), 130.0 - 0.5 * (15 - t)) for t in range(16)]
-    session._set_heat(15.0, 130.0, 40.0, 1.0)
+    session.phase = "initial"
+    session.heat_started = 0.0
+    session.heat_origin = 80.0
+    # 126.5°F plus a 0.4°F/s slope times the 35s coast is already past 140.
+    session.samples = [(float(t), 121.7 + 0.4 * t) for t in range(13)]
+    session.sheath_slope = 0.4
+    session._advance(12.0, 126.5)
+    assert session.phase == "coast"
     assert session.heat is False
-    assert session.approach_coasting is True
-    assert session.trace["goal_f"] == CALIBRATION_TEMP_F
+    assert 126.5 < LEARN_TEMP_F
 
 
-def test_sheath_slope_is_spent_when_the_measured_crest_arrives():
-    # Run 5: linear 0.346°F/s, coast 14.31°F over 198.77s. Decaying on the
-    # coast parabola's shallower starting slope still left 0.20°F/s at the crest.
-    model = ThermalModel(
-        linear_rate_f_per_sec=0.346,
-        coast_rise_f=14.31,
-        coast_seconds=198.77,
-    )
-    assert step_sheath_slope(model, 0.346, heating=False, dt=198.77) == pytest.approx(0.0, abs=1e-6)
-    assert step_sheath_slope(model, 0.346, heating=False, dt=198.77 / 2) == pytest.approx(0.173, abs=0.001)
+def test_a_coast_short_of_140_lowers_the_rise_and_a_high_coast_raises_it():
+    short = seed_model()
+    tune_model(short, crest_delta_f=110 - LEARN_TEMP_F)
+    assert short.coast_rise_f < SEED_COAST_RISE_F
+    assert SEED_COAST_RISE_F - short.coast_rise_f <= TUNE_RISE_CAP_F + 1e-9
+
+    high = seed_model()
+    tune_model(high, crest_delta_f=148 - LEARN_TEMP_F)
+    assert high.coast_rise_f > SEED_COAST_RISE_F
+    assert high.coast_rise_f - SEED_COAST_RISE_F <= TUNE_RISE_CAP_F + 1e-9
 
 
-def test_a_short_stage_two_coast_heats_again_toward_the_calibration_temperature():
-    # Run 5 landed the Stage II coast at 137.3°F and then turned the heaters
-    # off, because the step was 140°F and a leftover slope already covered it.
-    model = ThermalModel(
-        cold_start_seconds=62.7,
-        cold_start_quad=0.002,
-        linear_rate_f_per_sec=0.346,
-        coast_rise_f=14.31,
-        coast_seconds=198.77,
-    )
+def test_the_climb_pulse_stays_on_until_the_projection_crests_at_160():
     session = CalibrationSession()
-    session.model = model
-    session.phase = "coast"
-    session.sheath_slope = 0.346
-    session.open_temp = 107.4
-    session.open_elapsed = 81.7
-    session.peak_average = 121.7
-    session.peak_elapsed = 280.0
-    session._lock_coast(324.0, 121.7)
-    assert session.sheath_slope == 0.0
-
-    session.phase = "approach"
-    session.approach_coasting = False
-    session.samples = [(444.0, 121.3)]
-    session._set_heat(444.6, 121.3, 0.0, 1.0)
+    session.phase = "pulse"
+    session.guess = seed_model()
+    session.sheath_slope = session.guess.linear_rate_f_per_sec
+    session._set_heat(10.0, 140.0, 30.0, 1.0)
     assert session.heat is True
-    assert session.trace["goal_f"] == CALIBRATION_TEMP_F
-    assert session.predicted_crest < CALIBRATION_TEMP_F
+    assert session.predicted_crest <= CALIBRATION_TEMP_F + 0.05
 
-    session.approach_coasting = True
-    session.open_elapsed = 489.0
-    session.open_temp = 125.9
-    session.peak_average = 137.3
-    session.peak_elapsed = 700.0
-    session.below_since = 770.0
-    session.phase_started = 444.6
-    session.sheath_slope = 0.132
-    session._advance(784.5, 137.3)
-    assert session.phase == "pulses"
-    assert session.sheath_slope == 0.0
-    session._set_heat(784.5, 137.3, 0.0, 1.0)
+    session.sheath_slope = session.guess.linear_rate_f_per_sec
+    # 146 plus the full 14°F rise is exactly 160, so this sample opens.
+    session._set_heat(40.0, 146.0, 80.0, 1.0)
+    assert session.heat is False
+    assert session.predicted_crest == pytest.approx(CALIBRATION_TEMP_F, abs=0.2)
+
+
+def test_a_short_pulse_is_followed_by_a_shorter_one_and_hold_opens_before_160():
+    session = CalibrationSession()
+    session.phase = "pulse"
+    session.guess = seed_model()
+    session.pulse_coasting = True
+    session.open_temp = 150.0
+    session.open_elapsed = 0.0
+    session.shutoff_slope = 0.2
+    session.peak_average = 156.0
+    session.peak_elapsed = 40.0
+    session.plateau_since = 0.0
+    before = session.guess.coast_rise_f
+    session._advance(200.0, 156.0)
+    assert session.phase == "pulse"
+    assert session.pulse_coasting is False
+    assert session.guess.coast_rise_f <= before
+    session.sheath_slope = 0.05
+    session._set_heat(201.0, 156.0, 0.0, 1.0)
     assert session.heat is True
-    assert session.predicted_crest < CALIBRATION_TEMP_F
-    assert session.trace["goal_f"] == CALIBRATION_TEMP_F
+    assert session.predicted_crest <= CALIBRATION_TEMP_F + 0.05
+
+    session.phase = "hold"
+    session.pulse_coasting = False
+    session.sheath_slope = 0.2
+    # 153°F plus 0.2°F/s times the coast constant lands on 160, so the hold opens now.
+    session._set_heat(300.0, 153.0, 20.0, 1.0)
+    assert session.heat is False
+    assert session.predicted_crest == pytest.approx(CALIBRATION_TEMP_F, abs=0.5)
+    assert 153.0 < CALIBRATION_TEMP_F

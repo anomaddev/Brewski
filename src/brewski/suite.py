@@ -1,7 +1,8 @@
 """Live tests from the Software menu.
 
 Initial Heating is the first piece of Stage I: settle, heat until the rise
-goes straight, and report the chord slope. It does not write the heating model.
+stops getting steeper, and report the chord slope. It does not write the
+heating model.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from brewski.thermal import (
     COLD_START_MAX_SECONDS,
     SETTLE_SECONDS,
     endpoint_rate,
-    linear_onset,
+    slope_has_settled,
 )
 
 TEST_INITIAL_HEATING = "initial_heating"
@@ -95,7 +96,7 @@ class InitialHeatingSession:
 
     def _heat_step(self, elapsed: float, temp: float) -> None:
         window = self._since(self.heat_started)
-        found = linear_onset(window)
+        found = slope_has_settled(window)
         forced = (
             self.heat_started is not None
             and elapsed - self.heat_started >= COLD_START_MAX_SECONDS

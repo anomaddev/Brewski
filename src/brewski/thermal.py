@@ -28,6 +28,14 @@ SLOPE_WINDOW_SECONDS = 8.0
 LINEAR_STABLE_SECONDS = 5.0
 # °F/s². A startup parabola keeps bending faster than this. Linear heat does not.
 LINEAR_ACCEL_MAX = 0.001
+# Initial Heating waits out the cold sheath. A few flat seconds can still be
+# the shallow start, and the rate can keep climbing after that.
+LINEAR_CONFIRM_SECONDS = 45.0
+LINEAR_RISE_SECONDS = 15.0
+# °F/s² over the recent slope window. Above this, the rise is still steepening.
+LINEAR_SETTLED_ACCEL = 0.0002
+# °F/s. The settled rate has to sit with the steepest rate already seen.
+LINEAR_SETTLED_BAND = 0.02
 PREDICT_MIN_SAMPLES = 4
 PREDICT_MIN_SPAN_SECONDS = 8.0
 PREDICT_MIN_RATE_F_PER_SEC = 0.01
@@ -273,6 +281,36 @@ def linear_onset(samples: list[tuple[float, float]]) -> bool:
     # A parabola has a steady acceleration. Linear heat has essentially none.
     acceleration = abs(recent[-1][1] - recent[0][1]) / span
     return acceleration <= LINEAR_ACCEL_MAX
+
+
+def slope_has_settled(samples: list[tuple[float, float]]) -> bool:
+    """True once the heating rate has stopped getting steeper.
+
+    A few flat seconds are not enough. The rate has to be watched for
+    ``LINEAR_CONFIRM_SECONDS``, the last ``LINEAR_RISE_SECONDS`` must no
+    longer be climbing, and that rate has to sit with the steepest rate
+    seen so far. A shallow pause at the start stays in heating, because
+    the line gets steeper once the sheath is soaked.
+    """
+
+    slopes = rolling_slopes(samples)
+    if len(slopes) < 2:
+        return False
+    if slopes[-1][0] - slopes[0][0] < LINEAR_CONFIRM_SECONDS - 1:
+        return False
+    end = slopes[-1][0]
+    recent = [(stamp, rate) for stamp, rate in slopes if stamp >= end - LINEAR_RISE_SECONDS]
+    if len(recent) < 2 or recent[-1][0] - recent[0][0] < LINEAR_RISE_SECONDS - 1:
+        return False
+    if any(rate < PREDICT_MIN_RATE_F_PER_SEC for _stamp, rate in recent):
+        return False
+    span = recent[-1][0] - recent[0][0]
+    if span <= 0:
+        return False
+    if (recent[-1][1] - recent[0][1]) / span > LINEAR_SETTLED_ACCEL:
+        return False
+    peak = max(rate for _stamp, rate in slopes)
+    return recent[-1][1] >= peak - LINEAR_SETTLED_BAND
 
 
 def fit_startup_quad(samples: list[tuple[float, float]]) -> float | None:

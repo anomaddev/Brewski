@@ -1,5 +1,7 @@
 """Initial Heating: the first live test in the Software menu."""
 
+import math
+
 import pytest
 
 from dataclasses import replace
@@ -53,13 +55,15 @@ def test_settle_then_a_straight_rise_reports_the_chord_slope():
     assert session.heat is True
     assert session.phase == "heating"
     finished = None
-    for step in range(1, 40):
+    for step in range(1, 90):
         session.observe(3 + step, 70 + 0.2 * step)
         marks.extend(session.pending_marks)
         if session.finished:
             finished = 3 + step
             break
     assert finished is not None
+    # A straight rise is still watched long enough to see it is not about to steepen.
+    assert finished - 3 >= 45
     assert session.heat is False
     assert marks == ["Initial Heating", "Linear"]
     result = session.result
@@ -74,6 +78,33 @@ def test_settle_then_a_straight_rise_reports_the_chord_slope():
     session.observe(finished + 5, 90)
     assert session.heat is False
     assert session.result["slope_f_per_sec"] == held
+
+
+def test_a_shallow_start_stays_in_heating_until_the_rise_steepens():
+    session = InitialHeatingSession()
+    session.observe(3, 70)
+    finished = None
+    for step in range(1, 190):
+        age = float(step)
+        if age < 40:
+            temp = 70 + 0.02 * age
+        else:
+            risen = age - 40
+            rate = 0.25
+            tau = 25.0
+            temp = 70 + 0.02 * 40 + rate * (risen - tau * (1 - math.exp(-risen / tau)))
+        session.observe(3 + step, temp)
+        if age <= 40:
+            assert session.finished is False
+            assert session.heat is True
+        if session.finished:
+            finished = 3 + step
+            break
+    assert finished is not None
+    assert finished - 3 > 40
+    assert session.result["found"] is True
+    assert session.result["slope_f_per_sec"] > 0.10
+    assert session.pending_marks == ["Linear"]
 
 
 def test_the_cap_ends_without_a_linear_mark_when_the_rise_keeps_bending():
@@ -144,7 +175,7 @@ def test_initial_heating_leaves_the_model_and_holds_the_result(store):
     with pytest.raises(ControllerError, match="paused"):
         controller.pause()
 
-    for step in range(1, 80):
+    for step in range(1, 120):
         temp = 70.0 if step <= 3 else 70.0 + 0.2 * (step - 3)
         source.temps = [temp, 62.0]
         controller.tick(1)

@@ -61,7 +61,7 @@ export function testSummary(test) {
   if (!test) return ''
   if (!test.review) {
     if (test.phase === 'settle') return 'Initial Heating. Settling with the elements off.'
-    if (test.phase === 'heating') return 'Initial Heating. Heaters are on until the rise goes straight.'
+    if (test.phase === 'heating') return 'Initial Heating. Heaters stay on until the rise stops getting steeper.'
     return 'Initial Heating.'
   }
   const slope = test.slope_f_per_min == null ? null : `${Number(test.slope_f_per_min).toFixed(1)}°F/min`

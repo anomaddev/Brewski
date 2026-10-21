@@ -19,6 +19,7 @@ import {
   escapeHtml,
   formatDuration,
   formatHours,
+  formatRate,
   formatTarget,
   formatWhen,
   kindBadge,
@@ -511,6 +512,7 @@ export function mountDashboard(root) {
             <article class="probe ${index === 0 ? 'probe-primary' : ''}" data-probe="${index}">
               <span class="probe-kicker">${escapeHtml(name)}${index === 0 ? ' · control' : ''}</span>
               <p class="probe-readout" data-temp="${index}"><span class="probe-num">—</span></p>
+              <p class="probe-rate" data-rate="${index}" hidden></p>
               <p class="probe-delta" data-delta="${index}"></p>
               <p class="boil-warning" data-boil="${index}" hidden>Above water's boiling point (212°F).</p>
             </article>`,
@@ -522,6 +524,16 @@ export function mountDashboard(root) {
       const text = value == null || Number.isNaN(Number(value)) ? '—' : Number(value).toFixed(1)
       host.querySelector(`[data-temp="${index}"]`).innerHTML =
         `<span class="probe-num">${text}</span><span class="probe-unit">°F</span>`
+      const rate = host.querySelector(`[data-rate="${index}"]`)
+      if (index === 0) {
+        const perMin = status.rate_f_per_min
+        rate.hidden = false
+        rate.textContent = formatRate(perMin)
+        rate.classList.toggle('is-rising', Number(perMin) > 0.05)
+        rate.classList.toggle('is-falling', Number(perMin) < -0.05)
+      } else {
+        rate.hidden = true
+      }
       const delta = host.querySelector(`[data-delta="${index}"]`)
       const target = Number(status.target_temp_f)
       const gap = Number(value) - target

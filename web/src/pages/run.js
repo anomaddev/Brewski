@@ -60,7 +60,7 @@ export function mountRun(root, params) {
       <section class="dashboard-card">
         <div class="card-title-with-timer">
           <h2 class="card-title">Control log</h2>
-          <a class="export-link" id="export-log" href="/api/runs/${encodeURIComponent(params.id)}/log.csv">Export</a>
+          <a class="export-link" id="export-log" href="/api/runs/${encodeURIComponent(params.id)}/log.csv" download>Export</a>
         </div>
         <p class="log-note">Temperature, heater state, and the calculation, saved about once a second. Export downloads the full log.</p>
         <div class="history-table-container sample-log" id="control-log">

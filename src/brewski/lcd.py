@@ -112,7 +112,14 @@ class HardwareDisplay:
             if previous is not None and previous[row] == line:
                 continue
             self._lcd.cursor_pos = (row, 0)  # type: ignore[attr-defined]
-            self._lcd.write_string(f"{line:<{COLUMNS}}")  # type: ignore[attr-defined]
+            try:
+                # Pad to the width so a shorter line erases what was there.
+                # RPLCD 1.3 then steps the cursor to column 20. That position
+                # is illegal, write_string raises, and the rows under this
+                # one never get sent. The glass keeps the previous screen.
+                self._lcd.write_string(f"{line:<{COLUMNS}}")  # type: ignore[attr-defined]
+            except ValueError:
+                pass
         self._last = framed
 
     def clear(self) -> None:
@@ -624,6 +631,18 @@ def suite_result_lines(result: dict) -> list[str]:
     rise = result.get("rise_f")
     seconds = result.get("seconds")
     slope = result.get("slope_f_per_min")
+    approach = result.get("approach_f_per_min")
+    tau = result.get("tau_seconds")
+    coast = result.get("coast_rise_f")
+    if found and approach is not None and tau is not None and coast is not None:
+        return frame(
+            [
+                _pair("Rate:", _degrees_per_min(float(approach))),
+                _pair("Tau:", f"{int(round(float(tau)))}s"),
+                _pair("Coast:", _signed_degrees(float(coast))),
+                "STOP end",
+            ]
+        )
     if found and slope is not None and rise is not None and seconds is not None:
         return frame(
             [

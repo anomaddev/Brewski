@@ -1,3 +1,5 @@
+import math
+
 import pytest
 
 from brewski.calibration import CalibrationSession
@@ -6,7 +8,9 @@ from brewski.thermal import (
     ThermalModel,
     blend_model,
     coast_rise_for,
+    fit_heating_lag,
     fit_startup_quad,
+    heating_lag_coast,
     coast_sized_should_heat,
     hold_should_heat,
     predicted_crest,
@@ -15,6 +19,25 @@ from brewski.thermal import (
     seconds_to_landing,
     step_sheath_slope,
 )
+
+
+def test_a_soaking_element_fits_an_exponential_and_a_straight_line_does_not():
+    rate = 0.25
+    tau = 40.0
+    samples = []
+    for step in range(0, 141):
+        elapsed = float(step)
+        rise = rate * (elapsed - tau * (1 - math.exp(-elapsed / tau)))
+        samples.append((elapsed, 70.0 + rise))
+    fitted = fit_heating_lag(samples)
+    assert fitted is not None
+    assert fitted[0] == pytest.approx(rate, rel=0.08)
+    assert fitted[1] == pytest.approx(tau, rel=0.15)
+    coast = heating_lag_coast(fitted[0], fitted[1], 140.0)
+    assert coast == pytest.approx(rate * tau * (1 - math.exp(-140 / tau)), rel=0.1)
+
+    straight = [(float(step), 70.0 + 0.2 * step) for step in range(0, 80)]
+    assert fit_heating_lag(straight) is None
 
 
 def test_cold_start_is_a_parabola_and_a_shorter_coast_crests_lower():

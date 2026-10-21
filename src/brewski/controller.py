@@ -690,6 +690,10 @@ class Controller:
         # time, including pause, so a test can advance it without sleeping.
         self._predict_clock = 0.0
         self._predict_samples: list[tuple[float, float]] = []
+        # Control-probe samples for the rate shown on the dashboard. Kept apart
+        # from the shutoff window so an idle screen can show it too.
+        self._rate_clock = 0.0
+        self._rate_samples: list[tuple[float, float]] = []
         # Samples since the SSR opened, cleared when an element turns back on.
         self._coast_curve: list[tuple[float, float]] = []
         # Coast and slope from the last shutoff decision, captured while the
@@ -915,6 +919,7 @@ class Controller:
             self._test_review = None
             self._clear_cooldown()
             self._clear_predict()
+            self._clear_rate()
             self._set_heaters([False] * SLOT_COUNT, release_off_dwell=True)
             reset_source = getattr(self.source, "reset", None)
             if reset_source is not None:
@@ -1339,6 +1344,7 @@ class Controller:
             stepper(dt)
         self._live_temps = self.source.read_temperatures(SLOT_COUNT)
         self._sample_climate()
+        self._note_rate(dt)
         self._emergency = self._emergency_codes(settings)
         try:
             self._note_timeline(dt, settings)
@@ -2099,6 +2105,28 @@ class Controller:
         self._predict_samples.clear()
         self._coast_curve.clear()
 
+    def _clear_rate(self) -> None:
+        self._rate_clock = 0.0
+        self._rate_samples.clear()
+
+    def _note_rate(self, dt: float) -> None:
+        """Remember the control probe so the dashboard can show °F/min."""
+
+        if dt <= 0:
+            return
+        self._rate_clock += dt
+        found = self._current_control(self.store.get_settings())
+        if found is None:
+            self._rate_samples.clear()
+            return
+        self._rate_samples.append((self._rate_clock, found[1]))
+        horizon = self._rate_clock - PREDICT_WINDOW_SECONDS
+        while len(self._rate_samples) >= 2 and self._rate_samples[1][0] <= horizon:
+            self._rate_samples.pop(0)
+
+    def _temperature_rate(self) -> float | None:
+        return slope_f_per_sec(self._rate_samples)
+
     def _note_predict(self, dt: float) -> None:
         """Append the control probe and drop readings older than the window."""
 
@@ -2694,6 +2722,7 @@ class Controller:
             if index < len(self._heaters)
         ]
         life = self._life_seconds()
+        rate = self._temperature_rate()
         return {
             "mode": self._mode,
             "source": getattr(self.source, "name", "unknown"),
@@ -2722,6 +2751,8 @@ class Controller:
             if self._mode in ("running", "paused")
             else False,
             "temps_f": temps,
+            "rate_f_per_sec": None if rate is None else round(rate, 5),
+            "rate_f_per_min": None if rate is None else round(rate * 60.0, 1),
             "projection": self._projection(settings),
             "sensor_names": [settings.sensors[index].name for index in sensor_indexes],
             "heaters_on": heaters,

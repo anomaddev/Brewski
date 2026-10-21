@@ -71,6 +71,8 @@ def test_settle_then_a_straight_rise_reports_the_chord_slope():
     assert result["stopped"] is False
     assert result["slope_f_per_sec"] == pytest.approx(0.2, abs=0.01)
     assert result["slope_f_per_min"] == pytest.approx(12.0, abs=0.5)
+    assert result["tau_seconds"] is None
+    assert result["coast_rise_f"] is None
     assert result["start_temp_f"] == 70.0
     assert result["linear_temp_f"] == pytest.approx(70 + 0.2 * (finished - 3), abs=0.2)
     assert result["seconds"] == pytest.approx(finished - 3, abs=0.1)
@@ -105,6 +107,27 @@ def test_a_shallow_start_stays_in_heating_until_the_rise_steepens():
     assert session.result["found"] is True
     assert session.result["slope_f_per_sec"] > 0.10
     assert session.pending_marks == ["Linear"]
+
+
+def test_initial_heating_fits_the_soak_and_the_coast_it_leaves():
+    session = InitialHeatingSession()
+    session.observe(3, 70)
+    rate = 0.25
+    tau = 30.0
+    for step in range(1, 180):
+        elapsed = float(step)
+        rise = rate * (elapsed - tau * (1 - math.exp(-elapsed / tau)))
+        session.observe(3 + step, 70 + rise)
+        if session.finished:
+            break
+    result = session.result
+    assert result["found"] is True
+    assert result["approach_f_per_sec"] == pytest.approx(rate, rel=0.15)
+    assert result["tau_seconds"] == pytest.approx(tau, rel=0.25)
+    assert result["coast_rise_f"] == pytest.approx(
+        rate * tau * (1 - math.exp(-result["seconds"] / tau)),
+        rel=0.2,
+    )
 
 
 def test_the_cap_ends_without_a_linear_mark_when_the_rise_keeps_bending():

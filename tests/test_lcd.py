@@ -184,6 +184,22 @@ def test_initial_heating_names_the_phase_and_holds_the_slope():
     ]
     assert all(len(line) <= COLUMNS for line in done)
 
+    exponential = suite_result_lines(
+        {
+            "found": True,
+            "approach_f_per_min": 18.0,
+            "tau_seconds": 42,
+            "coast_rise_f": 12.6,
+        }
+    )
+    assert exponential == [
+        "Rate:     18.0 F/min",
+        "Tau:             42s",
+        "Coast:       +12.6 F",
+        "STOP end",
+    ]
+    assert all(len(line) <= COLUMNS for line in exponential)
+
     missed = suite_result_lines(
         {"found": False, "stopped": False, "rise_f": 4.1, "seconds": 180, "slope_f_per_min": 1.4}
     )
@@ -406,6 +422,53 @@ def test_lgpio_is_imported_from_a_writable_directory(tmp_path, monkeypatch):
     assert lcd._ensure_lgpio() is True
     assert Path(seen["cwd"]) == tmp_path
     assert os.getcwd() == before
+
+
+def test_a_line_that_ends_early_still_paints_the_rows_under_it():
+    """RPLCD 1.3 raises once the cursor steps past the last column.
+
+    The result screen is shorter than the width on every row. Without
+    catching that, the title is sent and the slope never is, so the
+    heating text stays on the glass.
+    """
+
+    class _Lcd:
+        def __init__(self) -> None:
+            self._pos = (0, 0)
+            self.writes: list[tuple[tuple[int, int], str]] = []
+
+        @property
+        def cursor_pos(self) -> tuple[int, int]:
+            return self._pos
+
+        @cursor_pos.setter
+        def cursor_pos(self, value: tuple[int, int]) -> None:
+            if value[1] >= COLUMNS:
+                raise ValueError(f"Cursor position {value} invalid on a 4x20 LCD.")
+            self._pos = value
+
+        def write_string(self, text: str) -> None:
+            self.writes.append((self._pos, text))
+            if len(text) >= COLUMNS:
+                raise ValueError("Cursor position (0, 20) invalid on a 4x20 LCD.")
+
+    lcd = _Lcd()
+    display = HardwareDisplay(lcd)
+    display.write(
+        [
+            "Init Heat done",
+            "+12.4 F in 38s",
+            "Slope:    26.0 F/min",
+            "STOP end",
+        ]
+    )
+    assert [text.strip() for _pos, text in lcd.writes] == [
+        "Init Heat done",
+        "+12.4 F in 38s",
+        "Slope:    26.0 F/min",
+        "STOP end",
+    ]
+    assert [pos[0] for pos, _text in lcd.writes] == [0, 1, 2, 3]
 
 
 def test_a_target_change_rewrites_only_that_row():

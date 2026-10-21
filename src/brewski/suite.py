@@ -1,8 +1,9 @@
 """Live tests from the Software menu.
 
 Initial Heating is the first piece of Stage I: settle, heat until the rise
-stops getting steeper, and report the chord slope. It does not write the
-heating model.
+stops getting steeper, and fit the exponential the element soaks in on. The
+same time constant is the climb left when the heaters open. It does not write
+the heating model.
 """
 
 from __future__ import annotations
@@ -11,6 +12,8 @@ from brewski.thermal import (
     COLD_START_MAX_SECONDS,
     SETTLE_SECONDS,
     endpoint_rate,
+    fit_heating_lag,
+    heating_lag_coast,
     slope_has_settled,
 )
 
@@ -82,6 +85,10 @@ class InitialHeatingSession:
                 "stopped": False,
                 "slope_f_per_sec": None,
                 "slope_f_per_min": None,
+                "approach_f_per_sec": None,
+                "approach_f_per_min": None,
+                "tau_seconds": None,
+                "coast_rise_f": None,
                 "rise_f": None,
                 "seconds": None,
                 "start_temp_f": None,
@@ -124,6 +131,10 @@ class InitialHeatingSession:
                 "stopped": stopped,
                 "slope_f_per_sec": None,
                 "slope_f_per_min": None,
+                "approach_f_per_sec": None,
+                "approach_f_per_min": None,
+                "tau_seconds": None,
+                "coast_rise_f": None,
                 "rise_f": None,
                 "seconds": None,
                 "start_temp_f": round(temp, 1),
@@ -132,14 +143,23 @@ class InitialHeatingSession:
         window = self._since(self.heat_started)
         rate = endpoint_rate(window)
         start_temp = window[0][1] if window else temp
+        heated = max(0.0, elapsed - self.heat_started)
+        lag = fit_heating_lag(window)
+        approach = None if lag is None else lag[0]
+        tau = None if lag is None else lag[1]
+        coast = None if lag is None else heating_lag_coast(approach, tau, heated)
         return {
             "id": TEST_INITIAL_HEATING,
             "found": found,
             "stopped": stopped,
             "slope_f_per_sec": None if rate is None else round(rate, 5),
             "slope_f_per_min": None if rate is None else round(rate * 60.0, 1),
+            "approach_f_per_sec": None if approach is None else round(approach, 5),
+            "approach_f_per_min": None if approach is None else round(approach * 60.0, 1),
+            "tau_seconds": None if tau is None else round(tau, 1),
+            "coast_rise_f": None if coast is None else round(coast, 1),
             "rise_f": round(temp - start_temp, 1),
-            "seconds": round(max(0.0, elapsed - self.heat_started), 1),
+            "seconds": round(heated, 1),
             "start_temp_f": round(start_temp, 1),
             "linear_temp_f": round(temp, 1) if found else None,
         }

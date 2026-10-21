@@ -146,6 +146,22 @@ def suite_result_message(result: dict | None) -> str:
     slope = measured.get("slope_f_per_sec")
     minutes = measured.get("slope_f_per_min")
     seconds = measured.get("seconds")
+    approach = measured.get("approach_f_per_sec")
+    approach_min = measured.get("approach_f_per_min")
+    tau = measured.get("tau_seconds")
+    coast = measured.get("coast_rise_f")
+    if (
+        measured.get("found")
+        and approach is not None
+        and approach_min is not None
+        and tau is not None
+        and coast is not None
+    ):
+        return (
+            f"Initial Heating approaches {float(approach):.5f}°F/s "
+            f"({float(approach_min):.1f}°F/min) with a {float(tau):.0f}s time constant. "
+            f"Opening the heaters adds about {float(coast):.1f}°F."
+        )
     if measured.get("found") and slope is not None and minutes is not None and seconds is not None:
         return (
             f"Initial Heating slope {float(slope):.5f}°F/s "

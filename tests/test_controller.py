@@ -26,6 +26,25 @@ from brewski.store import merge_settings
 from brewski.thermal import ThermalModel
 
 
+def test_status_reports_how_fast_the_control_probe_is_changing(store):
+    source = StaticSource([70.0, 62.0])
+    controller = Controller(store, source)
+    assert controller.status()["rate_f_per_min"] is None
+    for step in range(1, 16):
+        source.temps = [70.0 + 0.2 * step, 62.0]
+        controller.tick(1)
+    status = controller.status()
+    assert status["rate_f_per_sec"] == pytest.approx(0.2, abs=0.02)
+    assert status["rate_f_per_min"] == pytest.approx(12.0, abs=0.5)
+
+    start = source.temps[0]
+    for step in range(1, 21):
+        source.temps = [start - 0.1 * step, 62.0]
+        controller.tick(1)
+    falling = controller.status()
+    assert falling["rate_f_per_min"] == pytest.approx(-6.0, abs=0.5)
+
+
 def test_the_live_chart_projects_one_minute_of_cutoff_coast(controller):
     controller._mode = "running"
     controller._run_model = ThermalModel(

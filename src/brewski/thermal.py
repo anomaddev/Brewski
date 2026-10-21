@@ -313,6 +313,107 @@ def slope_has_settled(samples: list[tuple[float, float]]) -> bool:
     return recent[-1][1] >= peak - LINEAR_SETTLED_BAND
 
 
+def _lag_rise(elapsed: float, tau: float) -> float:
+    """Degrees one °F/s of soaked heat would add by ``elapsed`` seconds."""
+
+    if tau <= 0:
+        return elapsed
+    return elapsed - tau * (1.0 - math.exp(-elapsed / tau))
+
+
+def fit_heating_lag(samples: list[tuple[float, float]]) -> tuple[float, float] | None:
+    """Asymptotic rate (°F/s) and time constant (s) while the element soaks.
+
+    From a cold element the heating rate climbs as ``R (1 - e^{-t/τ})``, so
+
+        ΔT = R (t - τ (1 - e^{-t/τ}))
+
+    ``R`` is the straight rate once the element is hot. ``τ`` is how fast it
+    gets there. Opening the heaters runs the same exponential backward: the
+    degrees still to come are the rate at shutoff times ``τ``. Returns None
+    when the rise is already straight, so a chord is the whole story.
+    """
+
+    if len(samples) < 8:
+        return None
+    origin_t, origin_v = samples[0]
+    points: list[tuple[float, float]] = []
+    for stamp, reading in samples:
+        elapsed = stamp - origin_t
+        if elapsed < 0:
+            continue
+        points.append((elapsed, reading - origin_v))
+    if len(points) < 8 or points[-1][0] < 20.0:
+        return None
+    duration = points[-1][0]
+    early = [(elapsed, rise) for elapsed, rise in points if elapsed <= duration * 0.25]
+    late = [(elapsed, rise) for elapsed, rise in points if elapsed >= duration * 0.75]
+    early_rate = endpoint_rate(early)
+    late_rate = endpoint_rate(late)
+    if (
+        early_rate is None
+        or late_rate is None
+        or late_rate <= 0
+        or late_rate < early_rate * 1.15
+    ):
+        return None
+
+    best: tuple[float, float] | None = None
+    best_error: float | None = None
+    tau = 4.0
+    while tau <= 300.0:
+        numerator = 0.0
+        denominator = 0.0
+        for elapsed, rise in points:
+            basis = _lag_rise(elapsed, tau)
+            numerator += rise * basis
+            denominator += basis * basis
+        if denominator <= 0:
+            tau *= 1.15
+            continue
+        rate = numerator / denominator
+        if not math.isfinite(rate) or rate <= 0:
+            tau *= 1.15
+            continue
+        error = 0.0
+        for elapsed, rise in points:
+            miss = rise - rate * _lag_rise(elapsed, tau)
+            error += miss * miss
+        if best_error is None or error < best_error:
+            best_error = error
+            best = (rate, tau)
+        tau *= 1.15
+    if best is None or best_error is None:
+        return None
+
+    line_numerator = sum(rise * elapsed for elapsed, rise in points)
+    line_denominator = sum(elapsed * elapsed for elapsed, rise in points)
+    if line_denominator <= 0:
+        return None
+    line = line_numerator / line_denominator
+    line_error = sum((rise - line * elapsed) ** 2 for elapsed, rise in points)
+    if line_error <= 0 or best_error > line_error * 0.85:
+        return None
+    rate, tau = best
+    modeled_end = rate * (1.0 - math.exp(-duration / tau))
+    if abs(modeled_end - late_rate) / late_rate > 0.35:
+        return None
+    return rate, tau
+
+
+def heating_lag_coast(rate_f_per_sec: float, tau_seconds: float, heated_seconds: float) -> float:
+    """Degrees still to come if the heaters open after ``heated_seconds``.
+
+    The element is holding ``rate * τ * (1 - e^{-t/τ})`` degrees of climb.
+    At full soak that is ``rate * τ``.
+    """
+
+    if rate_f_per_sec <= 0 or tau_seconds <= 0 or heated_seconds <= 0:
+        return 0.0
+    soaked = 1.0 - math.exp(-heated_seconds / tau_seconds)
+    return rate_f_per_sec * tau_seconds * soaked
+
+
 def fit_startup_quad(samples: list[tuple[float, float]]) -> float | None:
     """Least-squares ``a`` in ``ΔT = a t²`` from the first sample.
 

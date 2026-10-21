@@ -21,6 +21,13 @@ export function formatHours(totalSeconds) {
   return `${hours.toFixed(2)} h`
 }
 
+export function formatRate(perMin) {
+  if (perMin == null || !Number.isFinite(Number(perMin))) return '—'
+  const rounded = Math.round(Number(perMin) * 10) / 10
+  if (rounded === 0) return '0.0°F/min'
+  return `${rounded > 0 ? '+' : ''}${rounded.toFixed(1)}°F/min`
+}
+
 export function formatTemp(value) {
   if (value == null || Number.isNaN(Number(value))) return '—'
   return `${Number(value).toFixed(1)}°F`
@@ -66,11 +73,18 @@ export function testSummary(test) {
   }
   const slope = test.slope_f_per_min == null ? null : `${Number(test.slope_f_per_min).toFixed(1)}°F/min`
   const perSec = test.slope_f_per_sec == null ? null : `${Number(test.slope_f_per_sec).toFixed(5)}°F/s`
+  const approach = test.approach_f_per_min == null ? null : `${Number(test.approach_f_per_min).toFixed(1)}°F/min`
+  const tau = test.tau_seconds == null ? null : `${Math.round(Number(test.tau_seconds))}s`
+  const coast = test.coast_rise_f == null ? null : `${Number(test.coast_rise_f).toFixed(1)}°F`
   const rise = test.rise_f == null ? null : `${Number(test.rise_f) >= 0 ? '+' : ''}${Number(test.rise_f).toFixed(1)}°F`
   const seconds = test.seconds == null ? null : `${Math.round(Number(test.seconds))}s`
   const start = test.start_temp_f == null ? null : `${Number(test.start_temp_f).toFixed(1)}°F`
   const linear = test.linear_temp_f == null ? null : `${Number(test.linear_temp_f).toFixed(1)}°F`
   const measured = rise && seconds ? ` ${rise} over ${seconds}.` : ''
+  if (test.found && approach && tau && coast) {
+    const temps = start && linear ? ` From ${start} to ${linear}.` : ''
+    return `Heating approaches ${approach} with a ${tau} time constant. Opening the heaters adds about ${coast}.${temps}`
+  }
   if (test.found && slope) {
     const rate = perSec ? ` (${perSec})` : ''
     const temps = start && linear ? ` From ${start} to ${linear}.` : ''

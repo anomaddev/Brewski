@@ -16,8 +16,6 @@ from dataclasses import dataclass
 
 # Calibration always aims here. The dial setpoint belongs to the next real run.
 CALIBRATION_TEMP_F = 150.0
-# Stage II tries to land this far under the calibration temperature.
-APPROACH_MARGIN_F = 10.0
 # A cooldown is over, and the pot is safe to handle, under this temperature.
 SAFE_TEMP_F = 90.0
 SETTLE_SECONDS = 3.0
@@ -493,7 +491,8 @@ def step_sheath_slope(
     """Move the sheath slope for ``dt`` seconds of heating or cooling.
 
     Heating accelerates toward the linear rate and does not start over at
-    zero when the SSR was already warm. Cooling walks down the fixed crest.
+    zero when the SSR was already warm. Cooling spends that slope on the
+    clock of the measured crest, so it is gone when the pot has crested.
     """
 
     slope = max(0.0, slope_f_per_sec)
@@ -507,8 +506,15 @@ def step_sheath_slope(
         if (model.cold_start_seconds or 0.0) <= 0 or accel <= 0:
             return linear
         return min(linear, slope + accel * dt)
-    _velocity, quad, duration = coast_curve(model)
-    if quad >= 0 or duration <= 0:
+    duration = model.coast_seconds or 0.0
+    if duration > 0 and linear > 0:
+        # A full-rate shutoff has delivered its coast when the measured crest
+        # arrives. The coast parabola's own starting slope is shallower than
+        # the linear rate, and decaying on that shallower slope leaves a
+        # phantom coast after the pot has already stopped rising.
+        return max(0.0, slope - (linear / duration) * dt)
+    _velocity, quad, curve_duration = coast_curve(model)
+    if quad >= 0 or curve_duration <= 0:
         return slope
     return max(0.0, slope + 2.0 * quad * dt)
 

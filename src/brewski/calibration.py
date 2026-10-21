@@ -1,14 +1,14 @@
 """Staged calibration.
 
 Settle, cold start, linear heat, coast, and a quiet momentum window build
-the thermal model. Stage II uses that model to land under the target, then
-pulses up to it. Stage III holds for ten minutes.
+the thermal model. Stage II heats until the coast stored so far will crest
+at the calibration temperature, then pulses the same way if that coast falls
+short. Stage III holds for ten minutes.
 """
 
 from __future__ import annotations
 
 from brewski.thermal import (
-    APPROACH_MARGIN_F,
     CALIBRATION_TEMP_F,
     COAST_AVERAGE_SECONDS,
     COAST_PEAK_CONFIRM_SECONDS,
@@ -23,7 +23,6 @@ from brewski.thermal import (
     SETTLE_SECONDS,
     ThermalModel,
     endpoint_rate,
-    budgeted_coast_f,
     fit_startup_quad,
     linear_onset,
     pulse_plan,
@@ -216,10 +215,12 @@ class CalibrationSession:
             timed_out = elapsed - opened >= max(coast_for, 20.0)
             if not self._peak_ready(elapsed) and not timed_out:
                 return
-            goal = CALIBRATION_TEMP_F - APPROACH_MARGIN_F
             self.approach_coasting = False
             self._reset_peak()
-            if temp >= goal - 2.0:
+            # That crest spent the slope it was storing. A shortfall has to
+            # build a new one, aimed at the calibration temperature.
+            self.sheath_slope = 0.0
+            if temp < CALIBRATION_TEMP_F:
                 self._enter("pulses", elapsed)
             return
         if self.phase == "pulses":
@@ -263,7 +264,7 @@ class CalibrationSession:
             }
             return
         if self.phase == "approach":
-            goal = CALIBRATION_TEMP_F - APPROACH_MARGIN_F
+            goal = CALIBRATION_TEMP_F
             if self.approach_coasting:
                 self.heat = False
                 if self.open_temp is not None:
@@ -301,6 +302,9 @@ class CalibrationSession:
             self.heat = True
             return
         if self.phase == "pulses":
+            # Same rule as the hold: stay on until the coast stored so far
+            # reaches the target. A full-crest budget shuts a shortfall off
+            # immediately, because one Stage I coast is wider than the gap.
             slope = self._control_slope(elapsed)
             plan = pulse_plan(
                 temp,
@@ -309,9 +313,9 @@ class CalibrationSession:
                 self.model,
                 min_on,
                 slope_f_per_sec=slope,
-                budgeted=True,
+                budgeted=False,
             )
-            self.predicted_crest = temp + budgeted_coast_f(self.model, slope, temp, CALIBRATION_TEMP_F)
+            self.predicted_crest = plan["predicted_crest_f"]
             self.heat = bool(plan["heat"])
             self.trace = {"path": "pulses", "goal_f": CALIBRATION_TEMP_F, **plan}
             return
@@ -362,6 +366,9 @@ class CalibrationSession:
         open_at = self.open_elapsed if self.open_elapsed is not None else self.phase_started
         self.model.coast_rise_f = round(max(0.0, peak - opened), 2)
         self.model.coast_seconds = round(max(0.0, peak_at - open_at), 2)
+        # The crest is the zero-slope point on that coast. Leaving the linear
+        # rate in place makes Stage II treat spent heat as still stored.
+        self.sheath_slope = 0.0
         if self.model.coast_seconds > 0:
             self.model.coast_quad = round(
                 -self.model.coast_rise_f / (self.model.coast_seconds ** 2),

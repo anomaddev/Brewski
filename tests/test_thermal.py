@@ -3,7 +3,6 @@ import pytest
 from brewski.calibration import CalibrationSession
 from brewski.thermal import (
     CALIBRATION_TEMP_F,
-    APPROACH_MARGIN_F,
     ThermalModel,
     blend_model,
     coast_rise_for,
@@ -14,6 +13,7 @@ from brewski.thermal import (
     project_temperature,
     remaining_coast_f,
     seconds_to_landing,
+    step_sheath_slope,
 )
 
 
@@ -161,8 +161,8 @@ def test_a_later_calibration_has_the_same_weight_as_the_ones_already_saved():
 
 
 def test_a_steeper_live_slope_keeps_the_heaters_off_before_the_stage_one_crest():
-    # Run 3 on the still: Stage I crest 13.96°F at 0.329°F/s. Stage II was
-    # still steepening past that rate when the heaters opened at 129°F.
+    # Run 3 on the still: Stage I crest 13.96°F at 0.329°F/s. A probe still
+    # steepening past that rate is storing a larger crest.
     model = ThermalModel(
         linear_rate_f_per_sec=0.32917,
         coast_rise_f=13.96,
@@ -171,13 +171,72 @@ def test_a_steeper_live_slope_keeps_the_heaters_off_before_the_stage_one_crest()
     assert remaining_coast_f(model, 0.32917) == pytest.approx(13.96, abs=0.05)
     steeper = remaining_coast_f(model, 0.5)
     assert steeper == pytest.approx(13.96 * (0.5 / 0.32917), abs=0.05)
-    assert 125 + steeper >= CALIBRATION_TEMP_F - APPROACH_MARGIN_F
+    assert 130 + steeper >= CALIBRATION_TEMP_F
 
     session = CalibrationSession()
     session.phase = "approach"
     session.model = model
     session.sheath_slope = 0.32917
-    session.samples = [(float(t), 125.0 - 0.5 * (15 - t)) for t in range(16)]
-    session._set_heat(15.0, 125.0, 40.0, 1.0)
+    session.samples = [(float(t), 130.0 - 0.5 * (15 - t)) for t in range(16)]
+    session._set_heat(15.0, 130.0, 40.0, 1.0)
     assert session.heat is False
     assert session.approach_coasting is True
+    assert session.trace["goal_f"] == CALIBRATION_TEMP_F
+
+
+def test_sheath_slope_is_spent_when_the_measured_crest_arrives():
+    # Run 5: linear 0.346°F/s, coast 14.31°F over 198.77s. Decaying on the
+    # coast parabola's shallower starting slope still left 0.20°F/s at the crest.
+    model = ThermalModel(
+        linear_rate_f_per_sec=0.346,
+        coast_rise_f=14.31,
+        coast_seconds=198.77,
+    )
+    assert step_sheath_slope(model, 0.346, heating=False, dt=198.77) == pytest.approx(0.0, abs=1e-6)
+    assert step_sheath_slope(model, 0.346, heating=False, dt=198.77 / 2) == pytest.approx(0.173, abs=0.001)
+
+
+def test_a_short_stage_two_coast_heats_again_toward_the_calibration_temperature():
+    # Run 5 landed the Stage II coast at 137.3°F and then turned the heaters
+    # off, because the step was 140°F and a leftover slope already covered it.
+    model = ThermalModel(
+        cold_start_seconds=62.7,
+        cold_start_quad=0.002,
+        linear_rate_f_per_sec=0.346,
+        coast_rise_f=14.31,
+        coast_seconds=198.77,
+    )
+    session = CalibrationSession()
+    session.model = model
+    session.phase = "coast"
+    session.sheath_slope = 0.346
+    session.open_temp = 107.4
+    session.open_elapsed = 81.7
+    session.peak_average = 121.7
+    session.peak_elapsed = 280.0
+    session._lock_coast(324.0, 121.7)
+    assert session.sheath_slope == 0.0
+
+    session.phase = "approach"
+    session.approach_coasting = False
+    session.samples = [(444.0, 121.3)]
+    session._set_heat(444.6, 121.3, 0.0, 1.0)
+    assert session.heat is True
+    assert session.trace["goal_f"] == CALIBRATION_TEMP_F
+    assert session.predicted_crest < CALIBRATION_TEMP_F
+
+    session.approach_coasting = True
+    session.open_elapsed = 489.0
+    session.open_temp = 125.9
+    session.peak_average = 137.3
+    session.peak_elapsed = 700.0
+    session.below_since = 770.0
+    session.phase_started = 444.6
+    session.sheath_slope = 0.132
+    session._advance(784.5, 137.3)
+    assert session.phase == "pulses"
+    assert session.sheath_slope == 0.0
+    session._set_heat(784.5, 137.3, 0.0, 1.0)
+    assert session.heat is True
+    assert session.predicted_crest < CALIBRATION_TEMP_F
+    assert session.trace["goal_f"] == CALIBRATION_TEMP_F

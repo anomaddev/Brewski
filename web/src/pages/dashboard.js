@@ -49,8 +49,8 @@ function coastText(status) {
       linear: 'Heating in a straight line.',
       coast: 'Elements are off. The climb is coasting on a downward curve.',
       momentum: 'Peak saved. Measuring how fast the pot cools.',
-      approach: 'Heading for about 140°F so the crest can land under 150°F.',
-      pulses: 'Short pulses, each one predicted to crest at or under 150°F.',
+      approach: 'Heating until the stored coast will reach 150°F.',
+      pulses: 'Pulsing until the stored coast will reach 150°F.',
       hold: 'Holding 150°F.',
     }
     const line = steps[status.calibration_step] || 'Calibrating toward 150°F.'

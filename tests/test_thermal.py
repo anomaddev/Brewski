@@ -16,6 +16,7 @@ from brewski.thermal import (
     TUNE_TAU_CAP_SECONDS,
     ThermalModel,
     blend_model,
+    coast_entry_slope,
     coast_rise_for,
     fit_coast_exponential,
     fit_heating_lag,
@@ -24,6 +25,8 @@ from brewski.thermal import (
     coast_sized_should_heat,
     hold_should_heat,
     predicted_crest,
+    pulse_plan,
+    rate_while_heating,
     project_temperature,
     remaining_coast_f,
     seconds_to_landing,
@@ -140,8 +143,9 @@ def test_stage_three_holds_the_pulse_until_the_stored_coast_reaches_the_target()
     assert coast_sized_should_heat(146, 150, 12.0, model, 1.0, slope_f_per_sec=0.2) is False
     # Slope 0.3 stores 6°F, so opening now coasts past the target.
     assert coast_sized_should_heat(146, 150, 16.0, model, 1.0, slope_f_per_sec=0.3) is False
-    # A 1°F gap opens as soon as the slope stores that degree.
-    assert coast_sized_should_heat(149, 150, 4.0, model, 1.0, slope_f_per_sec=0.04) is True
+    # Four seconds on this parabola is already 0.08°F/s, which stores 1.6°F.
+    # The probe slope of 0.04°F/s is below that, so it does not shrink the coast.
+    assert coast_sized_should_heat(149, 150, 4.0, model, 1.0, slope_f_per_sec=0.04) is False
     assert coast_sized_should_heat(149, 150, 6.0, model, 1.0, slope_f_per_sec=0.05) is False
     # Straight heat far below the target stays on until temp plus the full crest.
     assert coast_sized_should_heat(141, 150, 40.0, model, 1.0, slope_f_per_sec=0.4) is True
@@ -305,9 +309,9 @@ def test_tune_model_ignores_a_miss_inside_the_deadband_and_caps_one_step():
     tune_model(hot, heat_delta_f=5, slope_delta=0.05)
     assert hot.linear_rate_f_per_sec - SEED_LINEAR_RATE_F_PER_SEC <= TUNE_RATE_CAP_F_PER_SEC + 1e-9
     assert hot.linear_rate_f_per_sec <= SEED_LINEAR_RATE_F_PER_SEC * (1 + TUNE_FRACTION) + 1e-9
-    assert hot.soak_tau_seconds - SEED_SOAK_TAU_SECONDS <= TUNE_TAU_CAP_SECONDS + 1e-9
+    assert SEED_SOAK_TAU_SECONDS - hot.soak_tau_seconds <= TUNE_TAU_CAP_SECONDS + 1e-9
     assert hot.linear_rate_f_per_sec > SEED_LINEAR_RATE_F_PER_SEC
-    assert hot.soak_tau_seconds > SEED_SOAK_TAU_SECONDS
+    assert hot.soak_tau_seconds < SEED_SOAK_TAU_SECONDS
 
     ahead = seed_model()
     tune_model(ahead, coast_delta_f=4)
@@ -361,6 +365,25 @@ def test_a_coast_short_of_140_lowers_the_rise_and_a_high_coast_raises_it():
     tune_model(high, crest_delta_f=148 - LEARN_TEMP_F)
     assert high.coast_rise_f > SEED_COAST_RISE_F
     assert high.coast_rise_f - SEED_COAST_RISE_F <= TUNE_RISE_CAP_F + 1e-9
+
+
+def test_the_coast_enters_at_the_heating_slope_for_this_on_time():
+    model = seed_model()
+    # The probe has not moved, but the elements have. Five seconds and thirty
+    # seconds are different places on the coast.
+    short = pulse_plan(100.0, 160.0, 5.0, model, 1.0, slope_f_per_sec=0.0, budgeted=False)
+    longer = pulse_plan(100.0, 160.0, 30.0, model, 1.0, slope_f_per_sec=0.0, budgeted=False)
+    assert short["slope_f_per_sec"] == pytest.approx(rate_while_heating(model, 5.0), abs=1e-4)
+    assert longer["slope_f_per_sec"] == pytest.approx(rate_while_heating(model, 30.0), abs=1e-4)
+    assert longer["remaining_coast_f"] > short["remaining_coast_f"]
+    assert short["remaining_coast_f"] == pytest.approx(
+        remaining_coast_f(model, coast_entry_slope(model, 5.0, 0.0)),
+        abs=0.01,
+    )
+    # A probe steeper than the soak raises the entry. A lower probe does not.
+    steep = pulse_plan(100.0, 160.0, 30.0, model, 1.0, slope_f_per_sec=0.5, budgeted=False)
+    assert steep["slope_f_per_sec"] == pytest.approx(0.5)
+    assert steep["remaining_coast_f"] > longer["remaining_coast_f"]
 
 
 def test_the_climb_pulse_stays_on_until_the_projection_crests_at_160():

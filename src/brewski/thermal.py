@@ -611,11 +611,12 @@ def tune_model(
 ) -> bool:
     """Move the guess toward the probe. One call stays inside the delta caps.
 
-    A hotter pot raises the rate or the rise. A slope that is still
-    steepening lengthens the soak time. A coast that is ahead of the formula
-    shortens the coast time and raises the rise. ``crest_delta_f`` is the
-    equilibrium minus the check temperature: short lowers the rise, high
-    raises it.
+    A hotter pot raises the rate or the rise. A slope steeper than the soak
+    formula shortens the soak time, because the sheath reached that slope
+    sooner. A shallower slope lengthens it. A coast that is ahead of the
+    formula shortens the coast time and raises the rise. ``crest_delta_f``
+    is the equilibrium minus the check temperature: short lowers the rise,
+    high raises it.
     """
 
     changed = False
@@ -631,8 +632,10 @@ def tune_model(
             model.linear_rate_f_per_sec = round(max(0.0, model.linear_rate_f_per_sec + step), 5)
             changed = True
     if slope_delta is not None and model.soak_tau_seconds is not None:
+        # Positive ``slope_delta`` means the probe is already steeper than
+        # ``R (1 - e^{-t/τ})``. The soak is shorter than the guess.
         step = _tune_step(
-            slope_delta,
+            -slope_delta,
             TUNE_SLOPE_DEADBAND,
             model.soak_tau_seconds,
             TUNE_TAU_CAP_SECONDS,
@@ -900,6 +903,25 @@ def _coast_fraction(model: ThermalModel, on_seconds: float) -> float:
 COAST_SLOPE_SCALE_MAX = 3.0
 
 
+def coast_entry_slope(
+    model: ThermalModel,
+    on_seconds: float,
+    slope_f_per_sec: float,
+) -> float:
+    """Slope a shutoff now carries onto the coast exponential.
+
+    The soak curve for this on-time is the heating slope. A few seconds on
+    sits low on that curve, and thirty seconds on sits higher, so the coast
+    levels at a different ``S0 · τ_c``. A steeper probe can raise the entry.
+    A probe or a sheath reading below the soak curve cannot lower it.
+    """
+
+    observed = max(0.0, float(slope_f_per_sec))
+    if on_seconds <= 0:
+        return observed
+    return max(observed, rate_while_heating(model, on_seconds))
+
+
 def remaining_coast_f(model: ThermalModel, slope_f_per_sec: float) -> float:
     """Degrees the pot still climbs if the heaters open at this slope.
 
@@ -1107,11 +1129,12 @@ def pulse_plan(
 ) -> dict:
     """Crest comparison for one pulse decision, and the numbers behind it.
 
-    While the element is already on, ``budgeted`` plans the crest it would
-    store if the sheath reached linear heat before the aim. Stage III uses
-    the coast already stored at the current slope instead. A new pulse, with
-    the element off, is the climb during the minimum on time plus the coast
-    that on time would store.
+    While the element is already on, the coast is entered at the heating
+    slope for this on-time, raised when the probe is steeper. ``budgeted``
+    plans the crest that slope would store if the sheath reached linear heat
+    before the aim. The calibration pulse uses the coast already stored at
+    that same entry. A new pulse, with the element off, is the climb during
+    the minimum on time plus the coast that on time would store.
     """
 
     if slope_f_per_sec is None:
@@ -1119,6 +1142,8 @@ def pulse_plan(
     slope = max(0.0, float(slope_f_per_sec))
     on = max(0.0, float(on_seconds))
     if on > 0:
+        # Enter the coast where this on-time sits on the heating curve.
+        slope = coast_entry_slope(model, on, slope)
         rise = (
             budgeted_coast_f(model, slope, temp_f, target_f)
             if budgeted

@@ -95,6 +95,7 @@ from brewski.thermal import (
     apply_grok_value,
     blend_model,
     model_from_dict,
+    coast_entry_slope,
     pulse_plan,
     scale_model,
     project_temperature,
@@ -2349,14 +2350,18 @@ class Controller:
         rising = rate is not None and rate >= PREDICT_MIN_RATE_F_PER_SEC and temp < aim
         lookahead = self._lookahead_model()
         if lookahead is not None and (heating or rising):
-            # The crest is fixed. The sheath slope only picks where on it the
-            # shutoff starts, and the forecast climbs from there to the aim.
+            # The heating slope picks where on the coast the shutoff starts.
+            # A sheath or probe reading below that curve does not lower it.
             on_seconds = (
                 self._pulse_on_seconds(settings)
                 if heating
                 else self._opened_on_seconds(settings)
             )
             slope = self._session.sheath_slope if self._session is not None else self._sheath_slope
+            if heating:
+                if rate is not None and rate > slope:
+                    slope = rate
+                slope = coast_entry_slope(lookahead, on_seconds, slope)
             seconds = seconds_to_landing(
                 temp,
                 aim,
@@ -2915,7 +2920,10 @@ class Controller:
         else:
             modeled = 0.0 if live is None else live
         if self._elements_on(settings):
-            return modeled
+            model = self._projection_model(settings)
+            if model is None:
+                return modeled
+            return coast_entry_slope(model, self._pulse_on_seconds(settings), modeled)
         if live is not None:
             return live
         return modeled

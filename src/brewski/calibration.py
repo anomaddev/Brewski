@@ -21,6 +21,7 @@ from brewski.thermal import (
     COAST_PLATEAU_RISE_F,
     COAST_PLATEAU_SECONDS,
     COAST_WATCH_MAX_SECONDS,
+    HOLD_BAND_F,
     HOLD_RISE_F_PER_SEC,
     HOLD_SECONDS,
     HOLD_SLOPE_MIN_SPAN_SECONDS,
@@ -29,10 +30,12 @@ from brewski.thermal import (
     LEARN_TEMP_F,
     SETTLE_SECONDS,
     TUNE_DEADBAND_F,
+    TUNE_SLOPE_DEADBAND,
     ThermalModel,
     coast_tau_of,
     endpoint_rate,
     fit_coast_exponential,
+    fit_soak_tau,
     formula_slope,
     heating_formula_temp,
     hold_maintenance_plan,
@@ -155,11 +158,18 @@ class CalibrationSession:
         self.guess.linear_rate_f_per_sec = measured
         self._locked_rate = measured
 
+    def _probe_rate(self, elapsed: float) -> float | None:
+        """°F/s of the probe over the last 12 seconds, once that window exists."""
+
+        recent = [(stamp, reading) for stamp, reading in self.samples if stamp >= elapsed - 12.0]
+        if len(recent) < 2 or recent[-1][0] - recent[0][0] < 8.0:
+            return None
+        return endpoint_rate(recent)
+
     def _control_slope(self, elapsed: float) -> float:
         """Sheath slope, raised when the probe is rising faster than that."""
 
-        recent = [(stamp, reading) for stamp, reading in self.samples if stamp >= elapsed - 12.0]
-        rate = endpoint_rate(recent)
+        rate = self._probe_rate(elapsed)
         live = rate if rate is not None and rate > 0 else 0.0
         return max(self.sheath_slope, live)
 
@@ -245,15 +255,37 @@ class CalibrationSession:
         return False
 
     def _tune_heat(self, elapsed: float, temp: float) -> None:
-        if self.heat_started is None or self.heat_origin is None:
+        if self.rate_locked or self.heat_started is None or self.heat_origin is None:
             return
         on_seconds = max(0.0, elapsed - self.heat_started)
         formula = heating_formula_temp(self.heat_origin, on_seconds, self.guess)
         expected = formula_slope(on_seconds, self.guess)
+        slope = self._control_slope(elapsed)
+        probe = self._probe_rate(elapsed)
+        heat_delta = temp - formula
+        slope_delta = slope - expected
+        rate = self.guess.linear_rate_f_per_sec or 0.0
+        rate_delta = None
+        # Still sitting on the heat origin. That miss is probe lag, not a slow element.
+        if heat_delta < 0 and temp - self.heat_origin <= TUNE_DEADBAND_F:
+            heat_delta = 0.0
+        # At or above the straight rate, a steeper formula error is not a long soak.
+        # The formula slope cannot exceed the rate, so the rate is what moves.
+        if (
+            probe is not None
+            and rate > 0
+            and probe > rate + TUNE_SLOPE_DEADBAND
+            and slope_delta > 0
+        ):
+            slope_delta = 0.0
+            rate_delta = probe - rate
+            if heat_delta < 0:
+                heat_delta = 0.0
         tune_model(
             self.guess,
-            heat_delta_f=temp - formula,
-            slope_delta=self._control_slope(elapsed) - expected,
+            heat_delta_f=heat_delta,
+            slope_delta=slope_delta,
+            rate_delta_f_per_sec=rate_delta,
         )
 
     def _tune_coast(self, elapsed: float, temp: float) -> None:
@@ -278,6 +310,9 @@ class CalibrationSession:
         if rate is None or rate <= 0:
             return
         locked = round(max(0.0, float(rate)), 5)
+        fitted = fit_soak_tau(window, locked)
+        if fitted is not None:
+            self.guess.soak_tau_seconds = round(max(1.0, fitted), 2)
         self.model.linear_rate_f_per_sec = locked
         self.model.soak_tau_seconds = self.guess.soak_tau_seconds
         self.guess.linear_rate_f_per_sec = locked
@@ -475,6 +510,18 @@ class CalibrationSession:
                 slope_f_per_sec=slope,
                 budgeted=False,
             )
+            # A minimum pulse whose crest is only barely past the aim is the
+            # hold's job to trim. Leaving the heaters off there parks the pot
+            # short of 160°F.
+            crest = plan["predicted_crest_f"]
+            if (
+                not plan["heat"]
+                and on_seconds <= 0
+                and temp < goal - TUNE_DEADBAND_F
+                and crest <= goal + HOLD_BAND_F
+            ):
+                plan = dict(plan)
+                plan["heat"] = True
             self.predicted_crest = plan["predicted_crest_f"]
             self.heat = bool(plan["heat"]) and temp < goal
             self.trace = {"path": self.phase, "goal_f": goal, **plan}

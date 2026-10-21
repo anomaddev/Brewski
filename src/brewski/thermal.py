@@ -478,6 +478,50 @@ def fit_heating_lag(samples: list[tuple[float, float]]) -> tuple[float, float] |
     return rate, tau
 
 
+def fit_soak_tau(
+    samples: list[tuple[float, float]],
+    rate_f_per_sec: float,
+) -> float | None:
+    """Soak time constant (s) for a known straight rate.
+
+    The rate is the settled slope. This searches ``τ`` in
+    ``ΔT = R (t − τ (1 − e^{−t/τ}))`` and keeps the one that tracks the
+    probe. Returns None until the window is long enough to tell a soak from
+    a straight line, or when every ``τ`` misses the probe by more than a few
+    degrees. A collapsed live walk is not a substitute for this fit.
+    """
+
+    if rate_f_per_sec <= 0 or len(samples) < 8:
+        return None
+    origin_t, origin_v = samples[0]
+    points: list[tuple[float, float]] = []
+    for stamp, reading in samples:
+        elapsed = stamp - origin_t
+        if elapsed < 0:
+            continue
+        points.append((elapsed, reading - origin_v))
+    if len(points) < 8 or points[-1][0] < 20.0:
+        return None
+    best_error: float | None = None
+    best_tau: float | None = None
+    tau = 4.0
+    limit = min(180.0, points[-1][0])
+    while tau <= limit:
+        error = 0.0
+        for elapsed, rise in points:
+            miss = rise - rate_f_per_sec * _lag_rise(elapsed, tau)
+            error += miss * miss
+        if best_error is None or error < best_error:
+            best_error = error
+            best_tau = tau
+        tau *= 1.08
+    if best_error is None or best_tau is None:
+        return None
+    if math.sqrt(best_error / len(points)) > 3.0:
+        return None
+    return best_tau
+
+
 def heating_lag_coast(rate_f_per_sec: float, tau_seconds: float, heated_seconds: float) -> float:
     """Degrees still to come if the heaters open after ``heated_seconds``.
 
@@ -621,6 +665,7 @@ def tune_model(
     *,
     heat_delta_f: float | None = None,
     slope_delta: float | None = None,
+    rate_delta_f_per_sec: float | None = None,
     coast_delta_f: float | None = None,
     crest_delta_f: float | None = None,
 ) -> bool:
@@ -628,24 +673,36 @@ def tune_model(
 
     A hotter pot raises the rate or the rise. A slope steeper than the soak
     formula shortens the soak time, because the sheath reached that slope
-    sooner. A shallower slope lengthens it. A coast that is ahead of the
-    formula shortens the coast time and raises the rise. ``crest_delta_f``
-    is the equilibrium minus the check temperature: short lowers the rise,
-    high raises it.
+    sooner. A shallower slope lengthens it. ``rate_delta_f_per_sec`` is a
+    slope that is already past the straight rate: the formula cannot exceed
+    that rate, so the rate moves and the soak time does not. A coast that is
+    ahead of the formula shortens the coast time and raises the rise.
+    ``crest_delta_f`` is the equilibrium minus the check temperature: short
+    lowers the rise, high raises it.
     """
 
     changed = False
-    if heat_delta_f is not None and model.linear_rate_f_per_sec is not None:
-        step = _tune_step(
-            heat_delta_f,
-            TUNE_DEADBAND_F,
-            model.linear_rate_f_per_sec,
-            TUNE_RATE_CAP_F_PER_SEC,
-            same_units=False,
-        )
-        if step:
-            model.linear_rate_f_per_sec = round(max(0.0, model.linear_rate_f_per_sec + step), 5)
-            changed = True
+    if model.linear_rate_f_per_sec is not None:
+        # One rate step per reading. A slope already above the straight rate
+        # owns it; the temperature miss is the other way in.
+        rate_error = None
+        rate_deadband = TUNE_DEADBAND_F
+        if rate_delta_f_per_sec is not None and abs(rate_delta_f_per_sec) > TUNE_SLOPE_DEADBAND:
+            rate_error = rate_delta_f_per_sec
+            rate_deadband = TUNE_SLOPE_DEADBAND
+        elif heat_delta_f is not None:
+            rate_error = heat_delta_f
+        if rate_error is not None:
+            step = _tune_step(
+                rate_error,
+                rate_deadband,
+                model.linear_rate_f_per_sec,
+                TUNE_RATE_CAP_F_PER_SEC,
+                same_units=False,
+            )
+            if step:
+                model.linear_rate_f_per_sec = round(max(0.0, model.linear_rate_f_per_sec + step), 5)
+                changed = True
     if slope_delta is not None and model.soak_tau_seconds is not None:
         # Positive ``slope_delta`` means the probe is already steeper than
         # ``R (1 - e^{-t/τ})``. The soak is shorter than the guess.

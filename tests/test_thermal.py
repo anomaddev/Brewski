@@ -21,6 +21,7 @@ from brewski.thermal import (
     coast_rise_for,
     fit_coast_exponential,
     fit_heating_lag,
+    fit_soak_tau,
     fit_startup_quad,
     heating_lag_coast,
     coast_sized_should_heat,
@@ -505,6 +506,79 @@ def test_a_short_pulse_is_followed_by_a_shorter_one_and_hold_opens_before_160():
     session._set_heat(302.0, 159.6, 0.0, 1.0)
     assert session.heat is False
     assert session.trace.get("hold_wait") == "coast"
+
+
+def test_fit_soak_tau_recovers_a_clean_curve_and_rejects_a_short_window():
+    rate = 0.40
+    tau = 37.0
+    samples = [
+        (float(t), 70.0 + rate * (t - tau * (1.0 - math.exp(-t / tau))))
+        for t in range(0, 90)
+    ]
+    assert fit_soak_tau(samples, rate) == pytest.approx(tau, rel=0.08)
+    assert fit_soak_tau(samples[:6], rate) is None
+
+
+def test_a_lagging_probe_does_not_collapse_the_soak():
+    """Run 18 sat at one reading, then climbed. The walk cut the soak to 1s.
+
+    A 1s soak makes a minimum pulse look like a full coast, so the proving
+    pulse opened early and then refused to fire again while the pot sat short
+    of 160°F. The lag must leave a soak the next pulse can still use.
+    """
+
+    session = CalibrationSession()
+    elapsed = 0.0
+    temp = 86.9
+    on = 0.0
+    for _ in range(180):
+        session.observe(elapsed, temp, on, 1.0)
+        if session.phase in {"initial", "linear"}:
+            on += 1.0
+        else:
+            on = 0.0
+        elapsed += 1.0
+        if elapsed <= 30:
+            temp = 86.9
+        else:
+            temp += 0.42
+        if session.phase == "coast":
+            break
+    assert session.phase == "coast"
+    assert session.guess.soak_tau_seconds >= 15
+    assert session.model.soak_tau_seconds >= 15
+    assert session.guess.linear_rate_f_per_sec >= 0.3
+    session.phase = "pulse"
+    session.pulse_coasting = False
+    session.sheath_slope = 0.0
+    # The pot has crested and is sitting short of 160°F, the way run 18 did.
+    session.samples = [(elapsed - 12.0 + i, 149.4) for i in range(13)]
+    session._set_heat(elapsed, 149.4, 0.0, 1.0)
+    assert session.heat is True
+    assert session.predicted_crest <= CALIBRATION_TEMP_F + 1.0
+
+
+def test_a_minimum_pulse_within_a_degree_of_160_still_starts():
+    session = CalibrationSession()
+    session.phase = "pulse"
+    session.guess = ThermalModel(
+        linear_rate_f_per_sec=0.40,
+        soak_tau_seconds=8.0,
+        coast_tau_seconds=20.0,
+        coast_rise_f=8.0,
+    )
+    session.sheath_slope = 0.0
+    # One second stores about a degree. 159.2°F plus that coast is just over
+    # 160°F. Refusing it leaves the pot short of the aim.
+    session._set_heat(10.0, 159.2, 0.0, 1.0)
+    assert session.heat is True
+    assert session.predicted_crest <= CALIBRATION_TEMP_F + 1.0
+
+    # A coast the model says is many degrees past the aim stays off.
+    session.guess.soak_tau_seconds = 1.0
+    session.guess.coast_tau_seconds = 37.0
+    session._set_heat(11.0, 155.0, 0.0, 1.0)
+    assert session.heat is False
 
 
 def test_a_hold_open_does_not_refit_the_coast():

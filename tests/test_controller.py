@@ -23,6 +23,29 @@ from brewski.controller import (
 )
 from brewski.sources.dummy import DummySource
 from brewski.store import merge_settings
+from brewski.thermal import ThermalModel
+
+
+def test_the_live_chart_projects_one_minute_of_cutoff_coast(controller):
+    controller._mode = "running"
+    controller._run_model = ThermalModel(
+        linear_rate_f_per_sec=0.4,
+        coast_rise_f=8,
+        coast_seconds=40,
+    )
+    controller._heaters = [True, False]
+    controller._sheath_slope = 0.4
+    controller._live_temps = [100.0, 90.0]
+    points = {item["offset_s"]: item["temp_f"] for item in controller.status()["projection"]}
+    assert points[0] == pytest.approx(100, abs=0.05)
+    assert points[60] == pytest.approx(108, abs=0.1)
+    assert 60 in points
+
+    controller._heaters = [False, False]
+    controller._predict_clock = 12
+    controller._predict_samples = [(0, 110), (4, 109.6), (8, 109.2), (12, 108.8)]
+    cooling = {item["offset_s"]: item["temp_f"] for item in controller.status()["projection"]}
+    assert cooling[60] < 100
 
 
 def _soak_sheath(controller):
@@ -937,3 +960,122 @@ def test_clean_calibration_forgets_the_model_and_locks_runs(store):
         controller.start()
     started = controller.start({"kind": "calibration"})
     assert started["run_kind"] == "calibration"
+
+
+def test_a_run_log_records_the_shutoff_calculation(store):
+    source = StaticSource([100.0, 90.0])
+    controller = Controller(store, source)
+    started = controller.start()
+    run_id = started["run_id"]
+    opened = store.get_run(run_id)["logs"]
+    assert opened[0]["event"] == "start"
+    assert "Learned coast" in opened[0]["message"]
+    assert any(item["event"] == "sample" and item["detail"]["heaters_on"] == [True, True] for item in opened)
+
+    _soak_sheath(controller)
+    source.temps = [162.0, 150.0]
+    controller.tick(1)
+    heat = [item for item in store.get_run(run_id)["logs"] if item["event"] == "heat"]
+    assert heat
+    assert heat[-1]["detail"]["temp_f"] == pytest.approx(162)
+    assert heat[-1]["detail"]["heaters_on"] == [False, False]
+    assert heat[-1]["detail"]["shutoff_coast_f"] == pytest.approx(3)
+    assert "coast" in heat[-1]["message"].lower()
+
+
+def test_a_ready_model_logs_the_crest_it_shut_off_on(store):
+    current = store.get_settings()
+    store.save_settings(
+        replace(
+            current,
+            thermal_model={
+                "cold_start_seconds": 20,
+                "cold_start_quad": 0.01,
+                "linear_rate_f_per_sec": 0.4,
+                "coast_rise_f": 4,
+                "coast_seconds": 20,
+                "coast_quad": -4 / 400,
+                "cooldown_f_per_min": 1,
+            },
+        )
+    )
+    source = StaticSource([100.0, 90.0])
+    controller = Controller(store, source)
+    started = controller.start()
+    assert "linear" in store.get_run(started["run_id"])["logs"][0]["message"]
+    _soak_sheath(controller)
+    source.temps = [161.0, 90.0]
+    controller.tick(1)
+    heat = [item for item in store.get_run(started["run_id"])["logs"] if item["event"] == "heat"]
+    assert heat[-1]["detail"]["heaters_on"] == [False, False]
+    assert heat[-1]["detail"]["predicted_crest_f"] == pytest.approx(165)
+    assert "crest" in heat[-1]["message"].lower()
+
+
+def test_calibration_log_follows_the_stage_and_the_heaters(store):
+    source = StaticSource([70.0, 70.0])
+    controller = Controller(store, source)
+    started = controller.start({"kind": "calibration"})
+    run_id = started["run_id"]
+    opened = store.get_run(run_id)["logs"]
+    assert opened[0]["event"] == "start"
+    assert "Calibration started" in opened[0]["message"]
+    assert any(
+        item["event"] == "sample" and item["detail"]["phase"] == "settle" and item["detail"]["heaters_on"] == [False, False]
+        for item in opened
+    )
+
+    _drive(controller, source, _heating_temp, 10, "cold_start")
+    logs = store.get_run(run_id)["logs"]
+    phases = [item for item in logs if item["event"] == "phase"]
+    assert phases[-1]["detail"]["phase"] == "cold_start"
+    assert "Cold Start" in phases[-1]["message"]
+    heats = [item for item in logs if item["event"] == "heat"]
+    assert heats[-1]["detail"]["heaters_on"] == [True, True]
+    assert heats[-1]["detail"]["temp_f"] == pytest.approx(70)
+
+
+def test_cooldown_log_stays_on_the_run(store):
+    source = StaticSource([165.0, 150.0])
+    controller = Controller(store, source)
+    controller.start()
+    controller.tick(1)
+    run_id = controller.stop()["cooldown_run_id"]
+    logs = store.get_run(run_id)["logs"]
+    assert any(item["detail"].get("path") == "stop" for item in logs)
+    cooling = [item for item in logs if item["detail"].get("path") == "cooldown"]
+    assert cooling
+    assert cooling[-1]["detail"]["heaters_on"] == [False, False]
+    assert "Cooldown" in cooling[-1]["message"]
+
+
+def test_the_control_log_keeps_each_second_while_chart_samples_stay_at_five(store):
+    source = StaticSource([100.0, 90.0])
+    controller = Controller(store, source)
+    run_id = controller.start()["run_id"]
+    controller.tick(1)
+    controller.tick(1)
+    controller.tick(1)
+    samples = [item for item in store.get_run(run_id)["logs"] if item["event"] == "sample"]
+    assert [item["elapsed_seconds"] for item in samples] == pytest.approx([0, 1, 2, 3])
+    assert len(store.get_run(run_id)["samples"]) == 1
+
+    controller.tick(5)
+    saved = store.get_run(run_id)
+    samples = [item for item in saved["logs"] if item["event"] == "sample"]
+    assert [item["elapsed_seconds"] for item in samples] == pytest.approx([0, 1, 2, 3, 4, 5, 6, 7, 8])
+    assert [item["elapsed_seconds"] for item in saved["samples"]] == pytest.approx([0, 5])
+
+
+def test_a_paused_run_keeps_logging_temperature_without_extra_samples(store):
+    source = StaticSource([100.0, 90.0])
+    controller = Controller(store, source)
+    run_id = controller.start()["run_id"]
+    controller.pause()
+    before = len(store.get_run(run_id)["samples"])
+    source.temps = [110.0, 90.0]
+    controller.tick(1)
+    saved = store.get_run(run_id)
+    assert len(saved["samples"]) == before
+    paused = [item for item in saved["logs"] if item["detail"].get("path") == "pause"]
+    assert paused[-1]["detail"]["temp_f"] == pytest.approx(110)

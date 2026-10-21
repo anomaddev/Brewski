@@ -565,6 +565,53 @@ def predicted_crest(
     return crest
 
 
+# The live chart draws this much of the shutoff guess past the current time.
+PROJECTION_SECONDS = 60.0
+PROJECTION_STEP_SECONDS = 5.0
+
+
+def project_temperature(
+    temp_f: float,
+    slope_f_per_sec: float,
+    model: ThermalModel | None,
+    cooldown_f_per_min: float | None = None,
+    *,
+    seconds: float = PROJECTION_SECONDS,
+    step: float = PROJECTION_STEP_SECONDS,
+) -> list[tuple[float, float]]:
+    """Temperature for the next ``seconds`` if the heaters are open from now.
+
+    A rising slope is the entry onto the coast parabola: the line climbs
+    ``remaining_coast_f`` and then follows the cooling rate. A falling slope
+    keeps falling. This is the shutoff the control loop is weighing, not a
+    projection that keeps the elements on.
+    """
+
+    horizon = max(0.0, seconds)
+    pace = step if step > 0 else horizon or 1.0
+    slope = slope_f_per_sec
+    rise = remaining_coast_f(model, slope) if model is not None and slope > 0 else 0.0
+    cool = max(0.0, cooldown_f_per_min or 0.0) / 60.0
+    duration = (2.0 * rise / slope) if slope > 0 and rise > 0 else 0.0
+    quad = (-rise / (duration * duration)) if duration > 0 else 0.0
+    points: list[tuple[float, float]] = []
+    stamp = 0.0
+    while True:
+        if slope > 0 and duration > 0:
+            if stamp <= duration:
+                reading = temp_f + slope * stamp + quad * stamp * stamp
+            else:
+                reading = temp_f + rise - cool * (stamp - duration)
+        else:
+            rate = slope if slope < 0 else -cool
+            reading = temp_f + rate * stamp
+        points.append((round(stamp, 1), reading))
+        if stamp >= horizon:
+            break
+        stamp = min(horizon, stamp + pace)
+    return points
+
+
 def _pulse_temperature_gain(model: ThermalModel, slope_f_per_sec: float, seconds: float) -> float:
     """Degrees the probe climbs while a pulse accelerates the sheath slope."""
 
@@ -572,6 +619,83 @@ def _pulse_temperature_gain(model: ThermalModel, slope_f_per_sec: float, seconds
         return 0.0
     end = step_sheath_slope(model, slope_f_per_sec, heating=True, dt=seconds)
     return max(0.0, (max(0.0, slope_f_per_sec) + end) * 0.5 * seconds)
+
+
+def pulse_plan(
+    temp_f: float,
+    target_f: float,
+    on_seconds: float,
+    model: ThermalModel,
+    min_on_seconds: float,
+    slope_f_per_sec: float | None = None,
+    *,
+    budgeted: bool,
+) -> dict:
+    """Crest comparison for one pulse decision, and the numbers behind it.
+
+    While the element is already on, ``budgeted`` plans the crest it would
+    store if the sheath reached linear heat before the aim. Stage III uses
+    the coast already stored at the current slope instead. A new pulse, with
+    the element off, is the climb during the minimum on time plus the coast
+    that on time would store.
+    """
+
+    if slope_f_per_sec is None:
+        slope_f_per_sec = rate_while_heating(model, on_seconds) if on_seconds > 0 else 0.0
+    slope = max(0.0, float(slope_f_per_sec))
+    on = max(0.0, float(on_seconds))
+    if on > 0:
+        rise = (
+            budgeted_coast_f(model, slope, temp_f, target_f)
+            if budgeted
+            else remaining_coast_f(model, slope)
+        )
+        gain = 0.0
+        crest = temp_f + rise
+        heat = crest < target_f
+    else:
+        minimum = max(0.0, float(min_on_seconds))
+        slope_after = step_sheath_slope(model, slope, heating=True, dt=minimum)
+        gain = _pulse_temperature_gain(model, slope, minimum)
+        rise = remaining_coast_f(model, slope_after)
+        crest = temp_f + gain + rise
+        heat = temp_f < target_f and crest <= target_f
+    return {
+        "heat": heat,
+        "slope_f_per_sec": round(slope, 5),
+        "predicted_crest_f": round(crest, 2),
+        "remaining_coast_f": round(rise, 2),
+        "gain_f": round(gain, 2),
+        "on_seconds": round(on, 2),
+    }
+
+
+def coast_sized_should_heat(
+    temp_f: float,
+    target_f: float,
+    on_seconds: float,
+    model: ThermalModel,
+    min_on_seconds: float,
+    slope_f_per_sec: float | None = None,
+) -> bool:
+    """True while a hold pulse should keep storing heat.
+
+    The pulse stays on until the coast from the slope stored so far reaches
+    the target. The heaters then open and that coast plays out. A wider gap
+    needs a steeper slope, so the pulse runs longer. Closer to the target the
+    same test ends the pulse sooner. A new pulse is refused when the minimum
+    on time would already carry the crest past the target.
+    """
+
+    return pulse_plan(
+        temp_f,
+        target_f,
+        on_seconds,
+        model,
+        min_on_seconds,
+        slope_f_per_sec,
+        budgeted=False,
+    )["heat"]
 
 
 def hold_should_heat(
@@ -589,22 +713,15 @@ def hold_should_heat(
     probe itself reads the setpoint and then coasting past it.
     """
 
-    if slope_f_per_sec is None:
-        slope_f_per_sec = rate_while_heating(model, on_seconds) if on_seconds > 0 else 0.0
-    slope = max(0.0, slope_f_per_sec)
-    if temp_f >= target_f and on_seconds <= 0:
-        return False
-    if on_seconds > 0:
-        # Still on: stop when the crest being stored already covers the target.
-        # Close to the target that crest is the full one, so this is a pulse,
-        # not a run up to the reading.
-        rise = budgeted_coast_f(model, slope, temp_f, target_f)
-        return temp_f + rise < target_f
-    minimum = max(0.0, min_on_seconds)
-    slope_after = step_sheath_slope(model, slope, heating=True, dt=minimum)
-    gain = _pulse_temperature_gain(model, slope, minimum)
-    rise = remaining_coast_f(model, slope_after)
-    return temp_f + gain + rise <= target_f and temp_f < target_f
+    return pulse_plan(
+        temp_f,
+        target_f,
+        on_seconds,
+        model,
+        min_on_seconds,
+        slope_f_per_sec,
+        budgeted=True,
+    )["heat"]
 
 
 def _in_linear_heat(model: ThermalModel, on_seconds: float) -> bool:

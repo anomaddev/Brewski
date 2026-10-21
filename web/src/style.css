@@ -882,6 +882,22 @@ tr[data-href] { cursor: pointer; }
 .stat-value { font-size: 1.45rem; font-weight: 720; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
 .detail-item strong { font-size: 0.98rem; font-weight: 650; overflow-wrap: anywhere; }
 .sample-log { max-height: 480px; overflow: auto; }
+.log-note { color: var(--muted); margin: 0 0 12px; font-size: 0.92rem; }
+.export-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  padding: 6px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text);
+  text-decoration: none;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+.export-link:hover { background: rgba(255, 255, 255, 0.04); }
+.control-note { display: block; white-space: normal; line-height: 1.35; min-width: 16rem; }
 
 .reset-panel {
   margin-top: 28px;
@@ -1514,6 +1530,7 @@ tr[data-href] { cursor: pointer; }
   .console .status-actions,
   .console .action-btn { width: 100%; }
   .action-btn { min-height: 48px; }
+  .export-link { min-height: 44px; padding: 8px 16px; }
   .setup-card { padding: 22px 16px; }
   .setup-actions { flex-direction: column-reverse; }
   .setup-actions .action-btn,
@@ -1598,6 +1615,16 @@ tr[data-href] { cursor: pointer; }
   .history-table a { min-height: 44px; display: inline-flex; flex-direction: column; justify-content: center; }
   .sample-log tr { margin-bottom: 8px; }
   .sample-log td { padding: 5px 0; }
+  .history-table td:has(.control-note) {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+  .control-note {
+    min-width: 0;
+    flex: 1 1 100%;
+    text-align: left;
+    overflow-wrap: anywhere;
+  }
 }
 
 .stage {

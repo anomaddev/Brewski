@@ -25,8 +25,8 @@ from brewski.thermal import (
     endpoint_rate,
     budgeted_coast_f,
     fit_startup_quad,
-    hold_should_heat,
     linear_onset,
+    pulse_plan,
     nudge_model,
     remaining_coast_f,
     step_sheath_slope,
@@ -77,6 +77,8 @@ class CalibrationSession:
         # restart when the SSR cycles.
         self.sheath_slope = 0.0
         self._slope_elapsed = 0.0
+        # Numbers behind the heater choice on the latest reading.
+        self.trace: dict = {"path": "settle", "heat": False}
 
     def observe(self, elapsed: float, temp: float, on_seconds: float, min_on: float) -> None:
         """Advance one reading. Marks and analysis requests land on this object."""
@@ -235,6 +237,7 @@ class CalibrationSession:
         self.live_rise = None
         self.live_rate = None
         self.predicted_crest = None
+        self.trace = {"path": self.phase, "heat": False, "sheath_slope_f_per_sec": round(self.sheath_slope, 5)}
         if self.finished or self.phase in {"settle", "coast", "momentum"}:
             self.heat = False
             if self.phase == "coast" and self.open_temp is not None:
@@ -243,57 +246,52 @@ class CalibrationSession:
                 rate = endpoint_rate(self._since(self.phase_started))
                 if rate is not None:
                     self.live_rate = max(0.0, -rate * 60.0)
+            self.trace = {
+                "path": self.phase,
+                "heat": False,
+                "sheath_slope_f_per_sec": round(self.sheath_slope, 5),
+                "live_rise_f": None if self.live_rise is None else round(self.live_rise, 2),
+                "live_rate_f_per_min": None if self.live_rate is None else round(self.live_rate, 2),
+            }
             return
         if self.phase in {"cold_start", "linear"}:
             self.heat = True
+            self.trace = {
+                "path": self.phase,
+                "heat": True,
+                "sheath_slope_f_per_sec": round(self.sheath_slope, 5),
+            }
             return
         if self.phase == "approach":
+            goal = CALIBRATION_TEMP_F - APPROACH_MARGIN_F
             if self.approach_coasting:
                 self.heat = False
                 if self.open_temp is not None:
                     self.live_rise = temp - self.open_temp
+                self.trace = {
+                    "path": "approach_coast",
+                    "heat": False,
+                    "goal_f": goal,
+                    "live_rise_f": None if self.live_rise is None else round(self.live_rise, 2),
+                    "sheath_slope_f_per_sec": round(self.sheath_slope, 5),
+                }
                 return
-            goal = CALIBRATION_TEMP_F - APPROACH_MARGIN_F
             slope = self._control_slope(elapsed)
             rise = remaining_coast_f(self.model, slope)
-            # #region agent log
-            try:
-                import json
-                import time
-
-                _payload = {
-                    "sessionId": "dca23b",
-                    "hypothesisId": "B",
-                    "location": "calibration.py:_set_heat",
-                    "message": "approach shutoff",
-                    "data": {
-                        "temp": round(temp, 2),
-                        "goal": goal,
-                        "sheath_slope": round(self.sheath_slope, 4),
-                        "control_slope": round(slope, 4),
-                        "rise": round(rise, 2),
-                        "learned_rise": self.model.coast_rise_f,
-                        "learned_rate": self.model.linear_rate_f_per_sec,
-                        "heat": not (temp + rise >= goal or temp >= goal),
-                    },
-                    "timestamp": int(time.time() * 1000),
-                }
-                _line = json.dumps(_payload) + "\n"
-                for _path in (
-                    "/Volumes/VAB/Github/Brewski/.cursor/debug-dca23b.log",
-                    "/var/lib/brewski/debug-dca23b.log",
-                ):
-                    try:
-                        with open(_path, "a", encoding="utf-8") as _fh:
-                            _fh.write(_line)
-                        break
-                    except OSError:
-                        continue
-            except Exception:
-                pass
-            # #endregion
             self.predicted_crest = temp + rise
-            if temp + rise >= goal or temp >= goal:
+            shutoff = temp + rise >= goal or temp >= goal
+            self.trace = {
+                "path": "approach_coast" if shutoff else "approach",
+                "heat": not shutoff,
+                "slope_f_per_sec": round(slope, 5),
+                "sheath_slope_f_per_sec": round(self.sheath_slope, 5),
+                "remaining_coast_f": round(rise, 2),
+                "predicted_crest_f": round(self.predicted_crest, 2),
+                "goal_f": goal,
+                "learned_coast_f": self.model.coast_rise_f,
+                "linear_rate_f_per_sec": self.model.linear_rate_f_per_sec,
+            }
+            if shutoff:
                 self.approach_coasting = True
                 self.open_elapsed = elapsed
                 self.open_temp = temp
@@ -304,31 +302,35 @@ class CalibrationSession:
             return
         if self.phase == "pulses":
             slope = self._control_slope(elapsed)
-            self.predicted_crest = temp + budgeted_coast_f(
-                self.model, slope, temp, CALIBRATION_TEMP_F
-            )
-            self.heat = hold_should_heat(
+            plan = pulse_plan(
                 temp,
                 CALIBRATION_TEMP_F,
                 on_seconds,
                 self.model,
                 min_on,
                 slope_f_per_sec=slope,
+                budgeted=True,
             )
+            self.predicted_crest = temp + budgeted_coast_f(self.model, slope, temp, CALIBRATION_TEMP_F)
+            self.heat = bool(plan["heat"])
+            self.trace = {"path": "pulses", "goal_f": CALIBRATION_TEMP_F, **plan}
             return
         if self.phase == "hold":
+            # Stay on until the coast stored so far will reach the target,
+            # then open and let that coast play. A wider gap is a longer pulse.
             slope = self._control_slope(elapsed)
-            self.predicted_crest = temp + budgeted_coast_f(
-                self.model, slope, temp, CALIBRATION_TEMP_F
-            )
-            self.heat = hold_should_heat(
+            plan = pulse_plan(
                 temp,
                 CALIBRATION_TEMP_F,
                 on_seconds,
                 self.model,
                 min_on,
                 slope_f_per_sec=slope,
+                budgeted=False,
             )
+            self.predicted_crest = plan["predicted_crest_f"]
+            self.heat = bool(plan["heat"])
+            self.trace = {"path": "hold", "goal_f": CALIBRATION_TEMP_F, **plan}
 
     def _watch_hold_crest(self, elapsed: float, temp: float) -> None:
         """After a hold pulse ends, move the model toward the crest it made."""

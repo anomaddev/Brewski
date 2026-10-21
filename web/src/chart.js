@@ -12,6 +12,7 @@ const NARROW = '(max-width: 800px)'
 const START_LINE = '#34d399'
 const STOP_LINE = '#f87171'
 const MARK_LINE = '#c4b5fd'
+const PROJECTED_LINE = '#e879f9'
 const OFF_GAP_MS = 30000
 const OFF_LABEL = '#93a0b5'
 
@@ -329,6 +330,7 @@ export function setChartPoints(chart, points, sensorNames, markers = [], view = 
   chart.$toReal = view?.toReal || null
   chart.$spanMs = view?.spanMs || null
   chart.$hideTick = view?.hideTick || null
+  const projection = timed && view?.projection?.length ? view.projection : []
   const plotted = view?.connect ? breakAtSpans(points, spans) : points
   const gapSpan = view?.connect ? false : OFF_GAP_MS
   const datasets = sensorNames.map((name, index) => ({
@@ -358,6 +360,20 @@ export function setChartPoints(chart, points, sensorNames, markers = [], view = 
       fill: false,
       tension: 0,
       spanGaps: timed ? gapSpan : true,
+    })
+  }
+  if (projection.length) {
+    datasets.push({
+      label: 'Projected (°F)',
+      data: projection.map((point) => ({ x: point.at, y: point.temp })),
+      borderColor: PROJECTED_LINE,
+      borderDash: [5, 4],
+      borderWidth: 2,
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      fill: false,
+      tension: 0,
+      spanGaps: false,
     })
   }
   if (spans.length) {

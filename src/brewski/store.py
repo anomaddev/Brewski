@@ -119,6 +119,18 @@ CREATE TABLE IF NOT EXISTS run_marks (
 
 CREATE INDEX IF NOT EXISTS run_marks_run_id ON run_marks(run_id, id);
 
+CREATE TABLE IF NOT EXISTS run_logs (
+    id INTEGER PRIMARY KEY,
+    run_id INTEGER NOT NULL REFERENCES runs(id),
+    recorded_at TEXT NOT NULL,
+    elapsed_seconds REAL NOT NULL,
+    event TEXT NOT NULL,
+    message TEXT NOT NULL,
+    detail TEXT
+);
+
+CREATE INDEX IF NOT EXISTS run_logs_run_id ON run_logs(run_id, id);
+
 CREATE TABLE IF NOT EXISTS samples (
     id INTEGER PRIMARY KEY,
     run_id INTEGER NOT NULL REFERENCES runs(id),
@@ -473,6 +485,7 @@ class Store:
         """
 
         with self._connect() as connection:
+            connection.execute("DELETE FROM run_logs")
             connection.execute("DELETE FROM run_marks")
             connection.execute("DELETE FROM samples")
             connection.execute("DELETE FROM runs")
@@ -835,7 +848,7 @@ class Store:
                 )
                 previous = recorded_ms
 
-    def get_run(self, run_id: int) -> dict | None:
+    def get_run(self, run_id: int, *, include_logs: bool = True) -> dict | None:
         with self._connect() as connection:
             row = connection.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
             if row is None:
@@ -853,6 +866,8 @@ class Store:
         run["heater_on_seconds"] = heater_on_seconds(sample_dicts, run["elapsed_seconds"])
         run["samples"] = sample_dicts
         run["marks"] = self._marks_for(run_id)
+        if include_logs:
+            run["logs"] = self._logs_for(run_id)
         return run
 
     def claim_open_cooldown(self) -> dict | None:
@@ -893,6 +908,84 @@ class Store:
                 """,
                 (run_id, name, round(float(elapsed_seconds), 2), utc_now()),
             )
+
+    def add_run_log(
+        self,
+        run_id: int,
+        elapsed_seconds: float | None,
+        event: str,
+        message: str,
+        detail: dict | None = None,
+    ) -> None:
+        """Attach one diagnostic line to a run.
+
+        ``elapsed_seconds`` is the run clock, or the cooldown clock once the
+        pot is cooling. A line written after the run has closed, such as a
+        late analysis, uses the elapsed time already stored on the run.
+        """
+
+        with self._connect() as connection:
+            if elapsed_seconds is None:
+                row = connection.execute(
+                    "SELECT elapsed_seconds FROM runs WHERE id = ?",
+                    (run_id,),
+                ).fetchone()
+                if row is None:
+                    return
+                elapsed_seconds = float(row["elapsed_seconds"])
+            connection.execute(
+                """
+                INSERT INTO run_logs (
+                    run_id, recorded_at, elapsed_seconds, event, message, detail
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    utc_now(),
+                    round(float(elapsed_seconds), 2),
+                    event,
+                    message,
+                    json.dumps(detail or {}),
+                ),
+            )
+
+    def run_kind(self, run_id: int) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT kind FROM runs WHERE id = ?", (run_id,)).fetchone()
+        if row is None:
+            return None
+        return row["kind"] or "run"
+
+    def run_logs(self, run_id: int, after_id: int = 0) -> list[dict] | None:
+        """Control-log lines with an id above ``after_id``. None if the run is missing."""
+
+        with self._connect() as connection:
+            found = connection.execute("SELECT 1 FROM runs WHERE id = ?", (run_id,)).fetchone()
+            if found is None:
+                return None
+            rows = connection.execute(
+                """
+                SELECT id, recorded_at, elapsed_seconds, event, message, detail
+                FROM run_logs
+                WHERE run_id = ? AND id > ?
+                ORDER BY id
+                """,
+                (run_id, max(0, int(after_id))),
+            ).fetchall()
+        return [_log_dict(row) for row in rows]
+
+    def _logs_for(self, run_id: int) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, recorded_at, elapsed_seconds, event, message, detail
+                FROM run_logs
+                WHERE run_id = ?
+                ORDER BY id
+                """,
+                (run_id,),
+            ).fetchall()
+        return [_log_dict(row) for row in rows]
 
     def append_analysis(self, run_id: int, entry: dict) -> None:
         """Append one Grok comparison. The local fit is kept when Grok is absent."""
@@ -1119,6 +1212,26 @@ def _run_dict(row: sqlite3.Row) -> dict:
         "thermal_model": _json_object(row["thermal_model"]) if "thermal_model" in row.keys() else None,
         "analysis": _json_list(row["analysis"]) if "analysis" in row.keys() else [],
         "marks": [],
+    }
+
+
+def _log_dict(row: sqlite3.Row) -> dict:
+    detail: dict = {}
+    raw = row["detail"]
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            parsed = None
+        if isinstance(parsed, dict):
+            detail = parsed
+    return {
+        "id": int(row["id"]),
+        "recorded_at": row["recorded_at"],
+        "elapsed_seconds": round(float(row["elapsed_seconds"]), 2),
+        "event": row["event"],
+        "message": row["message"],
+        "detail": detail,
     }
 
 

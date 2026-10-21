@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from flask import Flask, abort, jsonify, request, send_from_directory
+from flask import Flask, Response, abort, jsonify, request, send_from_directory
 
 from brewski import __version__
 from brewski.controller import Controller, ControllerError
@@ -75,7 +75,21 @@ def create_app(controller: Controller) -> Flask:
 
     @app.get("/api/runs/<int:run_id>")
     def run(run_id: int):
-        return jsonify(controller.run(run_id))
+        include_logs = request.args.get("logs", "1").lower() not in {"0", "false", "no"}
+        return jsonify(controller.run(run_id, include_logs=include_logs))
+
+    @app.get("/api/runs/<int:run_id>/logs")
+    def run_logs(run_id: int):
+        return jsonify(controller.run_logs(run_id, _logs_after()))
+
+    @app.get("/api/runs/<int:run_id>/log.csv")
+    def run_log_csv(run_id: int):
+        text, filename = controller.control_log_export(run_id)
+        return Response(
+            text,
+            mimetype="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     @app.post("/api/calibration/clean")
     def clean_calibration():
@@ -141,6 +155,17 @@ def _timeline_max() -> int:
         return int(raw)
     except ValueError as exc:
         raise ControllerError("max must be an integer", 400) from exc
+
+
+def _logs_after() -> int:
+    raw = request.args.get("after", "0")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ControllerError("after must be a log id", 400) from exc
+    if value < 0:
+        raise ControllerError("after must be a log id", 400)
+    return value
 
 
 def _json_object() -> dict:

@@ -37,6 +37,30 @@ def test_status_names_the_installed_commit_when_beta_is_selected(client, control
     assert status["version"] == __version__
 
 
+def test_a_run_log_can_be_read_in_pages_and_exported(client, controller):
+    run_id = client.post("/api/runs/start").get_json()["run_id"]
+    controller.tick(1)
+    controller.tick(1)
+    slim = client.get(f"/api/runs/{run_id}?logs=0")
+    assert slim.status_code == 200
+    assert "logs" not in slim.get_json()
+
+    page = client.get(f"/api/runs/{run_id}/logs").get_json()["logs"]
+    assert [item["elapsed_seconds"] for item in page if item["event"] == "sample"] == [0, 1, 2]
+    after = page[0]["id"]
+    newer = client.get(f"/api/runs/{run_id}/logs?after={after}").get_json()["logs"]
+    assert newer[0]["id"] == page[1]["id"]
+    assert client.get(f"/api/runs/{run_id}/logs?after=nope").status_code == 400
+
+    exported = client.get(f"/api/runs/{run_id}/log.csv")
+    assert exported.status_code == 200
+    assert exported.mimetype == "text/csv"
+    assert exported.headers["Content-Disposition"] == f'attachment; filename="brewski-run-{run_id}-log.csv"'
+    assert "temp_f" in exported.data.decode("utf-8")
+    assert client.get("/api/runs/999/log.csv").status_code == 404
+    client.post("/api/runs/stop")
+
+
 def test_run_start_pause_resume_stop(client, controller):
     started = client.post("/api/runs/start", json={"target_temp_f": 170})
     assert started.status_code == 200

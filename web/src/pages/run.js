@@ -59,6 +59,30 @@ export function mountRun(root, params) {
       </section>
       <section class="dashboard-card">
         <div class="card-title-with-timer">
+          <h2 class="card-title">Control log</h2>
+          <a class="export-link" id="export-log" href="/api/runs/${encodeURIComponent(params.id)}/log.csv">Export</a>
+        </div>
+        <p class="log-note">Temperature, heater state, and the calculation, saved about once a second. Export downloads the full log.</p>
+        <div class="history-table-container sample-log" id="control-log">
+          <table class="history-table">
+            <thead>
+              <tr>
+                <th>Elapsed</th>
+                <th>Event</th>
+                <th>Phase</th>
+                <th>Temp</th>
+                <th>Heaters</th>
+                <th>Slope</th>
+                <th>Crest</th>
+                <th>Calculation</th>
+              </tr>
+            </thead>
+            <tbody id="control-body"></tbody>
+          </table>
+        </div>
+      </section>
+      <section class="dashboard-card">
+        <div class="card-title-with-timer">
           <h2 class="card-title">Sample Log</h2>
         </div>
         <p class="form-error" id="run-error" hidden></p>
@@ -74,6 +98,8 @@ export function mountRun(root, params) {
 
   const chart = createTempChart(document.getElementById('run-chart'))
   let stopped = false
+  let lastLogId = 0
+  let logReady = false
   const errorEl = document.getElementById('run-error')
 
   function render(run) {
@@ -148,12 +174,38 @@ export function mountRun(root, params) {
     )
   }
 
+  function appendControlLog(logs, heaterSlots, followLive) {
+    const body = document.getElementById('control-body')
+    const scroller = document.getElementById('control-log')
+    if (!body) return
+    if (!logs.length) {
+      if (!logReady) {
+        body.innerHTML = '<tr><td colspan="8" class="empty-cell">No control log for this run.</td></tr>'
+        logReady = true
+      }
+      return
+    }
+    const nearBottom = scroller
+      ? scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 48
+      : false
+    if (!logReady || body.querySelector('.empty-cell')) body.innerHTML = ''
+    body.insertAdjacentHTML('beforeend', controlLogRows(logs, heaterSlots))
+    lastLogId = logs[logs.length - 1].id
+    logReady = true
+    if (scroller && (followLive || nearBottom)) scroller.scrollTop = scroller.scrollHeight
+  }
+
   async function refresh() {
     if (stopped) return
-    const [run, status] = await Promise.all([api.run(params.id), api.status()])
+    const [run, status, page] = await Promise.all([
+      api.run(params.id, { logs: false }),
+      api.status(),
+      api.runLogs(params.id, lastLogId),
+    ])
     setSourceBadge(status.source)
     render(run)
     const open = run.status === 'running' || run.status === 'paused' || run.cooldown_status === 'open'
+    appendControlLog(page.logs || [], activeSlots(run, 'heaters'), open && !logReady)
     if (!open) clearInterval(timer)
   }
 
@@ -173,6 +225,80 @@ export function mountRun(root, params) {
     clearInterval(timer)
     chart.destroy()
   }
+}
+
+const EVENT_LABELS = {
+  start: 'Start',
+  sample: 'Sample',
+  heat: 'Heat',
+  phase: 'Phase',
+  model: 'Model',
+  analysis: 'Analysis',
+  pause: 'Pause',
+  resume: 'Resume',
+  stop: 'Stop',
+}
+
+const PHASE_LABELS = {
+  settle: 'Settle',
+  cold_start: 'Cold Start',
+  linear: 'Heating',
+  coast: 'Coasting',
+  momentum: 'Momentum',
+  approach: 'Stage II',
+  approach_coast: 'Stage II coast',
+  pulses: 'Pulses',
+  hold: 'Stage III',
+  run: 'Run',
+  cutoff: 'Run',
+  sustain: 'Run',
+  model: 'Run',
+  cooldown: 'Cooldown',
+  pause: 'Paused',
+  stop: 'Stopped',
+}
+
+function controlLogRows(logs, heaterSlots) {
+  const cell = (label, value) => `<td data-label="${escapeHtml(label)}">${value}</td>`
+  return logs
+    .map((entry) => {
+      const detail = entry.detail || {}
+      return `
+        <tr>
+          ${cell('Elapsed', formatDuration(entry.elapsed_seconds))}
+          ${cell('Event', escapeHtml(EVENT_LABELS[entry.event] || entry.event || '—'))}
+          ${cell('Phase', escapeHtml(phaseLabel(detail)))}
+          ${cell('Temp', formatTemp(detail.temp_f))}
+          ${cell('Heaters', escapeHtml(heaterText(detail, heaterSlots)))}
+          ${cell('Slope', formatSlope(detail))}
+          ${cell('Crest', formatTemp(detail.predicted_crest_f))}
+          ${cell('Calculation', `<span class="control-note">${escapeHtml(entry.message || '')}</span>`)}
+        </tr>`
+    })
+    .join('')
+}
+
+function phaseLabel(detail) {
+  const path = detail.path
+  if (path && PHASE_LABELS[path]) return PHASE_LABELS[path]
+  if (detail.phase && PHASE_LABELS[detail.phase]) return PHASE_LABELS[detail.phase]
+  return detail.phase || '—'
+}
+
+function formatSlope(detail) {
+  const value = detail.live_slope_f_per_sec ?? detail.slope_f_per_sec ?? detail.sheath_slope_f_per_sec
+  if (value == null || Number.isNaN(Number(value))) return '—'
+  return `${Number(value).toFixed(3)}°F/s`
+}
+
+function heaterText(detail, heaterSlots) {
+  const states = detail.heaters_on
+  if (!Array.isArray(states)) return '—'
+  const slots = heaterSlots.length ? heaterSlots : states.map((_, index) => ({ name: `Heater ${index + 1}`, index }))
+  const named = slots.map((slot) => `${slot.name} ${states[slot.index] ? 'on' : 'off'}`)
+  if (named.every((line) => line.endsWith(' on'))) return 'On'
+  if (named.every((line) => line.endsWith(' off'))) return 'Off'
+  return named.join(', ')
 }
 
 function deviceLabel(slot, kind) {

@@ -30,6 +30,17 @@ from brewski.lcd import Display, NullDisplay, display_key, open_display, startup
 from brewski.menu import SoftwareMenu
 from brewski.network import display_identity
 from brewski.panel import indicator_leds, open_panel, panel_key
+from brewski.runlog import (
+    analysis_message,
+    clean_detail,
+    decision_fields,
+    control_log_csv,
+    format_control,
+    model_message,
+    model_numbers,
+    phase_message,
+    start_message,
+)
 from brewski.sources.base import HardwareSource
 from brewski.updates import (
     ReleaseInfo,
@@ -67,9 +78,10 @@ from brewski.thermal import (
     accept_grok,
     apply_grok_value,
     blend_model,
-    hold_should_heat,
     model_from_dict,
+    pulse_plan,
     scale_model,
+    project_temperature,
     seconds_to_landing,
     step_sheath_slope,
 )
@@ -82,6 +94,9 @@ logger = logging.getLogger(__name__)
 DEADBAND_F = 2.0
 # After a run, cooldown stays open while the control probe is above 90°F.
 SAMPLE_INTERVAL_SECONDS = 5.0
+# The control log keeps each control-loop reading. The loop decides about
+# once a second, and a 5 second gap hides the slope and the shutoff.
+LOG_INTERVAL_SECONDS = 1.0
 # Ignore a stalled clock that tries to replay more than an hour in one tick.
 MAX_TICK_SECONDS = 3600.0
 # A calibration only trusts a coast after the element has been on long enough
@@ -627,6 +642,7 @@ class Controller:
         self._run_id: int | None = None
         self._elapsed = 0.0
         self._since_sample = 0.0
+        self._since_log = 0.0
         self._since_timeline = 0.0
         self._since_timeline_compact = 0.0
         self._cooldown_run_id: int | None = None
@@ -682,6 +698,12 @@ class Controller:
         # turn-on of a run is not delayed. A control-law turn-off sets this
         # back to zero. Pause and Stop leave it satisfied on purpose.
         self._heater_off_for = [math.inf] * SLOT_COUNT
+        # The last control-law choice, before the minimum on and off times.
+        self._decision: dict = {}
+        self._desired = [False] * SLOT_COUNT
+        # Heater mask already written to this run's log, so a later tick only
+        # records a line when the SSR actually changes.
+        self._logged_heaters: list[bool] | None = None
         if display is not None:
             self._display = display
             self._display_key = display_key(self.store.get_settings())
@@ -759,9 +781,9 @@ class Controller:
         with self._lock:
             return self.store.timeline(int(start_ms), int(end_ms), capped)
 
-    def run(self, run_id: int) -> dict:
+    def run(self, run_id: int, *, include_logs: bool = True) -> dict:
         with self._lock:
-            record = self.store.get_run(run_id)
+            record = self.store.get_run(run_id, include_logs=include_logs)
             if record is None:
                 raise ControllerError("Run not found", 404)
             overlay = self._live_overlay()
@@ -777,6 +799,26 @@ class Controller:
                 record["cooldown_seconds"] = round(self._cooldown_elapsed, 2)
                 record["cooldown_status"] = "open"
             return record
+
+    def run_logs(self, run_id: int, after_id: int = 0) -> dict:
+        """Control-log lines newer than ``after_id``. The run page appends these."""
+
+        with self._lock:
+            logs = self.store.run_logs(run_id, after_id)
+        if logs is None:
+            raise ControllerError("Run not found", 404)
+        return {"logs": logs}
+
+    def control_log_export(self, run_id: int) -> tuple[str, str]:
+        """CSV text and a file name for the whole control log."""
+
+        with self._lock:
+            kind = self.store.run_kind(run_id)
+            if kind is None:
+                raise ControllerError("Run not found", 404)
+            logs = self.store.run_logs(run_id)
+        label = "calibration" if kind == "calibration" else "run"
+        return control_log_csv(logs or []), f"brewski-{label}-{run_id}-log.csv"
 
     def update_settings(self, patch: dict) -> dict:
         with self._lock:
@@ -854,6 +896,7 @@ class Controller:
             self._run_id = None
             self._elapsed = 0.0
             self._since_sample = 0.0
+            self._since_log = 0.0
             self._clear_coast()
             self._clear_cooldown()
             self._clear_predict()
@@ -995,6 +1038,7 @@ class Controller:
             self._mode = "running"
             self._elapsed = 0.0
             self._since_sample = 0.0
+            self._since_log = 0.0
             self._command_heaters(settings)
             run_settings = settings
             if kind == "calibration":
@@ -1003,8 +1047,25 @@ class Controller:
             self._run_id = int(run["id"])
             if kind == "calibration":
                 self._add_mark(MARK_START)
+            detail = self._control_detail(settings)
+            prior = self._calibration_prior if kind == "calibration" else self._run_model
+            if prior is not None:
+                numbers = model_numbers(prior.to_dict())
+                if numbers:
+                    detail["model"] = numbers
+            self._log(
+                "start",
+                start_message(
+                    kind,
+                    self._aim_temperature(settings),
+                    None if prior is None else prior.to_dict(),
+                    settings.learned_coast_f,
+                ),
+                detail,
+            )
             self._record_sample(settings)
-            logger.info("Run %s started at %s°F", self._run_id, self._aim_temperature(settings))
+            self._record_control_log(settings)
+            self._logged_heaters = self._heater_mask(settings)
             return self._status()
 
     def pause(self) -> dict:
@@ -1013,10 +1074,14 @@ class Controller:
                 raise ControllerError("There is no running run to pause", 409)
             settings = self.store.get_settings()
             self._pulse_until = None
+            self._decision = {"path": "pause", "heat": False}
+            self._desired = [False] * SLOT_COUNT
             self._set_heaters([False] * SLOT_COUNT, release_off_dwell=True)
+            self._logged_heaters = self._heater_mask(settings)
             self._live_temps = self.source.read_temperatures(SLOT_COUNT)
             self._mode = "paused"
             self._record_sample(settings)
+            self._record_control_log(settings)
             self.store.update_run(self._run_id, status="paused", elapsed_seconds=self._elapsed)
             self._flush_heater_life()
             logger.info("Run %s paused at %ss", self._run_id, round(self._elapsed, 1))
@@ -1035,7 +1100,9 @@ class Controller:
                 raise ControllerError("Emergency stop is active", 409)
             self._command_heaters(settings)
             self._mode = "running"
+            self._log_output_changes(settings, None)
             self._record_sample(settings)
+            self._record_control_log(settings)
             self.store.update_run(self._run_id, status="running", elapsed_seconds=self._elapsed)
             logger.info("Run %s resumed", self._run_id)
             return self._status()
@@ -1226,17 +1293,21 @@ class Controller:
                 self._tick_cooldown(dt, settings)
             elif self._mode == "paused":
                 self._advance_cooldown_clock(dt, settings)
+                self._note_control_log(dt, settings)
             return
         self._elapsed += dt
         self._note_heater_dwell(dt)
+        phase_before = self._session.phase if self._session is not None else None
         self._advance_calibration(settings)
         if self._mode != "running":
             return
         self._step_sheath(dt, settings)
         self._command_heaters(settings)
+        self._log_output_changes(settings, phase_before)
         if self._mode != "running":
             return
         self._advance_cooldown_clock(dt, settings)
+        self._note_control_log(dt, settings)
         self._since_sample += dt
         while self._since_sample >= SAMPLE_INTERVAL_SECONDS:
             self._since_sample -= SAMPLE_INTERVAL_SECONDS
@@ -1265,10 +1336,14 @@ class Controller:
         self._pulse_until = None
         self._hold_ready = False
         self._flush_heater_life()
+        self._decision = {"path": "stop", "heat": False}
+        self._desired = [False] * SLOT_COUNT
         self._set_heaters([False] * SLOT_COUNT, release_off_dwell=True)
+        self._logged_heaters = [False] * SLOT_COUNT
         self._live_temps = self.source.read_temperatures(SLOT_COUNT)
         if self._run_id is not None:
             self._record_sample(settings)
+            self._record_control_log(settings)
             self.store.update_run(
                 self._run_id,
                 status="stopped",
@@ -1293,6 +1368,7 @@ class Controller:
             return
         self._mode = "cooling"
         self._record_cooldown_sample(settings)
+        self._record_control_log(settings)
         self._persist_cooldown()
         logger.info("Run %s cooling; cooldown clock at %ss", run_id, round(self._cooldown_elapsed, 1))
 
@@ -1358,6 +1434,7 @@ class Controller:
         if current is not None and current < SAFE_TEMP_F:
             self._complete_cooldown(settings)
             return
+        self._note_control_log(dt, settings)
         while self._cooldown_since_sample >= SAMPLE_INTERVAL_SECONDS:
             self._cooldown_since_sample -= SAMPLE_INTERVAL_SECONDS
             self._record_cooldown_sample(settings)
@@ -1391,6 +1468,7 @@ class Controller:
         run_id = self._cooldown_run_id
         elapsed = self._cooldown_elapsed
         self._record_cooldown_sample(settings)
+        self._record_control_log(settings)
         self.store.update_run(
             run_id,
             cooldown_status="complete",
@@ -1504,6 +1582,7 @@ class Controller:
         """
 
         desired = self._decide(settings, self._live_temps)
+        self._desired = list(desired)
         min_on = settings.heater_min_on_seconds
         min_off = settings.heater_min_off_seconds
         states = []
@@ -1701,13 +1780,15 @@ class Controller:
                 calibration_settled=1 if self._calibration_settled else 0,
                 thermal_model=json.dumps(model.to_dict()),
             )
-        logger.info(
-            "Run %s model coast %s°F over %ss, linear %s°F/s, cool %s°F/min",
-            self._run_id,
-            coast,
-            seconds,
-            model.linear_rate_f_per_sec,
-            rate,
+        self._log(
+            "model",
+            model_message(model.to_dict()),
+            {
+                "model": model.to_dict(),
+                "coast_f": coast,
+                "coast_seconds": seconds,
+                "cooldown_f_per_min": rate,
+            },
         )
 
     def _queue_analysis(self, item: dict) -> None:
@@ -1874,6 +1955,14 @@ class Controller:
                 "grok": remote,
                 "accepted": accepted,
             },
+        )
+        elapsed = self._elapsed if self._run_id == run_id else None
+        self._log(
+            "analysis",
+            analysis_message(kind, local, remote, accepted),
+            {"kind": kind, "local": local, "grok": remote, "accepted": accepted},
+            run_id=run_id,
+            elapsed=elapsed,
         )
 
     def _clear_coast(self) -> None:
@@ -2181,14 +2270,20 @@ class Controller:
         off = [False] * SLOT_COUNT
         control_indexes = settings.enabled_sensor_indexes()
         if not control_indexes or control_indexes[0] >= len(temps):
+            self._decision = {"path": "run", "heat": False}
             return off
         if self._session is not None and self._run_kind == "calibration":
             heat = bool(self._session.heat) and not self._session.finished
+            trace = dict(self._session.trace)
+            trace["heat"] = heat
+            trace.setdefault("path", self._session.phase)
+            self._decision = trace
             return [
                 heat and settings.heaters[index].enabled for index in range(SLOT_COUNT)
             ]
         raw = temps[control_indexes[0]]
         if raw is None:
+            self._decision = {"path": "run", "heat": False}
             return off
         primary = float(raw)
         model = self._run_model
@@ -2197,24 +2292,51 @@ class Controller:
             slope = self._sheath_slope
             if live is not None and live > slope:
                 slope = live
-            heat = hold_should_heat(
+            target = float(self._target_value(settings))
+            plan = pulse_plan(
                 primary,
-                float(self._target_value(settings)),
+                target,
                 self._pulse_on_seconds(settings),
                 model,
                 settings.heater_min_on_seconds,
                 slope_f_per_sec=slope,
+                budgeted=True,
             )
-            return [heat and settings.heaters[index].enabled for index in range(SLOT_COUNT)]
+            self._decision = {
+                "path": "model",
+                "target_f": target,
+                "live_slope_f_per_sec": None if live is None else round(live, 5),
+                "sheath_slope_f_per_sec": round(self._sheath_slope, 5),
+                **plan,
+            }
+            return [bool(plan["heat"]) and settings.heaters[index].enabled for index in range(SLOT_COUNT)]
         current = list(self._heaters[:SLOT_COUNT])
         while len(current) < SLOT_COUNT:
             current.append(False)
         if (pulse := self._hold_pulse(settings)) is not None:
-            return self._sustain_states(settings, primary, pulse)
-        else:
-            cutoff = self._shutoff_coast(settings)
+            states = self._sustain_states(settings, primary, pulse)
+            duration, reheat = pulse
             target = float(settings.target_temp_f)
-        return [
+            self._decision = {
+                "path": "sustain",
+                "heat": any(
+                    states[index] and settings.heaters[index].enabled for index in range(SLOT_COUNT)
+                ),
+                "target_f": target,
+                "shutoff_coast_f": round(self._last_shutoff_coast, 2),
+                "slope_f_per_sec": None
+                if self._last_shutoff_rate is None
+                else round(float(self._last_shutoff_rate), 5),
+                "cutoff_f": round(target - self._last_shutoff_coast, 2),
+                "reheat_f": round(reheat, 2),
+                "pulse_seconds": round(duration, 2),
+                "hold_ready": self._hold_ready,
+                "on_seconds": round(self._pulse_on_seconds(settings), 2),
+            }
+            return states
+        cutoff = self._shutoff_coast(settings)
+        target = float(settings.target_temp_f)
+        mask = [
             heater_should_be_on(
                 primary,
                 target,
@@ -2224,6 +2346,19 @@ class Controller:
             and settings.heaters[index].enabled
             for index in range(SLOT_COUNT)
         ]
+        self._decision = {
+            "path": "cutoff",
+            "heat": any(mask),
+            "target_f": target,
+            "shutoff_coast_f": round(cutoff, 2),
+            "slope_f_per_sec": None
+            if self._last_shutoff_rate is None
+            else round(float(self._last_shutoff_rate), 5),
+            "soak": round(self._sheath_soak(settings), 3),
+            "cutoff_f": round(target - cutoff, 2),
+            "on_seconds": round(self._pulse_on_seconds(settings), 2),
+        }
+        return mask
 
     def _note_timeline(self, dt: float, settings: Settings) -> None:
         """Save one reading per sample interval, in every mode.
@@ -2245,6 +2380,150 @@ class Controller:
         if settings is None:
             settings = self.store.get_settings()
         self.store.add_timeline_point(self._sample_temps(), self._aim_temperature(settings))
+
+    def _heater_mask(self, settings: Settings) -> list[bool]:
+        """Enabled heaters that are actually on. Disabled slots stay false."""
+
+        heaters = [False] * SLOT_COUNT
+        for index, on in enumerate(self._heaters[:SLOT_COUNT]):
+            heaters[index] = bool(on) and settings.heaters[index].enabled
+        return heaters
+
+    def _dwell_kind(self, settings: Settings, heaters: list[bool]) -> str | None:
+        """Set when the minimum on or off time is holding the SSR against the math."""
+
+        held_on = False
+        held_off = False
+        for index in range(SLOT_COUNT):
+            if not settings.heaters[index].enabled:
+                continue
+            want = bool(self._desired[index]) if index < len(self._desired) else False
+            got = bool(heaters[index]) if index < len(heaters) else False
+            if got and not want:
+                held_on = True
+            if want and not got:
+                held_off = True
+        if held_on and held_off:
+            return "both"
+        if held_on:
+            return "min_on"
+        if held_off:
+            return "min_off"
+        return None
+
+    def _control_detail(self, settings: Settings, heaters: list[bool] | None = None) -> dict:
+        """Temperature, heater state, and the calculation the last decision used."""
+
+        if heaters is None:
+            heaters = self._heater_mask(settings)
+        found = self._current_control(settings)
+        decision = dict(self._decision)
+        path = str(decision.get("path") or "run")
+        if path in {"pause", "stop"}:
+            phase = path
+        elif self._mode == "cooling" or path == "cooldown":
+            phase = "cooldown"
+        elif self._session is not None:
+            phase = self._session.phase
+        else:
+            phase = "run"
+        detail: dict = {
+            "phase": phase,
+            "path": path,
+            "temp_f": None if found is None else round(found[1], 2),
+            "target_f": decision.get("target_f", round(self._aim_temperature(settings), 2)),
+            "heaters_on": list(heaters),
+            "heat": bool(decision.get("heat")),
+        }
+        detail.update(decision_fields(decision))
+        if "on_seconds" not in detail and path not in {"pause", "stop", "cooldown"}:
+            detail["on_seconds"] = round(self._pulse_on_seconds(settings), 2)
+        off = self._coast_off_seconds(settings)
+        if off and path not in {"pause", "stop"}:
+            detail["off_seconds"] = round(off, 2)
+        live = slope_f_per_sec(self._predict_samples)
+        if live is not None and "live_slope_f_per_sec" not in detail:
+            detail["live_slope_f_per_sec"] = round(live, 5)
+        dwell = self._dwell_kind(settings, heaters)
+        if dwell:
+            detail["dwell"] = dwell
+        if path not in {"pause", "stop"}:
+            forecast = self._forecast(settings)
+            if forecast["seconds_to_target"] is not None:
+                detail["seconds_to_target"] = forecast["seconds_to_target"]
+            if forecast["seconds_to_cooldown"] is not None:
+                detail["seconds_to_cooldown"] = forecast["seconds_to_cooldown"]
+        model = self._session.model if self._session is not None else self._run_model
+        numbers = model_numbers(None if model is None else model.to_dict())
+        if numbers:
+            detail["model"] = numbers
+        return detail
+
+    def _log(
+        self,
+        event: str,
+        message: str,
+        detail: dict | None = None,
+        *,
+        run_id: int | None = None,
+        elapsed: float | None = None,
+    ) -> None:
+        """Store one diagnostic line on the open run, or on ``run_id`` after it closed."""
+
+        target = run_id
+        if target is None:
+            target = self._run_id if self._run_id is not None else self._cooldown_run_id
+        if target is None:
+            return
+        if elapsed is None and run_id is None:
+            elapsed = self._cooldown_elapsed if self._mode == "cooling" else self._elapsed
+        payload = clean_detail(detail)
+        self.store.add_run_log(target, elapsed, event, message, payload)
+        if event != "sample":
+            logger.info("Run %s %s", target, message)
+
+    def _note_control_log(self, dt: float, settings: Settings) -> None:
+        """Save the control reading about once a second.
+
+        A stalled clock can hand in a large ``dt``. That still records the
+        temperature we have now, not copies of the same reading.
+        """
+
+        self._since_log += dt
+        if self._since_log < LOG_INTERVAL_SECONDS:
+            return
+        self._since_log %= LOG_INTERVAL_SECONDS
+        self._record_control_log(settings)
+
+    def _record_control_log(self, settings: Settings) -> None:
+        """One diagnostic line for the temperature and calculation right now."""
+
+        if self._run_id is None and self._cooldown_run_id is None:
+            return
+        if self._mode == "cooling":
+            self._decision = {"path": "cooldown", "heat": False}
+            heaters = [False] * SLOT_COUNT
+            detail = self._control_detail(settings, heaters)
+            if settings.learned_cooldown_f_per_min is not None:
+                detail["learned_rate_f_per_min"] = settings.learned_cooldown_f_per_min
+        else:
+            detail = self._control_detail(settings)
+        self._log("sample", format_control(detail), detail)
+
+    def _log_output_changes(self, settings: Settings, phase_before: str | None) -> None:
+        """Record a stage change or an SSR change as soon as it happens."""
+
+        if self._run_id is None:
+            return
+        phase = self._session.phase if self._session is not None else None
+        if phase_before is not None and phase is not None and phase != phase_before:
+            detail = self._control_detail(settings)
+            self._log("phase", phase_message(phase, detail), detail)
+        applied = self._heater_mask(settings)
+        if self._logged_heaters is not None and applied != self._logged_heaters:
+            detail = self._control_detail(settings)
+            self._log("heat", format_control(detail), detail)
+        self._logged_heaters = applied
 
     def _record_sample(self, settings: Settings) -> None:
         if self._run_id is None:
@@ -2317,6 +2596,7 @@ class Controller:
             if self._mode in ("running", "paused")
             else False,
             "temps_f": temps,
+            "projection": self._projection(settings),
             "sensor_names": [settings.sensors[index].name for index in sensor_indexes],
             "heaters_on": heaters,
             "heater_names": [settings.heaters[index].name for index in heater_indexes],
@@ -2338,6 +2618,66 @@ class Controller:
             "update_source": settings.update_source,
         }
 
+
+    def _projection_model(self, settings: Settings) -> ThermalModel | None:
+        """Coast the chart should use, from this run or the last one saved."""
+
+        session = self._session
+        if session is not None and (session.model.coast_rise_f or 0.0) > 0:
+            return session.model
+        if self._run_model is not None and (self._run_model.coast_rise_f or 0.0) > 0:
+            return self._run_model
+        saved = model_from_dict(settings.thermal_model)
+        if (saved.coast_rise_f or 0.0) > 0:
+            return saved
+        if settings.learned_coast_f and settings.learned_coast_seconds:
+            return ThermalModel(
+                coast_rise_f=settings.learned_coast_f,
+                coast_seconds=settings.learned_coast_seconds,
+                cooldown_f_per_min=settings.learned_cooldown_f_per_min,
+            )
+        return saved if saved.cooldown_f_per_min else None
+
+    def _projection_slope(self, settings: Settings) -> float:
+        """Slope the shutoff guess is using right now.
+
+        While an element is on, that is the slope a cutoff at this instant
+        would carry onto the coast. While the elements are already open, the
+        probe's own recent slope is the rest of that coast or the fall.
+        """
+
+        live = slope_f_per_sec(self._predict_samples)
+        if self._session is not None:
+            modeled = self._session._control_slope(self._elapsed)
+        elif self._run_model is not None and self._run_model.ready():
+            modeled = self._sheath_slope
+            if live is not None and live > modeled:
+                modeled = live
+        else:
+            modeled = 0.0 if live is None else live
+        if self._elements_on(settings):
+            return modeled
+        if live is not None:
+            return live
+        return modeled
+
+    def _projection(self, settings: Settings) -> list[dict[str, float]]:
+        found = self._current_control(settings)
+        if found is None:
+            return []
+        model = self._projection_model(settings)
+        cool = settings.learned_cooldown_f_per_min
+        if model is not None and model.cooldown_f_per_min is not None:
+            cool = model.cooldown_f_per_min
+        return [
+            {"offset_s": stamp, "temp_f": round(reading, 2)}
+            for stamp, reading in project_temperature(
+                found[1],
+                self._projection_slope(settings),
+                model,
+                cool,
+            )
+        ]
 
     def _current_control(self, settings: Settings) -> tuple[int, float] | None:
         indexes = settings.enabled_sensor_indexes()

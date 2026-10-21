@@ -272,6 +272,31 @@ def test_older_databases_keep_counts_and_gain_default_pins(tmp_path):
     assert run["heaters"][0]["gpio"] is None
 
 
+def test_a_control_log_is_attached_to_its_run_and_cleared_with_it(store):
+    run = store.create_run(store.get_settings())
+    store.add_run_log(
+        run["id"],
+        1.5,
+        "heat",
+        "Run. 162.0°F. Heaters off.",
+        {"temp_f": 162.0, "heaters_on": [False, False], "shutoff_coast_f": 3},
+    )
+    store.add_run_log(run["id"], None, "analysis", "Late analysis.", {"accepted": False})
+    detail = store.get_run(run["id"])
+    assert [item["event"] for item in detail["logs"]] == ["heat", "analysis"]
+    assert detail["logs"][0]["elapsed_seconds"] == 1.5
+    assert detail["logs"][0]["detail"]["temp_f"] == 162
+    assert detail["logs"][0]["detail"]["heaters_on"] == [False, False]
+    assert detail["logs"][1]["elapsed_seconds"] == 0
+    assert "logs" not in store.list_runs()["runs"][0]
+    assert "logs" not in store.get_run(run["id"], include_logs=False)
+    first = detail["logs"][0]["id"]
+    assert [item["event"] for item in store.run_logs(run["id"], first)] == ["analysis"]
+    assert store.run_logs(999) is None
+    store.reset()
+    assert store.get_run(run["id"]) is None
+
+
 def test_heater_on_time_uses_the_gap_between_samples(store):
     settings = store.get_settings()
     run = store.create_run(settings)

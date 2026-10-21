@@ -78,14 +78,16 @@ export function toReal(display, gaps, lo, hi) {
   return Math.round(right)
 }
 
-export function clampEnd(end, spanMs, gaps, earliest, now) {
-  const capped = Math.min(end, now)
+export const FORECAST_MS = MINUTE
+
+export function clampEnd(end, spanMs, gaps, earliest, now, latest = now) {
+  const capped = Math.min(end, latest)
   if (earliest == null) return capped
   const history = toDisplay(now, gaps) - toDisplay(earliest, gaps)
   if (history <= spanMs) return capped
   const minEndDisplay = toDisplay(earliest, gaps) + spanMs * 0.15
   if (toDisplay(capped, gaps) < minEndDisplay) {
-    return toReal(minEndDisplay, gaps, earliest, now)
+    return toReal(minEndDisplay, gaps, earliest, latest)
   }
   return capped
 }

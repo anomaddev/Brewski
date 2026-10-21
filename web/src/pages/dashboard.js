@@ -8,6 +8,7 @@ import {
   TIMELINE_SPANS,
   bindTimelinePan,
   clampEnd,
+  FORECAST_MS,
   formatOff,
   mergeGaps,
   toDisplay,
@@ -675,16 +676,17 @@ export function mountDashboard(root) {
 
   function moveDisplay(displayDelta) {
     const now = Date.now()
-    if (follow) viewEndReal = now
+    const horizon = now + FORECAST_MS
+    if (follow) viewEndReal = horizon
     const gaps = axisGaps(now)
     const span = TIMELINE_SPANS[spanIndex].ms
     const nextDisplay = toDisplay(viewEndReal, gaps) + displayDelta
     const lo = timelineMeta.earliest == null ? now - span : Math.min(timelineMeta.earliest, now)
-    let nextReal = toReal(nextDisplay, gaps, lo - span, now)
-    nextReal = clampEnd(nextReal, span, gaps, timelineMeta.earliest, now)
-    if (now - nextReal <= 1500) {
+    let nextReal = toReal(nextDisplay, gaps, lo - span, horizon)
+    nextReal = clampEnd(nextReal, span, gaps, timelineMeta.earliest, now, horizon)
+    if (horizon - nextReal <= 1500) {
       follow = true
-      viewEndReal = now
+      viewEndReal = horizon
     } else {
       follow = false
       viewEndReal = nextReal
@@ -703,9 +705,10 @@ export function mountDashboard(root) {
     if (!lastStatus) return
     const now = Date.now()
     const span = TIMELINE_SPANS[spanIndex].ms
-    if (follow) viewEndReal = now
+    const horizon = now + FORECAST_MS
+    if (follow) viewEndReal = horizon
     const gaps = axisGaps(now)
-    viewEndReal = clampEnd(viewEndReal, span, gaps, timelineMeta.earliest, now)
+    viewEndReal = clampEnd(viewEndReal, span, gaps, timelineMeta.earliest, now, horizon)
     const endDisplay = toDisplay(viewEndReal, gaps)
     const startDisplay = endDisplay - span
     const lo = timelineMeta.earliest == null ? viewEndReal - span : Math.min(timelineMeta.earliest, viewEndReal)
@@ -742,13 +745,20 @@ export function mountDashboard(root) {
     const markers = markersFor(runsInWindow(listedRuns, startReal, viewEndReal), startReal, viewEndReal).map(
       (marker) => ({ ...marker, at: toDisplay(marker.at, gaps) }),
     )
+    const projection = (lastStatus.projection || [])
+      .map((point) => ({
+        at: toDisplay(now + point.offset_s * 1000, gaps),
+        temp: point.temp_f,
+      }))
+      .filter((point) => point.at >= startDisplay && point.at <= endDisplay + 1000)
     setChartPoints(chart, points, lastStatus.sensor_names, markers, {
       min: startDisplay,
       max: endDisplay,
       spans: offSpans,
       spanMs: span,
       connect: true,
-      toReal: (display) => toReal(display, gaps, lo - span, now),
+      projection,
+      toReal: (display) => toReal(display, gaps, lo - span, horizon),
       hideTick: (real) =>
         gaps.some((gap) => gap.to - gap.from > CONDENSE_AFTER_MS && real > gap.from && real < gap.to),
     })

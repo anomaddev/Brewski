@@ -64,38 +64,46 @@ export function kindBadge(kind) {
   return ''
 }
 
+function phaseClock(test) {
+  const elapsed = Math.max(0, Math.round(Number(test.phase_seconds) || 0))
+  const limit = Math.max(0, Math.round(Number(test.phase_limit) || 0))
+  const show = (value) => {
+    const minutes = Math.floor(value / 60)
+    const seconds = value % 60
+    return `${minutes}:${String(seconds).padStart(2, '0')}`
+  }
+  if (!limit) return show(elapsed)
+  return `${show(elapsed)} of ${show(limit)}`
+}
+
+function recordedClock(seconds) {
+  if (seconds == null || !Number.isFinite(Number(seconds))) return null
+  const total = Math.max(0, Math.round(Number(seconds)))
+  const minutes = Math.floor(total / 60)
+  const remain = total % 60
+  return `${minutes}:${String(remain).padStart(2, '0')}`
+}
+
 export function testSummary(test) {
   if (!test) return ''
   if (!test.review) {
-    if (test.phase === 'settle') return 'Initial Heating. Settling with the elements off.'
-    if (test.phase === 'heating') return 'Initial Heating. Heaters stay on until the rise stops getting steeper.'
+    const clock = phaseClock(test)
+    if (test.phase === 'settle') return `Initial Heating. Settling ${clock} with the elements off.`
+    if (test.phase === 'heating') return `Initial Heating. Heaters on, ${clock}.`
+    if (test.phase === 'coast') return `Initial Heating. Heaters off, ${clock}.`
     return 'Initial Heating.'
   }
-  const slope = test.slope_f_per_min == null ? null : `${Number(test.slope_f_per_min).toFixed(1)}°F/min`
-  const perSec = test.slope_f_per_sec == null ? null : `${Number(test.slope_f_per_sec).toFixed(5)}°F/s`
-  const approach = test.approach_f_per_min == null ? null : `${Number(test.approach_f_per_min).toFixed(1)}°F/min`
-  const tau = test.tau_seconds == null ? null : `${Math.round(Number(test.tau_seconds))}s`
-  const coast = test.coast_rise_f == null ? null : `${Number(test.coast_rise_f).toFixed(1)}°F`
-  const rise = test.rise_f == null ? null : `${Number(test.rise_f) >= 0 ? '+' : ''}${Number(test.rise_f).toFixed(1)}°F`
-  const seconds = test.seconds == null ? null : `${Math.round(Number(test.seconds))}s`
-  const start = test.start_temp_f == null ? null : `${Number(test.start_temp_f).toFixed(1)}°F`
-  const linear = test.linear_temp_f == null ? null : `${Number(test.linear_temp_f).toFixed(1)}°F`
-  const measured = rise && seconds ? ` ${rise} over ${seconds}.` : ''
-  if (test.found && approach && tau && coast) {
-    const temps = start && linear ? ` From ${start} to ${linear}.` : ''
-    return `Heating approaches ${approach} with a ${tau} time constant. Opening the heaters adds about ${coast}.${temps}`
+  const on = recordedClock(test.on_seconds)
+  const off = recordedClock(test.off_seconds)
+  if (!on) {
+    return test.stopped
+      ? 'Initial Heating stopped before the heaters came on.'
+      : 'Initial Heating ended before the heaters came on.'
   }
-  if (test.found && slope) {
-    const rate = perSec ? ` (${perSec})` : ''
-    const temps = start && linear ? ` From ${start} to ${linear}.` : ''
-    return `Initial Heating slope ${slope}${rate} over ${seconds}, rise ${rise}.${temps}`
-  }
-  if (test.stopped) {
-    const soFar = slope ? ` Slope so far ${slope}.` : ''
-    return `Initial Heating stopped before the rise went straight.${measured}${soFar}`
-  }
-  const soFar = slope ? ` Slope so far ${slope}.` : ''
-  return `Initial Heating did not find a straight rise.${measured}${soFar}`
+  const span = off ? `${on} on and ${off} off` : `${on} on`
+  if (test.stopped) return `Stopped early, after ${span}. The curve so far is in this run.`
+  if (!test.found) return `Initial Heating ended early, after ${span}. The curve so far is in this run.`
+  return `Recorded ${span}. The curve is in this run.`
 }
 
 export function statusLabel(status) {

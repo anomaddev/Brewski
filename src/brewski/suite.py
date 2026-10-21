@@ -1,30 +1,24 @@
 """Live tests from the Software menu.
 
-Initial Heating is the first piece of Stage I: settle, heat until the rise
-stops getting steeper, and fit the exponential the element soaks in on. The
-same time constant is the climb left when the heaters open. It does not write
-the heating model.
+Initial Heating records the curve and nothing else. The heaters stay on for
+three minutes, then off for three minutes. The samples and the two marks are
+the result. Nothing here writes the heating model.
 """
 
 from __future__ import annotations
 
-from brewski.thermal import (
-    COLD_START_MAX_SECONDS,
-    SETTLE_SECONDS,
-    endpoint_rate,
-    fit_heating_lag,
-    heating_lag_coast,
-    slope_has_settled,
-)
+from brewski.thermal import SETTLE_SECONDS
 
 TEST_INITIAL_HEATING = "initial_heating"
 TEST_LABEL = "Initial Heating"
 MARK_INITIAL_HEATING = "Initial Heating"
-MARK_LINEAR = "Linear"
+MARK_HEATERS_OFF = "Heaters Off"
+HEAT_SECONDS = 3 * 60.0
+COAST_SECONDS = 3 * 60.0
 
 
 class InitialHeatingSession:
-    """Settle, then heat until the climb is straight.
+    """Settle, heat for three minutes, then watch the coast for three minutes.
 
     The controller owns the heaters and the clock. ``heat`` is the request
     for the next command. Marks land in ``pending_marks`` for that reading.
@@ -37,6 +31,7 @@ class InitialHeatingSession:
         self.heat = False
         self.finished = False
         self.heat_started: float | None = None
+        self.heat_stopped: float | None = None
         self.pending_marks: list[str] = []
         self.result: dict | None = None
         self.trace: dict = {"path": "settle", "heat": False}
@@ -62,10 +57,29 @@ class InitialHeatingSession:
             self.heat = True
             self.trace = {"path": "heating", "heat": True}
             return
-        self._heat_step(elapsed, float(temp))
+        if self.phase == "heating":
+            if self.heat_started is not None and elapsed - self.heat_started >= HEAT_SECONDS:
+                self.heat_stopped = elapsed
+                self.phase = "coast"
+                self.phase_started = elapsed
+                self.pending_marks.append(MARK_HEATERS_OFF)
+                self.heat = False
+                self.trace = {"path": "coast", "heat": False}
+                return
+            self.heat = True
+            self.trace = {"path": "heating", "heat": True}
+            return
+        if (
+            self.heat_stopped is not None
+            and elapsed - self.heat_stopped >= COAST_SECONDS
+        ):
+            self._complete(elapsed, float(temp), found=True, stopped=False)
+            return
+        self.heat = False
+        self.trace = {"path": "coast", "heat": False}
 
     def abort(self, elapsed: float, temp: float) -> None:
-        """Stop before the rise goes straight. The measurement so far is kept."""
+        """Stop before the six minutes are up. The samples so far are kept."""
 
         if self.finished:
             return
@@ -74,97 +88,78 @@ class InitialHeatingSession:
         self.pending_marks = []
         self._complete(elapsed, float(temp), found=False, stopped=True)
 
+    def phase_elapsed(self) -> float:
+        """Seconds into the phase on the panel clock."""
+
+        if not self.samples:
+            return 0.0
+        return max(0.0, self.samples[-1][0] - self.phase_started)
+
+    def phase_limit(self) -> float:
+        if self.phase == "heating":
+            return HEAT_SECONDS
+        if self.phase == "coast":
+            return COAST_SECONDS
+        return SETTLE_SECONDS
+
     def payload(self, *, review: bool, run_id: int | None) -> dict:
         """Status fields for the panel, the dashboard, and the log."""
 
         if self.result is None:
-            body = {
-                "id": TEST_INITIAL_HEATING,
-                "phase": self.phase,
-                "found": False,
-                "stopped": False,
-                "slope_f_per_sec": None,
-                "slope_f_per_min": None,
-                "approach_f_per_sec": None,
-                "approach_f_per_min": None,
-                "tau_seconds": None,
-                "coast_rise_f": None,
-                "rise_f": None,
-                "seconds": None,
-                "start_temp_f": None,
-                "linear_temp_f": None,
-            }
+            body = _empty_result(self.phase)
         else:
             body = dict(self.result)
             body["phase"] = "done"
+        body["phase_seconds"] = round(self.phase_elapsed(), 1)
+        body["phase_limit"] = self.phase_limit()
         body["review"] = review
         body["run_id"] = run_id
         return body
-
-    def _heat_step(self, elapsed: float, temp: float) -> None:
-        window = self._since(self.heat_started)
-        found = slope_has_settled(window)
-        forced = (
-            self.heat_started is not None
-            and elapsed - self.heat_started >= COLD_START_MAX_SECONDS
-        )
-        if not found and not forced:
-            self.heat = True
-            self.trace = {"path": "heating", "heat": True}
-            return
-        self._complete(elapsed, temp, found=found, stopped=False)
 
     def _complete(self, elapsed: float, temp: float, *, found: bool, stopped: bool) -> None:
         self.heat = False
         self.finished = True
         self.phase = "done"
-        if found:
-            self.pending_marks.append(MARK_LINEAR)
         self.result = self._measure(elapsed, temp, found=found, stopped=stopped)
         self.trace = {"path": "done", "heat": False}
 
     def _measure(self, elapsed: float, temp: float, *, found: bool, stopped: bool) -> dict:
+        result = _empty_result("done")
+        result["found"] = found
+        result["stopped"] = stopped
+        result["end_temp_f"] = round(temp, 1)
         if self.heat_started is None:
-            return {
-                "id": TEST_INITIAL_HEATING,
-                "found": False,
-                "stopped": stopped,
-                "slope_f_per_sec": None,
-                "slope_f_per_min": None,
-                "approach_f_per_sec": None,
-                "approach_f_per_min": None,
-                "tau_seconds": None,
-                "coast_rise_f": None,
-                "rise_f": None,
-                "seconds": None,
-                "start_temp_f": round(temp, 1),
-                "linear_temp_f": None,
-            }
-        window = self._since(self.heat_started)
-        rate = endpoint_rate(window)
-        start_temp = window[0][1] if window else temp
-        heated = max(0.0, elapsed - self.heat_started)
-        lag = fit_heating_lag(window)
-        approach = None if lag is None else lag[0]
-        tau = None if lag is None else lag[1]
-        coast = None if lag is None else heating_lag_coast(approach, tau, heated)
-        return {
-            "id": TEST_INITIAL_HEATING,
-            "found": found,
-            "stopped": stopped,
-            "slope_f_per_sec": None if rate is None else round(rate, 5),
-            "slope_f_per_min": None if rate is None else round(rate * 60.0, 1),
-            "approach_f_per_sec": None if approach is None else round(approach, 5),
-            "approach_f_per_min": None if approach is None else round(approach * 60.0, 1),
-            "tau_seconds": None if tau is None else round(tau, 1),
-            "coast_rise_f": None if coast is None else round(coast, 1),
-            "rise_f": round(temp - start_temp, 1),
-            "seconds": round(heated, 1),
-            "start_temp_f": round(start_temp, 1),
-            "linear_temp_f": round(temp, 1) if found else None,
-        }
+            return result
+        on_end = self.heat_stopped if self.heat_stopped is not None else elapsed
+        result["on_seconds"] = round(max(0.0, on_end - self.heat_started), 1)
+        start_temp = _reading_at(self.samples, self.heat_started)
+        result["start_temp_f"] = None if start_temp is None else round(start_temp, 1)
+        if self.heat_stopped is None:
+            return result
+        off_temp = _reading_at(self.samples, self.heat_stopped)
+        result["off_temp_f"] = None if off_temp is None else round(off_temp, 1)
+        result["off_seconds"] = round(max(0.0, elapsed - self.heat_stopped), 1)
+        return result
 
-    def _since(self, origin: float | None) -> list[tuple[float, float]]:
-        if origin is None:
-            return list(self.samples)
-        return [(stamp, reading) for stamp, reading in self.samples if stamp >= origin]
+
+def _empty_result(phase: str) -> dict:
+    return {
+        "id": TEST_INITIAL_HEATING,
+        "phase": phase,
+        "found": False,
+        "stopped": False,
+        "on_seconds": None,
+        "off_seconds": None,
+        "start_temp_f": None,
+        "off_temp_f": None,
+        "end_temp_f": None,
+    }
+
+
+def _reading_at(samples: list[tuple[float, float]], stamp: float) -> float | None:
+    chosen: float | None = None
+    for sample_at, reading in samples:
+        if sample_at > stamp:
+            break
+        chosen = reading
+    return chosen

@@ -396,7 +396,7 @@ def test_test_suite_confirms_before_initial_heating():
     assert menu.screen == "suite-confirm"
     assert menu.lines("0.6.5") == [
         "Initial Heating?",
-        "Heaters will turn on",
+        "On 3 min, off 3 min",
         "START begin",
         "STOP cancel",
     ]

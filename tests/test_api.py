@@ -1,3 +1,7 @@
+import io
+import logging
+import zipfile
+
 import pytest
 
 from brewski import __version__
@@ -38,7 +42,10 @@ def test_status_names_the_installed_commit_when_beta_is_selected(client, control
 
 
 def test_a_run_log_can_be_read_in_pages_and_exported(client, controller):
+    logging.getLogger("brewski.controller").warning("before the run")
     run_id = client.post("/api/runs/start").get_json()["run_id"]
+    logging.getLogger("brewski.controller").warning("probe glitch")
+    logging.getLogger("other").warning("not brewski")
     controller.tick(1)
     controller.tick(1)
     slim = client.get(f"/api/runs/{run_id}?logs=0")
@@ -58,7 +65,45 @@ def test_a_run_log_can_be_read_in_pages_and_exported(client, controller):
     assert exported.headers["Content-Disposition"] == f'attachment; filename="brewski-run-{run_id}-log.csv"'
     assert "temp_f" in exported.data.decode("utf-8")
     assert client.get("/api/runs/999/log.csv").status_code == 404
+
     client.post("/api/runs/stop")
+    logging.getLogger("brewski.controller").warning("after the run")
+    bundle = client.get(f"/api/runs/{run_id}/export.zip")
+    assert bundle.status_code == 200
+    assert bundle.mimetype == "application/zip"
+    assert bundle.headers["Content-Disposition"] == f'attachment; filename="brewski-run-{run_id}.zip"'
+    with zipfile.ZipFile(io.BytesIO(bundle.data)) as archive:
+        assert archive.namelist() == [
+            f"brewski-run-{run_id}-log.csv",
+            f"brewski-run-{run_id}-console.log",
+        ]
+        csv_text = archive.read(f"brewski-run-{run_id}-log.csv").decode("utf-8-sig")
+        console = archive.read(f"brewski-run-{run_id}-console.log").decode("utf-8")
+    assert "temp_f" in csv_text
+    assert "probe glitch" in console
+    assert "Run started" in console
+    assert "before the run" not in console
+    assert "after the run" not in console
+    assert "not brewski" not in console
+    assert client.get("/api/runs/999/export.zip").status_code == 404
+
+
+def test_console_output_stays_on_a_run_after_it_closes_and_while_it_cools(controller):
+    run_id = controller.start()["run_id"]
+    controller.source.temps = [140.0, 110.0]
+    assert controller.stop()["mode"] == "cooling"
+    logging.getLogger("brewski.controller").warning("still cooling")
+    logging.getLogger("brewski.analysis").info(
+        "late note",
+        extra={"brewski_run_id": run_id, "brewski_elapsed": 4},
+    )
+    payload, filename = controller.run_export(run_id)
+    assert filename == f"brewski-run-{run_id}.zip"
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        console = archive.read(f"brewski-run-{run_id}-console.log").decode("utf-8")
+    assert "still cooling" in console
+    assert "4.00s " in console
+    assert "late note" in console
 
 
 def test_run_start_pause_resume_stop(client, controller):

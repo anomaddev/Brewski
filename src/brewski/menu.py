@@ -148,7 +148,7 @@ class SoftwareMenu:
             rows = self._suite_lines()
         elif self.screen == "suite-confirm":
             label = TEST_LABELS.get(self.chosen_test, TEST_LABEL)
-            rows = [f"{label}?", "Heaters will turn on", "START begin", "STOP cancel"]
+            rows = [f"{label}?", "On 3 min, off 3 min", "START begin", "STOP cancel"]
         elif self.screen == "notice":
             heading, detail = self.notice
             rows = [heading, detail, "", "STOP back"]

@@ -91,6 +91,15 @@ def create_app(controller: Controller) -> Flask:
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
+    @app.get("/api/runs/<int:run_id>/export.zip")
+    def run_export(run_id: int):
+        payload, filename = controller.run_export(run_id)
+        return Response(
+            payload,
+            mimetype="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
     @app.post("/api/calibration/clean")
     def clean_calibration():
         return jsonify(controller.clear_calibration())

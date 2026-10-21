@@ -297,6 +297,18 @@ def test_a_control_log_is_attached_to_its_run_and_cleared_with_it(store):
     assert store.get_run(run["id"]) is None
 
 
+def test_console_lines_follow_a_run_and_clear_with_it(store):
+    run = store.create_run(store.get_settings())
+    store.add_console_line(run["id"], "2026-01-01T00:00:00+00:00 INFO brewski: probe glitch")
+    store.add_console_line(999, "missing")
+    assert store.console_lines(run["id"]) == [
+        "2026-01-01T00:00:00+00:00 INFO brewski: probe glitch"
+    ]
+    assert store.console_lines(999) is None
+    store.reset()
+    assert store.console_lines(run["id"]) is None
+
+
 def test_heater_on_time_uses_the_gap_between_samples(store):
     settings = store.get_settings()
     run = store.create_run(settings)

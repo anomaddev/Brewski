@@ -140,42 +140,28 @@ def start_message(
 
 
 def suite_result_message(result: dict | None) -> str:
-    """One line when an Initial Heating test holds its result."""
+    """One line when an Initial Heating test holds its recording."""
 
     measured = result or {}
-    slope = measured.get("slope_f_per_sec")
-    minutes = measured.get("slope_f_per_min")
-    seconds = measured.get("seconds")
-    approach = measured.get("approach_f_per_sec")
-    approach_min = measured.get("approach_f_per_min")
-    tau = measured.get("tau_seconds")
-    coast = measured.get("coast_rise_f")
-    if (
-        measured.get("found")
-        and approach is not None
-        and approach_min is not None
-        and tau is not None
-        and coast is not None
-    ):
-        return (
-            f"Initial Heating approaches {float(approach):.5f}°F/s "
-            f"({float(approach_min):.1f}°F/min) with a {float(tau):.0f}s time constant. "
-            f"Opening the heaters adds about {float(coast):.1f}°F."
-        )
-    if measured.get("found") and slope is not None and minutes is not None and seconds is not None:
-        return (
-            f"Initial Heating slope {float(slope):.5f}°F/s "
-            f"({float(minutes):.1f}°F/min) over {float(seconds):.0f}s."
-        )
-    if slope is not None and seconds is not None:
-        why = "stopped early" if measured.get("stopped") else "did not go straight"
-        return (
-            f"Initial Heating {why}. Slope so far {float(slope):.5f}°F/s "
-            f"over {float(seconds):.0f}s."
-        )
+    on_seconds = measured.get("on_seconds")
+    off_seconds = measured.get("off_seconds")
+    if on_seconds is None:
+        if measured.get("stopped"):
+            return "Initial Heating stopped before the heaters came on."
+        return "Initial Heating ended before the heaters came on."
+    clock = _suite_clock(float(on_seconds))
+    off = "" if off_seconds is None else f" and {_suite_clock(float(off_seconds))} off"
     if measured.get("stopped"):
-        return "Initial Heating stopped before the heaters came on."
-    return "Initial Heating ended before the rise went straight."
+        return f"Initial Heating stopped early, after {clock} on{off}. The curve so far is in this run."
+    if not measured.get("found"):
+        return f"Initial Heating ended early, after {clock} on{off}. The curve so far is in this run."
+    return f"Initial Heating recorded {clock} on{off}. The curve is in this run."
+
+
+def _suite_clock(seconds: float) -> str:
+    total = max(0, int(round(seconds)))
+    minutes, secs = divmod(total, 60)
+    return f"{minutes}:{secs:02d}"
 
 
 def model_message(model: dict | None) -> str:

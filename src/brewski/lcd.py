@@ -610,10 +610,14 @@ def suite_run_lines(
     probes: list[tuple[str, float | None]],
     heaters: list[tuple[bool, bool]],
 ) -> list[str]:
-    """Settle or Initial Heating. The clock, the probe, and the heaters."""
+    """The phase clock, what the heaters are doing, the probe, and the heaters."""
 
-    label = "Settle:" if phase == "settle" else "Init Heat:"
-    state = "Heaters off" if phase == "settle" else "Heaters on"
+    if phase == "coast":
+        label, state = "Heat off:", "Off for 3:00"
+    elif phase == "heating":
+        label, state = "Heat on:", "On for 3:00"
+    else:
+        label, state = "Settle:", "Heaters off"
     return frame(
         [
             _pair(label, format_clock(elapsed_seconds)),
@@ -625,52 +629,26 @@ def suite_run_lines(
 
 
 def suite_result_lines(result: dict) -> list[str]:
-    """Hold the Initial Heating numbers until Stop."""
+    """Hold the Initial Heating recording until Stop. The curve is the result."""
 
-    found = bool(result.get("found"))
-    rise = result.get("rise_f")
-    seconds = result.get("seconds")
-    slope = result.get("slope_f_per_min")
-    approach = result.get("approach_f_per_min")
-    tau = result.get("tau_seconds")
-    coast = result.get("coast_rise_f")
-    if found and approach is not None and tau is not None and coast is not None:
-        return frame(
-            [
-                _pair("Rate:", _degrees_per_min(float(approach))),
-                _pair("Tau:", f"{int(round(float(tau)))}s"),
-                _pair("Coast:", _signed_degrees(float(coast))),
-                "STOP end",
-            ]
-        )
-    if found and slope is not None and rise is not None and seconds is not None:
-        return frame(
-            [
-                "Init Heat done",
-                _span_line(float(rise), float(seconds)),
-                _pair("Slope:", _degrees_per_min(float(slope))),
-                "STOP end",
-            ]
-        )
-    reason = "Stopped early" if result.get("stopped") else "No straight rise"
-    rows = ["Init Heat done", reason]
-    if rise is not None and seconds is not None:
-        rows.append(_span_line(float(rise), float(seconds)))
+    rows = ["Stopped early" if result.get("stopped") else "Recording saved"]
+    on_seconds = result.get("on_seconds")
+    off_seconds = result.get("off_seconds")
+    if on_seconds is not None:
+        rows.append(_pair("On:", _minute_clock(float(on_seconds))))
+    if off_seconds is not None:
+        rows.append(_pair("Off:", _minute_clock(float(off_seconds))))
+    rows = rows[:3]
     while len(rows) < 3:
         rows.append("")
     rows.append("STOP end")
     return frame(rows)
 
 
-def _span_line(rise: float, seconds: float) -> str:
-    return clip_line(f"{_signed_degrees(rise)} in {_brief_seconds(seconds)}")
-
-
-def _brief_seconds(seconds: float) -> str:
-    value = float(seconds)
-    if abs(value - round(value)) < 0.05:
-        return f"{int(round(value))}s"
-    return f"{value:.1f}s"
+def _minute_clock(seconds: float) -> str:
+    total = max(0, int(round(float(seconds))))
+    minutes, secs = divmod(total, 60)
+    return f"{minutes}:{secs:02d}"
 
 
 def _mode_label(mode: str, calibrating: bool) -> str:

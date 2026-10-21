@@ -89,8 +89,11 @@ def test_start_and_model_lines_name_the_numbers_a_run_began_with():
         "Calibration started at 150°F. No prior heating model."
     )
     assert start_message("test", 165, None, 3) == "Initial Heating test started."
-    assert "0.20000°F/s" in suite_result_message(
-        {"found": True, "slope_f_per_sec": 0.2, "slope_f_per_min": 12.0, "seconds": 38}
+    assert suite_result_message(
+        {"found": True, "on_seconds": 180, "off_seconds": 180}
+    ) == "Initial Heating recorded 3:00 on and 3:00 off. The curve is in this run."
+    assert suite_result_message({"found": False, "stopped": True}) == (
+        "Initial Heating stopped before the heaters came on."
     )
     assert "linear 0.400°F/s" in start_message(
         "run",

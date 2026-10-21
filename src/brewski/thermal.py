@@ -331,7 +331,9 @@ def fit_heating_lag(samples: list[tuple[float, float]]) -> tuple[float, float] |
     ``R`` is the straight rate once the element is hot. ``τ`` is how fast it
     gets there. Opening the heaters runs the same exponential backward: the
     degrees still to come are the rate at shutoff times ``τ``. Returns None
-    when the rise is already straight, so a chord is the whole story.
+    when the rise is already straight, or when ``τ`` is longer than this
+    window can see. A short curve can be fit by a huge rate and a huge time
+    constant at once, and that pair invents a coast the pot never makes.
     """
 
     if len(samples) < 8:
@@ -358,10 +360,15 @@ def fit_heating_lag(samples: list[tuple[float, float]]) -> tuple[float, float] |
     ):
         return None
 
+    # Soak at the end has to be past about 70%. Below that, a steeper rate
+    # and a longer time constant fit the same curve, and the coast runs away.
+    tau_cap = duration / 1.2
+    if tau_cap < 8.0:
+        return None
     best: tuple[float, float] | None = None
     best_error: float | None = None
     tau = 4.0
-    while tau <= 300.0:
+    while tau <= tau_cap:
         numerator = 0.0
         denominator = 0.0
         for elapsed, rise in points:
@@ -395,6 +402,10 @@ def fit_heating_lag(samples: list[tuple[float, float]]) -> tuple[float, float] |
     if line_error <= 0 or best_error > line_error * 0.85:
         return None
     rate, tau = best
+    # A minimum parked on the cap means a longer time constant would still
+    # fit. The two numbers are not identified.
+    if tau > tau_cap / 1.15:
+        return None
     modeled_end = rate * (1.0 - math.exp(-duration / tau))
     if abs(modeled_end - late_rate) / late_rate > 0.35:
         return None

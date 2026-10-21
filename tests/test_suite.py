@@ -1,7 +1,5 @@
 """Initial Heating: the first live test in the Software menu."""
 
-import math
-
 import pytest
 
 from dataclasses import replace
@@ -42,115 +40,84 @@ class _Source:
         self.heaters = padded
 
 
-def test_settle_then_a_straight_rise_reports_the_chord_slope():
+def _profile(age: float) -> float:
+    """Soak at 0.1°F/s, then 0.4°F/s, then a coast that peaks and sits."""
+
+    if age <= 60:
+        return 100.0 + 0.1 * age
+    if age <= 180:
+        return 106.0 + 0.4 * (age - 60)
+    coast = age - 180
+    if coast <= 60:
+        return 154.0 + 0.2 * coast
+    if coast <= 120:
+        return 166.0 + 0.05 * (coast - 60)
+    return 169.0
+
+
+def test_three_minutes_on_and_three_minutes_off_records_the_curve():
     session = InitialHeatingSession()
     marks = []
     for stamp in (0, 1, 2):
-        session.observe(stamp, 70)
+        session.observe(stamp, 100)
         marks.extend(session.pending_marks)
         assert session.heat is False
         assert session.phase == "settle"
-    session.observe(3, 70)
+    session.observe(3, 100)
     marks.extend(session.pending_marks)
     assert session.heat is True
     assert session.phase == "heating"
-    finished = None
-    for step in range(1, 90):
-        session.observe(3 + step, 70 + 0.2 * step)
-        marks.extend(session.pending_marks)
-        if session.finished:
-            finished = 3 + step
-            break
-    assert finished is not None
-    # A straight rise is still watched long enough to see it is not about to steepen.
-    assert finished - 3 >= 45
-    assert session.heat is False
-    assert marks == ["Initial Heating", "Linear"]
-    result = session.result
-    assert result["found"] is True
-    assert result["stopped"] is False
-    assert result["slope_f_per_sec"] == pytest.approx(0.2, abs=0.01)
-    assert result["slope_f_per_min"] == pytest.approx(12.0, abs=0.5)
-    assert result["tau_seconds"] is None
-    assert result["coast_rise_f"] is None
-    assert result["start_temp_f"] == 70.0
-    assert result["linear_temp_f"] == pytest.approx(70 + 0.2 * (finished - 3), abs=0.2)
-    assert result["seconds"] == pytest.approx(finished - 3, abs=0.1)
-    held = result["slope_f_per_sec"]
-    session.observe(finished + 5, 90)
-    assert session.heat is False
-    assert session.result["slope_f_per_sec"] == held
-
-
-def test_a_shallow_start_stays_in_heating_until_the_rise_steepens():
-    session = InitialHeatingSession()
-    session.observe(3, 70)
-    finished = None
-    for step in range(1, 190):
-        age = float(step)
-        if age < 40:
-            temp = 70 + 0.02 * age
-        else:
-            risen = age - 40
-            rate = 0.25
-            tau = 25.0
-            temp = 70 + 0.02 * 40 + rate * (risen - tau * (1 - math.exp(-risen / tau)))
-        session.observe(3 + step, temp)
-        if age <= 40:
-            assert session.finished is False
-            assert session.heat is True
-        if session.finished:
-            finished = 3 + step
-            break
-    assert finished is not None
-    assert finished - 3 > 40
-    assert session.result["found"] is True
-    assert session.result["slope_f_per_sec"] > 0.10
-    assert session.pending_marks == ["Linear"]
-
-
-def test_initial_heating_fits_the_soak_and_the_coast_it_leaves():
-    session = InitialHeatingSession()
-    session.observe(3, 70)
-    rate = 0.25
-    tau = 30.0
-    for step in range(1, 180):
-        elapsed = float(step)
-        rise = rate * (elapsed - tau * (1 - math.exp(-elapsed / tau)))
-        session.observe(3 + step, 70 + rise)
-        if session.finished:
-            break
-    result = session.result
-    assert result["found"] is True
-    assert result["approach_f_per_sec"] == pytest.approx(rate, rel=0.15)
-    assert result["tau_seconds"] == pytest.approx(tau, rel=0.25)
-    assert result["coast_rise_f"] == pytest.approx(
-        rate * tau * (1 - math.exp(-result["seconds"] / tau)),
-        rel=0.2,
-    )
-
-
-def test_the_cap_ends_without_a_linear_mark_when_the_rise_keeps_bending():
-    session = InitialHeatingSession()
-    session.observe(3, 70)
     assert session.pending_marks == ["Initial Heating"]
-    marks = []
+
     finished = None
-    for step in range(1, 200):
+    heaters_off_at = None
+    for step in range(1, 400):
         elapsed = 3 + step
-        bent = elapsed - 3
-        session.observe(elapsed, 70 + 0.01 * bent * bent)
+        session.observe(elapsed, _profile(float(step)))
         marks.extend(session.pending_marks)
+        if session.phase == "heating":
+            assert session.heat is True
+        if "Heaters Off" in session.pending_marks:
+            heaters_off_at = elapsed
+            assert session.heat is False
+            assert session.phase == "coast"
+        if session.phase == "coast":
+            assert session.heat is False
         if session.finished:
             finished = elapsed
             break
-    assert finished == 183
-    assert "Linear" not in marks
-    assert session.result["found"] is False
-    assert session.result["stopped"] is False
-    assert session.result["seconds"] == pytest.approx(180, abs=0.1)
-    assert session.result["linear_temp_f"] is None
+    assert heaters_off_at == 183
+    assert finished == 363
     assert session.heat is False
+    assert marks == ["Initial Heating", "Heaters Off"]
+    result = session.result
+    assert result["found"] is True
+    assert result["stopped"] is False
+    assert result["on_seconds"] == pytest.approx(180.0, abs=0.1)
+    assert result["off_seconds"] == pytest.approx(180.0, abs=0.1)
+    assert result["start_temp_f"] == pytest.approx(100.0, abs=0.1)
+    assert result["off_temp_f"] == pytest.approx(154.0, abs=0.2)
+    assert result["end_temp_f"] == pytest.approx(169.0, abs=0.2)
+    assert "soak_f_per_min" not in result
+    session.observe(finished + 5, 200)
+    assert session.heat is False
+    assert session.result["on_seconds"] == result["on_seconds"]
+
+
+def test_stopping_during_heat_keeps_the_samples_without_a_slope():
+    session = InitialHeatingSession()
+    session.observe(3, 100)
+    session.observe(33, 103)
+    session.abort(33, 103)
+    result = session.result
+    assert result["found"] is False
+    assert result["stopped"] is True
+    assert result["on_seconds"] == pytest.approx(30.0, abs=0.1)
+    assert result["off_seconds"] is None
+    assert result["start_temp_f"] == pytest.approx(100.0, abs=0.1)
+    assert result["end_temp_f"] == pytest.approx(103.0, abs=0.1)
+    assert session.heat is False
+    assert session.pending_marks == []
 
 
 def test_abort_keeps_whatever_was_measured():
@@ -159,19 +126,21 @@ def test_abort_keeps_whatever_was_measured():
     settled.abort(2, 70.4)
     assert settled.result["stopped"] is True
     assert settled.result["found"] is False
-    assert settled.result["slope_f_per_sec"] is None
+    assert settled.result["on_seconds"] is None
+    assert settled.result["end_temp_f"] == 70.4
     assert settled.heat is False
     settled.abort(3, 80)
-    assert settled.result["start_temp_f"] == 70.4
+    assert settled.result["end_temp_f"] == 70.4
 
     heating = InitialHeatingSession()
     heating.observe(3, 70)
-    heating.observe(8, 71)
-    heating.abort(8, 71)
+    heating.observe(13, 72)
+    heating.abort(13, 72)
     assert heating.result["found"] is False
     assert heating.result["stopped"] is True
-    assert heating.result["slope_f_per_sec"] == pytest.approx(0.2, abs=0.02)
-    assert heating.result["rise_f"] == pytest.approx(1.0, abs=0.05)
+    assert heating.result["on_seconds"] == pytest.approx(10.0, abs=0.1)
+    assert heating.result["off_seconds"] is None
+    assert heating.result["end_temp_f"] == pytest.approx(72.0, abs=0.05)
     assert heating.pending_marks == []
 
 
@@ -198,30 +167,43 @@ def test_initial_heating_leaves_the_model_and_holds_the_result(store):
     with pytest.raises(ControllerError, match="paused"):
         controller.pause()
 
-    for step in range(1, 120):
-        temp = 70.0 if step <= 3 else 70.0 + 0.2 * (step - 3)
-        source.temps = [temp, 62.0]
+    saw_heat = False
+    saw_coast = False
+    for step in range(1, 400):
+        source.temps = [75.0, 62.0]
         controller.tick(1)
-        if controller.status()["test"]["review"]:
+        test = controller.status()["test"]
+        if test and test["phase"] == "heating":
+            assert source.heaters == [True, True]
+            saw_heat = True
+        if test and test["phase"] == "coast":
+            assert source.heaters == [False, False]
+            saw_coast = True
+        if test and test["review"]:
             break
+    assert saw_heat is True
+    assert saw_coast is True
     status = controller.status()
     assert status["mode"] == "idle"
     assert status["test"]["review"] is True
     assert status["test"]["found"] is True
-    assert status["test"]["slope_f_per_sec"] == pytest.approx(0.2, abs=0.02)
+    assert status["test"]["on_seconds"] == pytest.approx(180.0, abs=0.1)
+    assert status["test"]["off_seconds"] == pytest.approx(180.0, abs=0.1)
     assert source.heaters == [False, False]
     assert store.get_settings().thermal_model == before
     assert store.get_settings().learned_coast_f == 3
     run = store.get_run(status["test"]["run_id"])
-    assert [mark["name"] for mark in run["marks"]] == ["Start", "Initial Heating", "Linear"]
-    assert any(item["event"] == "test" and "slope" in item["message"] for item in run["logs"])
+    assert [mark["name"] for mark in run["marks"]] == ["Start", "Initial Heating", "Heaters Off"]
+    assert any(item["event"] == "test" and "recorded" in item["message"] for item in run["logs"])
     listed = controller.runs()
     assert listed["stats"]["total_runs"] == 0
     assert listed["stats"]["calibration_runs"] == 0
     assert listed["runs"][0]["kind"] == "test"
 
     controller._refresh_display()
-    assert controller._display.lines[0] == "Init Heat done"
+    assert controller._display.lines[0] == "Recording saved"
+    assert controller._display.lines[1] == "On:             3:00"
+    assert controller._display.lines[2] == "Off:            3:00"
     assert controller._display.lines[3] == "STOP end"
     assert indicator_leds("idle", emergency=False, review=True) == (False, True)
 

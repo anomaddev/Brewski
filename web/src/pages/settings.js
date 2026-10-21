@@ -100,7 +100,7 @@ export function mountSettings(root) {
               <div class="setting-row">
                 <div class="setting-copy">
                   <h3>Test Suite</h3>
-                  <p class="help" id="suite-status">Turns the heaters on until the rise stops getting steeper, then shows the slope.</p>
+                  <p class="help" id="suite-status">Turns the heaters on for 3 minutes, then off for 3 minutes, and saves the curve.</p>
                 </div>
                 <div class="system-actions">
                   <button class="action-btn start-btn" type="button" id="suite-start">Initial Heating</button>
@@ -525,14 +525,14 @@ export function mountSettings(root) {
     } else if (busy) {
       copy.textContent = 'Initial Heating waits until the still is idle.'
     } else {
-      copy.textContent = 'Turns the heaters on until the rise stops getting steeper, then shows the slope.'
+      copy.textContent = 'Turns the heaters on for 3 minutes, then off for 3 minutes, and saves the curve.'
     }
   }
 
   async function onStartTest() {
     if (busy) return
     const confirmed = window.confirm(
-      'Start the Initial Heating test? Heaters stay on until the rise stops getting steeper, then turn off.',
+      'Start the Initial Heating test? The heaters stay on for 3 minutes, then off for 3 minutes.',
     )
     if (!confirmed) return
     busy = true

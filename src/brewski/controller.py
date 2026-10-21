@@ -16,15 +16,19 @@ the I2C LCD, the panel buttons, the LED relays, and the target encoder.
 
 from __future__ import annotations
 
+import io
 import logging
 import math
 import subprocess
 import threading
 import time
+import weakref
+import zipfile
 from dataclasses import replace
 
 from brewski import __version__, analysis
 from brewski.calibration import MARK_START, CalibrationSession
+from brewski.consolelog import ConsoleCapture, console_log_text
 from brewski.emergency import summary
 from brewski.lcd import (
     Display,
@@ -617,6 +621,19 @@ class ControllerError(Exception):
         self.status = status
 
 
+def _console_context(owner: weakref.ReferenceType) -> tuple[int | None, float | None]:
+    """The open run and its clock. Cooldown keeps the same run after Stop."""
+
+    controller = owner()
+    if controller is None:
+        return None, None
+    if controller._run_id is not None:
+        return controller._run_id, controller._elapsed
+    if controller._cooldown_run_id is not None:
+        return controller._cooldown_run_id, controller._cooldown_elapsed
+    return None, None
+
+
 class Controller:
     def __init__(
         self,
@@ -721,6 +738,8 @@ class Controller:
         # Heater mask already written to this run's log, so a later tick only
         # records a line when the SSR actually changes.
         self._logged_heaters: list[bool] | None = None
+        self._console: ConsoleCapture | None = None
+        self._install_console()
         if display is not None:
             self._display = display
             self._display_key = display_key(self.store.get_settings())
@@ -740,6 +759,42 @@ class Controller:
             if temp is not None and temp < SAFE_TEMP_F:
                 self._complete_cooldown(self.store.get_settings())
         self._record_timeline_point()
+
+    def _install_console(self) -> None:
+        """Keep brewski log lines on the open run.
+
+        A controller that has already been freed drops its handler here, so
+        tests do not pile handlers onto the process logger.
+        """
+
+        log = logging.getLogger("brewski")
+        # The service prints INFO. A test run often leaves the root logger at
+        # WARNING, which would drop those lines before this handler saw them.
+        # Leave a louder setting alone so DEBUG still reaches the console.
+        if log.getEffectiveLevel() > logging.INFO:
+            log.setLevel(logging.INFO)
+        for existing in list(log.handlers):
+            if isinstance(existing, ConsoleCapture) and not existing.alive():
+                log.removeHandler(existing)
+                existing.close()
+        owner = weakref.ref(self)
+        self._console = ConsoleCapture(self.store, lambda: _console_context(owner), owner)
+        log.addHandler(self._console)
+
+    def _detach_console(self) -> None:
+        handler = getattr(self, "_console", None)
+        if handler is None:
+            return
+        self._console = None
+        log = logging.getLogger("brewski")
+        log.removeHandler(handler)
+        handler.close()
+
+    def __del__(self) -> None:
+        try:
+            self._detach_console()
+        except Exception:
+            return
 
     def start_loop(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -768,6 +823,7 @@ class Controller:
         closer = getattr(self.source, "close", None)
         if closer is not None:
             closer()
+        self._detach_console()
 
     def tick(self, dt: float) -> None:
         """Advance the simulation and the run clock by ``dt`` seconds."""
@@ -836,6 +892,23 @@ class Controller:
             logs = self.store.run_logs(run_id)
         label = "calibration" if kind == "calibration" else "run"
         return control_log_csv(logs or []), f"brewski-{label}-{run_id}-log.csv"
+
+    def run_export(self, run_id: int) -> tuple[bytes, str]:
+        """Zip of the control-log CSV and the console output captured for this run."""
+
+        with self._lock:
+            kind = self.store.run_kind(run_id)
+            if kind is None:
+                raise ControllerError("Run not found", 404)
+            logs = self.store.run_logs(run_id) or []
+            lines = self.store.console_lines(run_id)
+        label = "calibration" if kind == "calibration" else "run"
+        stem = f"brewski-{label}-{run_id}"
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(f"{stem}-log.csv", control_log_csv(logs))
+            archive.writestr(f"{stem}-console.log", console_log_text(lines or []))
+        return buffer.getvalue(), f"{stem}.zip"
 
     def update_settings(self, patch: dict) -> dict:
         with self._lock:
@@ -1271,7 +1344,7 @@ class Controller:
             and self._run_kind == "test"
             and self._mode in ("running", "paused")
         ):
-            return suite_run_lines(self._suite.phase, self._elapsed, probes, heaters)
+            return suite_run_lines(self._suite.phase, self._suite.phase_elapsed(), probes, heaters)
         lcd = self._calibration_lcd()
         forecast = self._forecast(settings)
         if forecast["seconds_to_target"] is not None:
@@ -2633,7 +2706,12 @@ class Controller:
         payload = clean_detail(detail)
         self.store.add_run_log(target, elapsed, event, message, payload)
         if event != "sample":
-            logger.info("Run %s %s", target, message)
+            logger.info(
+                "Run %s %s",
+                target,
+                message,
+                extra={"brewski_run_id": target, "brewski_elapsed": elapsed},
+            )
 
     def _note_control_log(self, dt: float, settings: Settings) -> None:
         """Save the control reading about once a second.

@@ -39,6 +39,17 @@ def test_a_soaking_element_fits_an_exponential_and_a_straight_line_does_not():
     straight = [(float(step), 70.0 + 0.2 * step) for step in range(0, 80)]
     assert fit_heating_lag(straight) is None
 
+    # 13°F in about a minute is only the start of a 265s soak. Reporting the
+    # asymptote would claim ~89°F/min and a ~90°F coast.
+    short = []
+    wild_rate = 89.3 / 60.0
+    wild_tau = 265.0
+    for step in range(0, 71):
+        elapsed = float(step)
+        rise = wild_rate * (elapsed - wild_tau * (1.0 - math.exp(-elapsed / wild_tau)))
+        short.append((elapsed, 128.8 + rise))
+    assert fit_heating_lag(short) is None
+
 
 def test_cold_start_is_a_parabola_and_a_shorter_coast_crests_lower():
     samples = [(float(t), 70.0 + 0.01 * t * t) for t in range(21)]

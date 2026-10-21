@@ -131,6 +131,15 @@ CREATE TABLE IF NOT EXISTS run_logs (
 
 CREATE INDEX IF NOT EXISTS run_logs_run_id ON run_logs(run_id, id);
 
+CREATE TABLE IF NOT EXISTS console_logs (
+    id INTEGER PRIMARY KEY,
+    run_id INTEGER NOT NULL REFERENCES runs(id),
+    recorded_at TEXT NOT NULL,
+    line TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS console_logs_run_id ON console_logs(run_id, id);
+
 CREATE TABLE IF NOT EXISTS samples (
     id INTEGER PRIMARY KEY,
     run_id INTEGER NOT NULL REFERENCES runs(id),
@@ -486,6 +495,7 @@ class Store:
 
         with self._connect() as connection:
             connection.execute("DELETE FROM run_logs")
+            connection.execute("DELETE FROM console_logs")
             connection.execute("DELETE FROM run_marks")
             connection.execute("DELETE FROM samples")
             connection.execute("DELETE FROM runs")
@@ -973,6 +983,38 @@ class Store:
                 (run_id, max(0, int(after_id))),
             ).fetchall()
         return [_log_dict(row) for row in rows]
+
+    def add_console_line(self, run_id: int, line: str) -> None:
+        """Attach one console line to a run. A missing run is ignored."""
+
+        with self._connect() as connection:
+            found = connection.execute("SELECT 1 FROM runs WHERE id = ?", (run_id,)).fetchone()
+            if found is None:
+                return
+            connection.execute(
+                """
+                INSERT INTO console_logs (run_id, recorded_at, line)
+                VALUES (?, ?, ?)
+                """,
+                (run_id, utc_now(), line),
+            )
+
+    def console_lines(self, run_id: int) -> list[str] | None:
+        """Console lines for a run, in the order they were written. None if it is missing."""
+
+        with self._connect() as connection:
+            found = connection.execute("SELECT 1 FROM runs WHERE id = ?", (run_id,)).fetchone()
+            if found is None:
+                return None
+            rows = connection.execute(
+                """
+                SELECT line FROM console_logs
+                WHERE run_id = ?
+                ORDER BY id
+                """,
+                (run_id,),
+            ).fetchall()
+        return [row["line"] for row in rows]
 
     def _logs_for(self, run_id: int) -> list[dict]:
         with self._connect() as connection:

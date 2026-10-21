@@ -82,7 +82,7 @@ export function startRouter() {
     if (!link || link.target === '_blank' || link.hasAttribute('download') || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
     const url = new URL(link.href, window.location.origin)
     if (url.origin !== window.location.origin) return
-    // CSV export and other API URLs are real requests. Treating them as pages shows "Page not found".
+    // Run export and other API URLs are real requests. Treating them as pages shows "Page not found".
     if (url.pathname === '/api' || url.pathname.startsWith('/api/')) return
     event.preventDefault()
     if (url.pathname === window.location.pathname) {

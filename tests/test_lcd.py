@@ -162,53 +162,32 @@ def test_initial_heating_names_the_phase_and_holds_the_slope():
     assert all(len(line) <= COLUMNS for line in settle)
 
     heating = suite_run_lines("heating", 12, [("Boiler", 74.2)], [(True, True), (True, False)])
-    assert heating[0] == "Init Heat:  00:00:12"
-    assert heating[1] == "Heaters on"
+    assert heating[0] == "Heat on:    00:00:12"
+    assert heating[1] == "On for 3:00"
     assert heating[3] == "H1: ON       H2: OFF"
     assert all(len(line) <= COLUMNS for line in heating)
 
-    done = suite_result_lines(
-        {
-            "found": True,
-            "stopped": False,
-            "rise_f": 12.4,
-            "seconds": 38,
-            "slope_f_per_min": 26.0,
-        }
-    )
+    coasting = suite_run_lines("coast", 40, [("Boiler", 90.0)], [(True, False), (True, False)])
+    assert coasting[0] == "Heat off:   00:00:40"
+    assert coasting[1] == "Off for 3:00"
+    assert all(len(line) <= COLUMNS for line in coasting)
+
+    done = suite_result_lines({"found": True, "on_seconds": 180, "off_seconds": 180})
     assert done == [
-        "Init Heat done",
-        "+12.4 F in 38s",
-        "Slope:    26.0 F/min",
+        "Recording saved",
+        "On:             3:00",
+        "Off:            3:00",
         "STOP end",
     ]
     assert all(len(line) <= COLUMNS for line in done)
 
-    exponential = suite_result_lines(
-        {
-            "found": True,
-            "approach_f_per_min": 18.0,
-            "tau_seconds": 42,
-            "coast_rise_f": 12.6,
-        }
-    )
-    assert exponential == [
-        "Rate:     18.0 F/min",
-        "Tau:             42s",
-        "Coast:       +12.6 F",
-        "STOP end",
-    ]
-    assert all(len(line) <= COLUMNS for line in exponential)
-
-    missed = suite_result_lines(
-        {"found": False, "stopped": False, "rise_f": 4.1, "seconds": 180, "slope_f_per_min": 1.4}
-    )
-    assert missed[1] == "No straight rise"
-    assert missed[2] == "+4.1 F in 180s"
+    missed = suite_result_lines({"found": False, "stopped": True, "on_seconds": 24})
+    assert missed[0] == "Stopped early"
+    assert missed[1] == "On:             0:24"
     assert missed[3] == "STOP end"
 
     early = suite_result_lines({"found": False, "stopped": True})
-    assert early[1] == "Stopped early"
+    assert early[0] == "Stopped early"
     assert early[3] == "STOP end"
 
 
@@ -456,16 +435,16 @@ def test_a_line_that_ends_early_still_paints_the_rows_under_it():
     display = HardwareDisplay(lcd)
     display.write(
         [
-            "Init Heat done",
-            "+12.4 F in 38s",
-            "Slope:    26.0 F/min",
+            "Recording saved",
+            "On:             3:00",
+            "Off:            3:00",
             "STOP end",
         ]
     )
     assert [text.strip() for _pos, text in lcd.writes] == [
-        "Init Heat done",
-        "+12.4 F in 38s",
-        "Slope:    26.0 F/min",
+        "Recording saved",
+        "On:             3:00",
+        "Off:            3:00",
         "STOP end",
     ]
     assert [pos[0] for pos, _text in lcd.writes] == [0, 1, 2, 3]

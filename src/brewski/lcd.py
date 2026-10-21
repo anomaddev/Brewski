@@ -597,6 +597,63 @@ def _degrees_per_min(value: float) -> str:
     return f"{float(value):.1f} F/min"
 
 
+def suite_run_lines(
+    phase: str,
+    elapsed_seconds: float,
+    probes: list[tuple[str, float | None]],
+    heaters: list[tuple[bool, bool]],
+) -> list[str]:
+    """Settle or Initial Heating. The clock, the probe, and the heaters."""
+
+    label = "Settle:" if phase == "settle" else "Init Heat:"
+    state = "Heaters off" if phase == "settle" else "Heaters on"
+    return frame(
+        [
+            _pair(label, format_clock(elapsed_seconds)),
+            state,
+            _probe_line(probes),
+            _heater_line(heaters),
+        ]
+    )
+
+
+def suite_result_lines(result: dict) -> list[str]:
+    """Hold the Initial Heating numbers until Stop."""
+
+    found = bool(result.get("found"))
+    rise = result.get("rise_f")
+    seconds = result.get("seconds")
+    slope = result.get("slope_f_per_min")
+    if found and slope is not None and rise is not None and seconds is not None:
+        return frame(
+            [
+                "Init Heat done",
+                _span_line(float(rise), float(seconds)),
+                _pair("Slope:", _degrees_per_min(float(slope))),
+                "STOP end",
+            ]
+        )
+    reason = "Stopped early" if result.get("stopped") else "No straight rise"
+    rows = ["Init Heat done", reason]
+    if rise is not None and seconds is not None:
+        rows.append(_span_line(float(rise), float(seconds)))
+    while len(rows) < 3:
+        rows.append("")
+    rows.append("STOP end")
+    return frame(rows)
+
+
+def _span_line(rise: float, seconds: float) -> str:
+    return clip_line(f"{_signed_degrees(rise)} in {_brief_seconds(seconds)}")
+
+
+def _brief_seconds(seconds: float) -> str:
+    value = float(seconds)
+    if abs(value - round(value)) < 0.05:
+        return f"{int(round(value))}s"
+    return f"{value:.1f}s"
+
+
 def _mode_label(mode: str, calibrating: bool) -> str:
     if calibrating and mode in {"running", "paused"}:
         return "Calibrate:"

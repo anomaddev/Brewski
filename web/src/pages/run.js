@@ -104,8 +104,8 @@ export function mountRun(root, params) {
 
   function render(run) {
     document.title = `Brewski — Run ${run.id}`
-    document.getElementById('run-title').textContent =
-      run.kind === 'calibration' ? `Calibration ${run.id}` : `Run ${run.id}`
+    const titles = { calibration: 'Calibration', test: 'Test' }
+    document.getElementById('run-title').textContent = `${titles[run.kind] || 'Run'} ${run.id}`
     const badge = document.getElementById('run-status')
     badge.textContent = statusLabel(run.status)
     badge.className = `status-badge ${statusClass(run.status)}`

@@ -858,6 +858,14 @@ tr[data-href] { cursor: pointer; }
 .status-badge.status-stopped { background: rgba(248, 113, 113, 0.15); color: #fca5a5; }
 .status-badge.status-idle { background: rgba(148, 163, 184, 0.15); color: #cbd5e1; }
 .status-badge.status-calibration { background: rgba(109, 124, 255, 0.16); color: #c7d2fe; }
+.status-badge.status-test { background: rgba(251, 191, 36, 0.16); color: #fcd34d; }
+.test-review {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(251, 191, 36, 0.12);
+}
+.test-review p { margin: 0; }
 
 .overview-stats,
 .detail-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }

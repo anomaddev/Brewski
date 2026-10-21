@@ -204,9 +204,13 @@ def indicator_leds(
     mode: str,
     *,
     emergency: bool,
+    review: bool = False,
 ) -> tuple[bool, bool]:
     """Start LED, then stop LED. On only while that button will do something."""
 
+    if review and mode not in ("running", "paused"):
+        # The test result is holding the display. Stop clears it.
+        return False, True
     if emergency:
         # Start stays refused. Stop still stops an open run, and once the
         # still is idle or cooling a hold opens the software menu.

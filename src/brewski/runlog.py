@@ -22,6 +22,7 @@ PHASE_LABELS = {
     "approach_coast": "Stage II coast",
     "pulses": "Pulses",
     "hold": "Stage III",
+    "heating": "Initial Heating",
     "run": "Run",
     "cutoff": "Run",
     "sustain": "Run",
@@ -118,6 +119,8 @@ def start_message(
     rate = _rate(numbers.get("linear_rate_f_per_sec"))
     coast = _deg(numbers.get("coast_rise_f"))
     seconds = _deg(numbers.get("coast_seconds"), 0)
+    if kind == "test":
+        return "Initial Heating test started."
     if kind == "calibration":
         bits = []
         if rate:
@@ -134,6 +137,29 @@ def start_message(
     if learned:
         return f"Run started at {aim}°F. Learned coast {learned}°F."
     return f"Run started at {aim}°F."
+
+
+def suite_result_message(result: dict | None) -> str:
+    """One line when an Initial Heating test holds its result."""
+
+    measured = result or {}
+    slope = measured.get("slope_f_per_sec")
+    minutes = measured.get("slope_f_per_min")
+    seconds = measured.get("seconds")
+    if measured.get("found") and slope is not None and minutes is not None and seconds is not None:
+        return (
+            f"Initial Heating slope {float(slope):.5f}°F/s "
+            f"({float(minutes):.1f}°F/min) over {float(seconds):.0f}s."
+        )
+    if slope is not None and seconds is not None:
+        why = "stopped early" if measured.get("stopped") else "did not go straight"
+        return (
+            f"Initial Heating {why}. Slope so far {float(slope):.5f}°F/s "
+            f"over {float(seconds):.0f}s."
+        )
+    if measured.get("stopped"):
+        return "Initial Heating stopped before the heaters came on."
+    return "Initial Heating ended before the rise went straight."
 
 
 def model_message(model: dict | None) -> str:

@@ -101,7 +101,19 @@ export function mountStatusStrip(host) {
     const mode = host.querySelector('[data-strip="mode"]')
     mode.textContent = statusLabel(status.mode)
     mode.className = `status-badge ${statusClass(status.mode)}`
-    host.querySelector('[data-strip="kind"]').hidden = status.run_kind !== 'calibration'
+    const kind = host.querySelector('[data-strip="kind"]')
+    const testing = status.run_kind === 'test' || Boolean(status.test && status.test.review)
+    if (status.run_kind === 'calibration') {
+      kind.hidden = false
+      kind.textContent = 'Calibration'
+      kind.className = 'status-badge status-calibration'
+    } else if (testing) {
+      kind.hidden = false
+      kind.textContent = 'Test'
+      kind.className = 'status-badge status-test'
+    } else {
+      kind.hidden = true
+    }
     const active = status.mode === 'running' || status.mode === 'paused' || status.mode === 'cooling'
     const timer = host.querySelector('[data-strip="timer"]')
     timer.hidden = !active

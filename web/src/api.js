@@ -33,5 +33,6 @@ export const api = {
   pause: () => request('/api/runs/pause', { method: 'POST' }),
   resume: () => request('/api/runs/resume', { method: 'POST' }),
   stop: () => request('/api/runs/stop', { method: 'POST' }),
+  endTest: () => request('/api/tests/end', { method: 'POST' }),
   replaceHeater: (slot) => request(`/api/heaters/${slot}/replace`, { method: 'POST' }),
 }

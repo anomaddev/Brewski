@@ -111,6 +111,10 @@ def create_app(controller: Controller) -> Flask:
     def stop_run():
         return jsonify(controller.stop())
 
+    @app.post("/api/tests/end")
+    def end_test():
+        return jsonify(controller.end_test())
+
     @app.post("/api/heaters/<int:slot>/replace")
     def replace_heater(slot: int):
         return jsonify(controller.replace_heater(slot))

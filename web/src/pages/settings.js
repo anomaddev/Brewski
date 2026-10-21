@@ -1,6 +1,6 @@
 import { api } from '../api.js'
 import { numberStepper } from '../controls.js'
-import { aboveBoiling, formatHours } from '../format.js'
+import { aboveBoiling, formatHours, testSummary } from '../format.js'
 import { busFields, markPinClashes, panelFields, pinSelect, readGpio, syncI2cLabels, validatePins, writeGpio } from '../gpio.js'
 import { setSourceBadge } from '../layout.js'
 import { openPath } from '../router.js'
@@ -96,6 +96,18 @@ export function mountSettings(root) {
                 <input type="radio" name="update_source" value="beta" />
               </label>
             </div>
+            <div class="setting-list system-actions-list">
+              <div class="setting-row">
+                <div class="setting-copy">
+                  <h3>Test Suite</h3>
+                  <p class="help" id="suite-status">Turns the heaters on until the rise goes straight, then shows the slope.</p>
+                </div>
+                <div class="system-actions">
+                  <button class="action-btn start-btn" type="button" id="suite-start">Initial Heating</button>
+                  <button class="action-btn stop-btn" type="button" id="suite-end" hidden>End</button>
+                </div>
+              </div>
+            </div>
           </section>
           <section class="dashboard-card settings-card" aria-labelledby="system-title">
             <h2 class="card-title" id="system-title">System</h2>
@@ -184,6 +196,7 @@ export function mountSettings(root) {
 
   const form = document.getElementById('settings-form')
   const errorEl = document.getElementById('settings-error')
+  let busy = false
   const savedEl = document.getElementById('settings-saved')
   let locked = false
   let stopped = false
@@ -492,6 +505,67 @@ export function mountSettings(root) {
     }
   }
 
+  function renderSuite(status) {
+    const start = document.getElementById('suite-start')
+    const end = document.getElementById('suite-end')
+    const copy = document.getElementById('suite-status')
+    const test = status.test
+    const busy = status.mode === 'running' || status.mode === 'paused'
+    if (test && test.review) {
+      start.hidden = true
+      end.hidden = false
+      copy.textContent = testSummary(test)
+      return
+    }
+    end.hidden = true
+    start.hidden = false
+    start.disabled = busy || (status.emergency || []).length > 0
+    if (status.run_kind === 'test') {
+      copy.textContent = 'Initial Heating is running. The result stays up until End.'
+    } else if (busy) {
+      copy.textContent = 'Initial Heating waits until the still is idle.'
+    } else {
+      copy.textContent = 'Turns the heaters on until the rise goes straight, then shows the slope.'
+    }
+  }
+
+  async function onStartTest() {
+    if (busy) return
+    const confirmed = window.confirm(
+      'Start the Initial Heating test? Heaters turn on until the rise goes straight, then turn off.',
+    )
+    if (!confirmed) return
+    busy = true
+    try {
+      await api.start({ kind: 'test', test: 'initial_heating' })
+      errorEl.hidden = true
+      openPath('/')
+    } catch (error) {
+      errorEl.hidden = false
+      errorEl.textContent = error.message
+    } finally {
+      busy = false
+    }
+  }
+
+  async function onEndTest() {
+    if (busy) return
+    busy = true
+    try {
+      await api.endTest()
+      errorEl.hidden = true
+      await refreshLock()
+    } catch (error) {
+      errorEl.hidden = false
+      errorEl.textContent = error.message
+    } finally {
+      busy = false
+    }
+  }
+
+  document.getElementById('suite-start').addEventListener('click', onStartTest)
+  document.getElementById('suite-end').addEventListener('click', onEndTest)
+
   async function refreshLock() {
     if (stopped) return
     const status = await api.status()
@@ -499,6 +573,7 @@ export function mountSettings(root) {
     renderAbout(status)
     applyLock(status.settings_locked)
     renderElementHours(status.heater_life_seconds)
+    renderSuite(status)
   }
 
   api.settings()

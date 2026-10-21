@@ -1,6 +1,6 @@
 import { api } from '../api.js'
 import { openPath } from '../router.js'
-import { escapeHtml, formatCooldown, formatDuration, formatHours, formatTarget, formatWhen, statusClass, statusLabel } from '../format.js'
+import { escapeHtml, formatCooldown, formatDuration, formatHours, formatTarget, formatWhen, kindBadge, statusClass, statusLabel } from '../format.js'
 import { setSourceBadge } from '../layout.js'
 
 export function mountHistory(root) {
@@ -94,13 +94,9 @@ export function mountHistory(root) {
             formatDuration(run.heater_on_seconds[heater.index] || 0),
           ]),
         ]
-        const calibration =
-          run.kind === 'calibration'
-            ? '<span class="status-badge status-calibration">Calibration</span> '
-            : ''
         cells.push([
           'Status',
-          `${calibration}<span class="status-badge ${statusClass(run.status)}">${statusLabel(run.status)}</span>`,
+          `${kindBadge(run.kind)}<span class="status-badge ${statusClass(run.status)}">${statusLabel(run.status)}</span>`,
         ])
         return `
           <tr data-href="/history/${run.id}">

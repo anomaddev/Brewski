@@ -226,18 +226,18 @@ def test_stop_hold_opens_the_software_menu_without_changing_the_target(controlle
         "Software Menu      v",
         "> About",
         "  Networking",
-        "  Check for Update",
+        "  Test Suite",
     ]
     assert store.get_settings().target_temp_f == 165
     assert controller.status()["target_temp_f"] == 165
 
-    controller._panel = _Panel((0, 0, 0, 3))
+    controller._panel = _Panel((0, 0, 0, 4))
     controller._apply_panel()
     assert controller._display.lines[3] == "> Reboot"
     assert store.get_settings().target_temp_f == 165
     assert controller.status()["target_temp_f"] == 165
 
-    controller._panel = _Panel((0, 0, 0, -3))
+    controller._panel = _Panel((0, 0, 0, -4))
     controller._apply_panel()
     assert controller._display.lines[1] == "> About"
 
@@ -328,7 +328,7 @@ def test_software_menu_closes_when_a_run_starts(controller):
 def _open_update_item(controller):
     controller._panel = _Panel((0, 0, 1, 0))
     controller._apply_panel()
-    controller._panel = _Panel((0, 0, 0, 2))
+    controller._panel = _Panel((0, 0, 0, 3))
     controller._apply_panel()
     controller._panel = _Panel((1, 0, 0, 0))
     controller._apply_panel()
@@ -414,7 +414,7 @@ def test_menu_reboot_confirms_then_reports_a_refusal(controller, monkeypatch):
     monkeypatch.setattr("brewski.controller.request_reboot", refuse)
     controller._panel = _Panel((0, 0, 1, 0))
     controller._apply_panel()
-    controller._panel = _Panel((0, 0, 0, 3))
+    controller._panel = _Panel((0, 0, 0, 4))
     controller._apply_panel()
     assert controller._display.lines[3] == "> Reboot"
     controller._panel = _Panel((1, 0, 0, 0))

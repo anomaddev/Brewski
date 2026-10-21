@@ -16,6 +16,8 @@ from brewski.lcd import (
     prompt_lines,
     startup_lines,
     status_lines,
+    suite_result_lines,
+    suite_run_lines,
 )
 from brewski.sources.dummy import DummySource
 from brewski.store import I2cDevice, default_settings
@@ -147,6 +149,51 @@ def test_calibration_steps_name_the_climb_the_fall_and_the_result():
     coast_only = _screen(mode="cooling", calibration_peak_f=15.1, elapsed_seconds=12)
     assert coast_only[1] == "Coast:       +15.1 F"
     assert len(coast_only[1]) == COLUMNS
+
+
+def test_initial_heating_names_the_phase_and_holds_the_slope():
+    settle = suite_run_lines("settle", 2, [("Boiler", 70.0)], [(True, False), (True, False)])
+    assert settle == [
+        "Settle:     00:00:02",
+        "Heaters off",
+        "Boiler:       70.0 F",
+        "H1: OFF      H2: OFF",
+    ]
+    assert all(len(line) <= COLUMNS for line in settle)
+
+    heating = suite_run_lines("heating", 12, [("Boiler", 74.2)], [(True, True), (True, False)])
+    assert heating[0] == "Init Heat:  00:00:12"
+    assert heating[1] == "Heaters on"
+    assert heating[3] == "H1: ON       H2: OFF"
+    assert all(len(line) <= COLUMNS for line in heating)
+
+    done = suite_result_lines(
+        {
+            "found": True,
+            "stopped": False,
+            "rise_f": 12.4,
+            "seconds": 38,
+            "slope_f_per_min": 26.0,
+        }
+    )
+    assert done == [
+        "Init Heat done",
+        "+12.4 F in 38s",
+        "Slope:    26.0 F/min",
+        "STOP end",
+    ]
+    assert all(len(line) <= COLUMNS for line in done)
+
+    missed = suite_result_lines(
+        {"found": False, "stopped": False, "rise_f": 4.1, "seconds": 180, "slope_f_per_min": 1.4}
+    )
+    assert missed[1] == "No straight rise"
+    assert missed[2] == "+4.1 F in 180s"
+    assert missed[3] == "STOP end"
+
+    early = suite_result_lines({"found": False, "stopped": True})
+    assert early[1] == "Stopped early"
+    assert early[3] == "STOP end"
 
 
 def test_idle_paused_and_cooling():

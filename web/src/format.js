@@ -47,6 +47,43 @@ export function formatWhen(iso) {
   }
 }
 
+export function kindBadge(kind) {
+  if (kind === 'calibration') {
+    return '<span class="status-badge status-calibration">Calibration</span> '
+  }
+  if (kind === 'test') {
+    return '<span class="status-badge status-test">Test</span> '
+  }
+  return ''
+}
+
+export function testSummary(test) {
+  if (!test) return ''
+  if (!test.review) {
+    if (test.phase === 'settle') return 'Initial Heating. Settling with the elements off.'
+    if (test.phase === 'heating') return 'Initial Heating. Heaters are on until the rise goes straight.'
+    return 'Initial Heating.'
+  }
+  const slope = test.slope_f_per_min == null ? null : `${Number(test.slope_f_per_min).toFixed(1)}°F/min`
+  const perSec = test.slope_f_per_sec == null ? null : `${Number(test.slope_f_per_sec).toFixed(5)}°F/s`
+  const rise = test.rise_f == null ? null : `${Number(test.rise_f) >= 0 ? '+' : ''}${Number(test.rise_f).toFixed(1)}°F`
+  const seconds = test.seconds == null ? null : `${Math.round(Number(test.seconds))}s`
+  const start = test.start_temp_f == null ? null : `${Number(test.start_temp_f).toFixed(1)}°F`
+  const linear = test.linear_temp_f == null ? null : `${Number(test.linear_temp_f).toFixed(1)}°F`
+  const measured = rise && seconds ? ` ${rise} over ${seconds}.` : ''
+  if (test.found && slope) {
+    const rate = perSec ? ` (${perSec})` : ''
+    const temps = start && linear ? ` From ${start} to ${linear}.` : ''
+    return `Initial Heating slope ${slope}${rate} over ${seconds}, rise ${rise}.${temps}`
+  }
+  if (test.stopped) {
+    const soFar = slope ? ` Slope so far ${slope}.` : ''
+    return `Initial Heating stopped before the rise went straight.${measured}${soFar}`
+  }
+  const soFar = slope ? ` Slope so far ${slope}.` : ''
+  return `Initial Heating did not find a straight rise.${measured}${soFar}`
+}
+
 export function statusLabel(status) {
   if (status === 'running') return 'Running'
   if (status === 'paused') return 'Paused'

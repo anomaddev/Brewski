@@ -258,12 +258,12 @@ def test_software_menu_lines_and_leds():
         menu_title("v"),
         "> About",
         "  Networking",
-        "  Check for Update",
+        "  Test Suite",
     ]
     assert len(menu.lines("0.6.5")[0]) == 20
     assert menu.leds() == (True, True)
     assert menu.move(2) is True
-    assert menu.lines("0.6.5")[3] == "> Check for Update"
+    assert menu.lines("0.6.5")[3] == "> Test Suite"
     menu.index = 0
     menu.top = 0
     assert menu.move(-1) is False
@@ -299,7 +299,7 @@ def test_software_menu_lines_and_leds():
     assert menu.select() is None
 
     menu.back()
-    menu.index = 2
+    menu.index = 3
     assert menu.select() == "check"
     assert menu.lines("0.6.5")[1] == "Checking..."
     menu.show_release(
@@ -343,10 +343,10 @@ def test_software_menu_lines_and_leds():
 
 def test_the_menu_scrolls_when_the_highlight_leaves_the_window():
     menu = SoftwareMenu()
-    menu.move(3)
+    menu.move(4)
     assert menu.lines("0.6.5") == [
         menu_title("^"),
-        "  Networking",
+        "  Test Suite",
         "  Check for Update",
         "> Reboot",
     ]
@@ -376,5 +376,37 @@ def test_networking_screen_shows_the_address_and_hostname():
     assert clipped[2] == "Host: this-hostname-"
     assert all(len(line) <= 20 for line in clipped)
     assert menu.select() is None
+    assert menu.back() is True
+    assert menu.screen == "list"
+
+
+def test_test_suite_confirms_before_initial_heating():
+    menu = SoftwareMenu()
+    menu.index = 2
+    assert menu.select() is None
+    assert menu.screen == "suite"
+    assert menu.lines("0.6.5") == [
+        "Test Suite",
+        "> Initial Heating",
+        "",
+        "",
+    ]
+    assert menu.leds() == (True, True)
+    assert menu.select() is None
+    assert menu.screen == "suite-confirm"
+    assert menu.lines("0.6.5") == [
+        "Initial Heating?",
+        "Heaters will turn on",
+        "START begin",
+        "STOP cancel",
+    ]
+    assert menu.back() is True
+    assert menu.screen == "suite"
+    menu.select()
+    assert menu.select() == "test"
+    assert menu.chosen_test == "initial_heating"
+    menu.show_notice("Result still up", "End it first")
+    assert menu.lines("0.6.5")[0] == "Result still up"
+    assert menu.leds() == (False, True)
     assert menu.back() is True
     assert menu.screen == "list"

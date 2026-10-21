@@ -1058,7 +1058,8 @@ class Store:
             run["heater_on_seconds"] = heater_on_seconds(samples, run["elapsed_seconds"])
             runs.append(run)
 
-        production = [run for run in runs if run["kind"] != "calibration"]
+        production = [run for run in runs if run["kind"] == "run"]
+        calibration_count = sum(1 for run in runs if run["kind"] == "calibration")
         finished = [run for run in production if run["status"] == "stopped"]
         average = 0.0
         if finished:
@@ -1078,7 +1079,7 @@ class Store:
         return {
             "stats": {
                 "total_runs": len(production),
-                "calibration_runs": len(runs) - len(production),
+                "calibration_runs": calibration_count,
                 "average_duration_seconds": average,
                 "average_cooldown_seconds": average_cooldown,
                 "heater_on_seconds": heater_totals,

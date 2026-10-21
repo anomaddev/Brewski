@@ -1,7 +1,14 @@
 import csv
 import io
 
-from brewski.runlog import analysis_message, control_log_csv, format_control, model_message, start_message
+from brewski.runlog import (
+    analysis_message,
+    control_log_csv,
+    format_control,
+    model_message,
+    start_message,
+    suite_result_message,
+)
 
 
 def test_a_heating_line_shows_the_probe_slope_when_the_sheath_is_still_flat():
@@ -80,6 +87,10 @@ def test_a_run_line_shows_the_shutoff_coast_and_a_held_heater():
 def test_start_and_model_lines_name_the_numbers_a_run_began_with():
     assert start_message("calibration", 150, None, None) == (
         "Calibration started at 150°F. No prior heating model."
+    )
+    assert start_message("test", 165, None, 3) == "Initial Heating test started."
+    assert "0.20000°F/s" in suite_result_message(
+        {"found": True, "slope_f_per_sec": 0.2, "slope_f_per_min": 12.0, "seconds": 38}
     )
     assert "linear 0.400°F/s" in start_message(
         "run",

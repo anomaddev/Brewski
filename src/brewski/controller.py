@@ -26,7 +26,16 @@ from dataclasses import replace
 from brewski import __version__, analysis
 from brewski.calibration import MARK_START, CalibrationSession
 from brewski.emergency import summary
-from brewski.lcd import Display, NullDisplay, display_key, open_display, startup_lines, status_lines
+from brewski.lcd import (
+    Display,
+    NullDisplay,
+    display_key,
+    open_display,
+    startup_lines,
+    status_lines,
+    suite_result_lines,
+    suite_run_lines,
+)
 from brewski.menu import SoftwareMenu
 from brewski.network import display_identity
 from brewski.panel import indicator_leds, open_panel, panel_key
@@ -38,10 +47,12 @@ from brewski.runlog import (
     format_control,
     model_message,
     model_numbers,
+    suite_result_message,
     phase_message,
     start_message,
 )
 from brewski.sources.base import HardwareSource
+from brewski.suite import TEST_INITIAL_HEATING, InitialHeatingSession
 from brewski.updates import (
     ReleaseInfo,
     apply_supported,
@@ -655,6 +666,8 @@ class Controller:
         self._run_kind = "run"
         self._charge_gallons: float | None = None
         self._session: CalibrationSession | None = None
+        self._suite: InitialHeatingSession | None = None
+        self._test_review: dict | None = None
         self._run_model: ThermalModel | None = None
         # The model already saved when this calibration started. Later commits
         # fold the new measurements into this copy, not into their own output.
@@ -898,6 +911,8 @@ class Controller:
             self._since_sample = 0.0
             self._since_log = 0.0
             self._clear_coast()
+            self._suite = None
+            self._test_review = None
             self._clear_cooldown()
             self._clear_predict()
             self._set_heaters([False] * SLOT_COUNT, release_off_dwell=True)
@@ -967,22 +982,31 @@ class Controller:
 
     def start(self, patch: dict | None = None) -> dict:
         with self._lock:
+            if self._test_review is not None:
+                raise ControllerError("End the test result before starting a run", 409)
             if self._mode == "cooling":
                 self._abandon_cooldown()
             elif self._mode != "idle":
                 raise ControllerError("A run is already open", 409)
             patch = patch or {}
-            if set(patch) - {"target_temp_f", "kind", "charge_gallons"}:
+            if set(patch) - {"target_temp_f", "kind", "charge_gallons", "test"}:
                 raise ControllerError(
-                    "Start only accepts target_temp_f, kind, and charge_gallons",
+                    "Start only accepts target_temp_f, kind, charge_gallons, and test",
                     400,
                 )
             kind = patch.get("kind", "run")
-            if kind not in ("run", "calibration"):
-                raise ControllerError("kind must be run or calibration", 400)
+            if kind not in ("run", "calibration", "test"):
+                raise ControllerError("kind must be run, calibration, or test", 400)
+            if kind == "test":
+                if patch.get("test") != TEST_INITIAL_HEATING:
+                    raise ControllerError("Unknown test", 400)
+                if "charge_gallons" in patch or "target_temp_f" in patch:
+                    raise ControllerError("A test does not take a target or a still size", 400)
+            elif "test" in patch:
+                raise ControllerError("test is only for a test run", 400)
             if kind != "calibration" and "charge_gallons" in patch:
                 raise ControllerError("charge_gallons is only for a calibration", 400)
-            if kind != "calibration" and self.store.get_settings().learned_coast_f is None:
+            if kind == "run" and self.store.get_settings().learned_coast_f is None:
                 raise ControllerError("Calibrate the still before starting a run", 409)
             gallons = None
             if patch.get("charge_gallons") is not None:
@@ -1015,7 +1039,10 @@ class Controller:
             self._run_kind = kind
             self._charge_gallons = gallons
             self._session = CalibrationSession() if kind == "calibration" else None
-            self._run_model = None if kind == "calibration" else model_from_dict(settings.thermal_model)
+            self._suite = InitialHeatingSession() if kind == "test" else None
+            self._run_model = (
+                None if kind in ("calibration", "test") else model_from_dict(settings.thermal_model)
+            )
             self._sheath_slope = 0.0
             self._coast_f = None
             self._coast_seconds = None
@@ -1045,7 +1072,7 @@ class Controller:
                 run_settings = replace(settings, target_temp_f=int(CALIBRATION_TEMP_F))
             run = self.store.create_run(run_settings, kind=kind, charge_gallons=gallons)
             self._run_id = int(run["id"])
-            if kind == "calibration":
+            if kind in ("calibration", "test"):
                 self._add_mark(MARK_START)
             detail = self._control_detail(settings)
             prior = self._calibration_prior if kind == "calibration" else self._run_model
@@ -1072,6 +1099,8 @@ class Controller:
         with self._lock:
             if self._mode != "running":
                 raise ControllerError("There is no running run to pause", 409)
+            if self._run_kind == "test":
+                raise ControllerError("A test cannot be paused", 409)
             settings = self.store.get_settings()
             self._pulse_until = None
             self._decision = {"path": "pause", "heat": False}
@@ -1109,10 +1138,35 @@ class Controller:
 
     def stop(self) -> dict:
         with self._lock:
-            if self._mode not in ("running", "paused"):
+            if self._mode in ("running", "paused"):
+                self._finish_run()
+                return self._status()
+            if not self._clear_test_review():
                 raise ControllerError("There is no open run to stop", 409)
-            self._finish_run()
-            return self._status()
+            status = self._status()
+        self._refresh_display()
+        return status
+
+    def end_test(self) -> dict:
+        """Clear a finished test result. A test that is still heating is left running."""
+
+        with self._lock:
+            if self._test_review is None:
+                if self._mode in ("running", "paused") and self._suite is not None:
+                    raise ControllerError("The test is still running", 409)
+                raise ControllerError("There is no test result to end", 409)
+            self._clear_test_review()
+            status = self._status()
+        self._refresh_display()
+        return status
+
+    def _clear_test_review(self) -> bool:
+        """Caller holds ``self._lock``. True when a result was on screen."""
+
+        if self._test_review is None:
+            return False
+        self._test_review = None
+        return True
 
     def _show_startup(self, step: str) -> None:
         self._display.write(startup_lines(step))
@@ -1146,7 +1200,11 @@ class Controller:
                 led_state = self._menu.leds()
             else:
                 lines = self._panel_lines(settings) if key is not None else None
-                led_state = indicator_leds(self._mode, emergency=bool(self._emergency))
+                led_state = indicator_leds(
+                    self._mode,
+                    emergency=bool(self._emergency),
+                    review=self._test_review is not None,
+                )
         self._sync_panel()
         if self._panel is not None:
             self._panel.set_leds(*led_state)  # type: ignore[attr-defined]
@@ -1200,6 +1258,15 @@ class Controller:
         ]
         elapsed = self._cooldown_elapsed if self._mode == "cooling" else self._elapsed
         code = self._emergency[0] if self._emergency else None
+        if not code and self._test_review is not None and self._mode not in ("running", "paused"):
+            return suite_result_lines(self._test_review)
+        if (
+            not code
+            and self._suite is not None
+            and self._run_kind == "test"
+            and self._mode in ("running", "paused")
+        ):
+            return suite_run_lines(self._suite.phase, self._elapsed, probes, heaters)
         lcd = self._calibration_lcd()
         forecast = self._forecast(settings)
         if forecast["seconds_to_target"] is not None:
@@ -1297,8 +1364,9 @@ class Controller:
             return
         self._elapsed += dt
         self._note_heater_dwell(dt)
-        phase_before = self._session.phase if self._session is not None else None
+        phase_before = self._active_phase()
         self._advance_calibration(settings)
+        self._advance_suite(settings)
         if self._mode != "running":
             return
         self._step_sheath(dt, settings)
@@ -1316,6 +1384,22 @@ class Controller:
 
     def _finish_run(self) -> None:
         settings = self.store.get_settings()
+        suite = self._suite
+        if suite is not None:
+            if not suite.finished:
+                found = self._current_control(settings)
+                if found is not None:
+                    temp = float(found[1])
+                elif suite.samples:
+                    temp = suite.samples[-1][1]
+                else:
+                    temp = 0.0
+                suite.abort(self._elapsed, temp)
+                for name in suite.pending_marks:
+                    self._add_mark(name)
+            self._publish_test(suite)
+            self._suite = None
+            self._run_kind = "run"
         session = self._session
         if session is not None:
             if session.model.coast_rise_f is not None or session.model.linear_rate_f_per_sec is not None:
@@ -1683,6 +1767,40 @@ class Controller:
             self._commit_model(settings)
         if session.finished:
             self._finish_run()
+
+    def _advance_suite(self, settings: Settings) -> None:
+        """Move an Initial Heating test one reading."""
+
+        suite = self._suite
+        if suite is None or self._run_kind != "test" or self._mode != "running":
+            return
+        found = self._current_control(settings)
+        if found is None:
+            return
+        suite.observe(self._elapsed, found[1])
+        for name in suite.pending_marks:
+            self._add_mark(name)
+        if suite.finished:
+            self._finish_run()
+
+    def _publish_test(self, suite: InitialHeatingSession) -> None:
+        payload = suite.payload(review=True, run_id=self._run_id)
+        self._test_review = payload
+        self._log("test", suite_result_message(payload), payload)
+
+    def _active_phase(self) -> str | None:
+        if self._session is not None:
+            return self._session.phase
+        if self._suite is not None:
+            return self._suite.phase
+        return None
+
+    def _test_payload(self) -> dict | None:
+        if self._suite is not None and self._mode in ("running", "paused"):
+            return self._suite.payload(review=False, run_id=self._run_id)
+        if self._test_review is not None:
+            return dict(self._test_review)
+        return None
 
     def _step_sheath(self, dt: float, settings: Settings) -> None:
         """Move the crest entry for a normal run. Calibration steps its own."""
@@ -2272,6 +2390,13 @@ class Controller:
         if not control_indexes or control_indexes[0] >= len(temps):
             self._decision = {"path": "run", "heat": False}
             return off
+        if self._suite is not None and self._run_kind == "test":
+            heat = bool(self._suite.heat) and not self._suite.finished
+            trace = dict(self._suite.trace)
+            trace["heat"] = heat
+            trace.setdefault("path", self._suite.phase)
+            self._decision = trace
+            return [heat and settings.heaters[index].enabled for index in range(SLOT_COUNT)]
         if self._session is not None and self._run_kind == "calibration":
             heat = bool(self._session.heat) and not self._session.finished
             trace = dict(self._session.trace)
@@ -2423,8 +2548,8 @@ class Controller:
             phase = path
         elif self._mode == "cooling" or path == "cooldown":
             phase = "cooldown"
-        elif self._session is not None:
-            phase = self._session.phase
+        elif self._active_phase() is not None:
+            phase = self._active_phase()
         else:
             phase = "run"
         detail: dict = {
@@ -2515,7 +2640,7 @@ class Controller:
 
         if self._run_id is None:
             return
-        phase = self._session.phase if self._session is not None else None
+        phase = self._active_phase()
         if phase_before is not None and phase is not None and phase != phase_before:
             detail = self._control_detail(settings)
             self._log("phase", phase_message(phase, detail), detail)
@@ -2533,7 +2658,7 @@ class Controller:
         heaters = [False] * SLOT_COUNT
         for index, on in enumerate(self._heaters[:SLOT_COUNT]):
             heaters[index] = bool(on) and settings.heaters[index].enabled
-        phase = self._session.phase if self._session is not None else "run"
+        phase = self._active_phase() or "run"
         self.store.add_sample(
             run_id=self._run_id,
             elapsed_seconds=round(self._elapsed, 2),
@@ -2590,6 +2715,7 @@ class Controller:
             if self._mode in ("running", "paused") and self._run_kind == "calibration"
             else settings.charge_gallons,
             "run_kind": self._run_kind if self._mode in ("running", "paused") else None,
+            "test": self._test_payload(),
             "coast_f": self._coast_f if self._mode in ("running", "paused") else None,
             "coast_seconds": self._coast_seconds if self._mode in ("running", "paused") else None,
             "calibration_settled": self._calibration_settled
@@ -2819,6 +2945,8 @@ class Controller:
             snapshot = self.status()
             if snapshot["emergency_codes"]:
                 return moved or dismissed or painted
+            if snapshot.get("test") and snapshot["test"].get("review"):
+                return moved or dismissed or painted
             if snapshot["mode"] == "paused":
                 self.resume()
             elif snapshot["mode"] in ("idle", "cooling"):
@@ -2871,6 +2999,7 @@ class Controller:
 
     def _apply_menu(self, starts: int, stops: int, steps: int) -> bool:
         action: str | None = None
+        test_id: str | None = None
         generation = self._menu_generation
         close = False
         changed = False
@@ -2892,6 +3021,8 @@ class Controller:
                 if action == "check":
                     self._menu_generation += 1
                     generation = self._menu_generation
+                if action == "test":
+                    test_id = menu.chosen_test
                 changed = True
         if changed:
             self._refresh_display()
@@ -2901,7 +3032,29 @@ class Controller:
             self._install_from_menu()
         elif action == "reboot":
             self._reboot_from_menu()
+        elif action == "test":
+            self._start_suite(test_id or "")
         return changed
+
+    def _start_suite(self, test_id: str) -> None:
+        try:
+            self.start({"kind": "test", "test": test_id})
+        except ControllerError as exc:
+            logger.warning("Could not start the test from the menu")
+            with self._lock:
+                menu = self._menu
+                if menu is not None:
+                    if "End the test" in exc.message:
+                        menu.show_notice("Result still up", "End it first")
+                    elif "already open" in exc.message:
+                        menu.show_notice("Run is open", "")
+                    else:
+                        menu.show_notice("Could not start", "")
+            self._refresh_display()
+            return
+        with self._lock:
+            self._menu = None
+        self._refresh_display()
 
     def _start_menu_check(self, generation: int) -> None:
         thread = threading.Thread(

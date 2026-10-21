@@ -21,8 +21,10 @@ import {
   formatHours,
   formatTarget,
   formatWhen,
+  kindBadge,
   statusClass,
   statusLabel,
+  testSummary,
 } from '../format.js'
 import { setAppVersion, setSourceBadge } from '../layout.js'
 
@@ -40,6 +42,7 @@ function forecastText(status) {
 function coastText(status) {
   const eta = forecastText(status)
   const withEta = (text) => (eta ? `${text} ${eta}` : text)
+  if (status.test && !status.test.review) return testSummary(status.test)
   if (status.run_kind === 'calibration' && (status.mode === 'running' || status.mode === 'paused')) {
     const crest =
       status.predicted_crest_f == null ? '' : ` Predicted crest ${Number(status.predicted_crest_f).toFixed(1)}°F.`
@@ -74,8 +77,7 @@ function coastText(status) {
 
 function runBadge(run) {
   const status = `<span class="status-badge ${statusClass(run.status)}">${statusLabel(run.status)}</span>`
-  if (run.kind !== 'calibration') return status
-  return `<span class="status-badge status-calibration">Calibration</span> ${status}`
+  return `${kindBadge(run.kind)}${status}`
 }
 
 function runsInWindow(runs, windowStart, windowEnd) {
@@ -133,6 +135,9 @@ export function mountDashboard(root) {
             </div>
           </div>
           <p class="coast-readout" id="coast-readout"></p>
+          <div class="test-review" id="test-review" hidden>
+            <p id="test-review-copy"></p>
+          </div>
           <div class="console-launch">
             <div class="status-actions" id="actions"></div>
             <div class="run-setup" id="run-setup">
@@ -369,9 +374,27 @@ export function mountDashboard(root) {
     }
   }
 
+  async function onEndTest() {
+    if (busy) return
+    busy = true
+    try {
+      await api.endTest()
+      clearError()
+      await refresh()
+    } catch (error) {
+      showError(error.message)
+    } finally {
+      busy = false
+    }
+  }
+
   async function onStop() {
     if (busy) return
-    if (!window.confirm('Stop this run? Heaters turn off and the run is saved.')) return
+    const testing = lastStatus && lastStatus.run_kind === 'test'
+    const message = testing
+      ? 'Stop this test? Heaters turn off and the result stays on screen until End.'
+      : 'Stop this run? Heaters turn off and the run is saved.'
+    if (!window.confirm(message)) return
     busy = true
     try {
       await api.stop()
@@ -400,10 +423,24 @@ export function mountDashboard(root) {
     banner.textContent = codes.map((item) => `${item.code}: ${item.summary}`).join(' ')
   }
 
-  function renderActions(mode, ready, emergency) {
+  function renderActions(status) {
     const host = document.getElementById('actions')
+    const mode = status.mode
+    const ready = status.learned_coast_f != null
+    const emergency = (status.emergency || []).length > 0
+    const review = Boolean(status.test && status.test.review)
     if (emergency) {
       host.innerHTML = ''
+      return
+    }
+    if (review && mode !== 'running' && mode !== 'paused') {
+      host.innerHTML = `<button class="action-btn stop-btn" type="button" id="end-test">End</button>`
+      host.querySelector('#end-test').addEventListener('click', onEndTest)
+      return
+    }
+    if (mode === 'running' && status.run_kind === 'test') {
+      host.innerHTML = `<button class="action-btn stop-btn" type="button" id="stop-btn">Stop</button>`
+      host.querySelector('#stop-btn').addEventListener('click', onStop)
       return
     }
     if (mode === 'running') {
@@ -559,20 +596,34 @@ export function mountDashboard(root) {
     syncTargetWarning()
     calibrated = status.learned_coast_f != null
     const emergency = (status.emergency || []).map((item) => item.code).join(',')
-    const actionKey = `${status.mode}:${calibrated ? 'ready' : 'raw'}:${emergency}`
+    const review = Boolean(status.test && status.test.review)
+    const actionKey = `${status.mode}:${calibrated ? 'ready' : 'raw'}:${emergency}:${status.run_kind || ''}:${review ? 'review' : ''}`
     if (renderedMode !== actionKey) {
       renderedMode = actionKey
-      renderActions(status.mode, calibrated, Boolean(emergency))
+      renderActions(status)
     }
     const charge = document.getElementById('charge-gallons')
     if (!charge.dataset.ready && status.charge_gallons != null && document.activeElement !== charge) {
       charge.value = String(status.charge_gallons)
       charge.dataset.ready = '1'
     }
-    const calibrating = status.run_kind === 'calibration'
-    document.getElementById('run-kind').hidden = !calibrating
+    const kindBadgeEl = document.getElementById('run-kind')
+    if (status.run_kind === 'calibration') {
+      kindBadgeEl.hidden = false
+      kindBadgeEl.textContent = 'Calibration'
+      kindBadgeEl.className = 'status-badge status-calibration'
+    } else if (status.run_kind === 'test' || review) {
+      kindBadgeEl.hidden = false
+      kindBadgeEl.textContent = 'Test'
+      kindBadgeEl.className = 'status-badge status-test'
+    } else {
+      kindBadgeEl.hidden = true
+    }
     document.getElementById('run-setup').hidden = status.mode === 'running' || status.mode === 'paused'
-    document.getElementById('coast-readout').textContent = coastText(status)
+    const result = document.getElementById('test-review')
+    result.hidden = !review
+    if (review) document.getElementById('test-review-copy').textContent = testSummary(status.test)
+    document.getElementById('coast-readout').textContent = review ? '' : coastText(status)
 
     const history = await api.runs()
     renderRuns(history.runs.slice(0, 8))
@@ -586,7 +637,9 @@ export function mountDashboard(root) {
         : status.mode === 'running' || status.mode === 'paused'
           ? status.run_kind === 'calibration'
             ? 'Calibration'
-            : 'Run'
+            : status.run_kind === 'test'
+              ? 'Test'
+              : 'Run'
           : ''
 
     listedRuns = history.runs

@@ -7,17 +7,21 @@ target dial moves the highlight, Start chooses the line, and Stop goes back.
 from __future__ import annotations
 
 from brewski.lcd import COLUMNS, _pair, clip_line
+from brewski.suite import TEST_INITIAL_HEATING, TEST_LABEL
 from brewski.updates import ReleaseInfo, about_identity, offer_ends
 
 # The panel is four rows. The title stays put and the list under it scrolls.
 VISIBLE = 3
-ITEMS = ("about", "networking", "update", "reboot")
+ITEMS = ("about", "networking", "suite", "update", "reboot")
 LABELS = {
     "about": "About",
     "networking": "Networking",
+    "suite": "Test Suite",
     "update": "Check for Update",
     "reboot": "Reboot",
 }
+TESTS = (TEST_INITIAL_HEATING,)
+TEST_LABELS = {TEST_INITIAL_HEATING: TEST_LABEL}
 
 
 class SoftwareMenu:
@@ -30,29 +34,30 @@ class SoftwareMenu:
         self.release: ReleaseInfo | None = None
         self.can_apply = False
         self.failed = False
+        self.suite_index = 0
+        self.suite_top = 0
+        self.chosen_test = TEST_INITIAL_HEATING
+        self.notice: tuple[str, str] = ("", "")
 
     def move(self, steps: int) -> bool:
         """Move the highlight by every dial step accumulated since the last paint."""
 
-        if self.screen != "list" or not steps:
+        if not steps:
             return False
-        count = len(ITEMS)
-        index = self.index + int(steps)
-        if index < 0:
-            index = 0
-        elif index >= count:
-            index = count - 1
-        if index == self.index:
-            return False
-        self.index = index
-        self._reveal()
-        return True
+        if self.screen == "list":
+            return self._slide(len(ITEMS), steps, "index", "top")
+        if self.screen == "suite":
+            return self._slide(len(TESTS), steps, "suite_index", "suite_top")
+        return False
 
     def back(self) -> bool:
         """Leave the current screen. False means the menu itself should close."""
 
         if self.screen in {"list", "rebooting"}:
             return self.screen == "rebooting"
+        if self.screen == "suite-confirm":
+            self.screen = "suite"
+            return True
         self.screen = "list"
         self.release = None
         self.can_apply = False
@@ -75,6 +80,11 @@ class SoftwareMenu:
             if item == "networking":
                 self.screen = "networking"
                 return None
+            if item == "suite":
+                self.screen = "suite"
+                self.suite_index = 0
+                self.suite_top = 0
+                return None
             if item == "update":
                 self.screen = "checking"
                 self.release = None
@@ -83,6 +93,12 @@ class SoftwareMenu:
             self.screen = "reboot"
             self.failed = False
             return None
+        if self.screen == "suite":
+            self.chosen_test = TESTS[self.suite_index]
+            self.screen = "suite-confirm"
+            return None
+        if self.screen == "suite-confirm":
+            return "test"
         if self.screen == "update" and self._can_install():
             return "apply"
         if self.screen == "reboot" and not self.failed:
@@ -99,12 +115,18 @@ class SoftwareMenu:
         self.screen = "reboot"
         self.failed = True
 
+    def show_notice(self, heading: str, detail: str = "") -> None:
+        """A short refusal. Stop returns to the software list."""
+
+        self.screen = "notice"
+        self.notice = (heading, detail)
+
     def leds(self) -> tuple[bool, bool]:
         """Start LED, then stop LED. On only while that button will do something."""
 
         if self.screen == "rebooting":
             return False, False
-        start_on = self.screen == "list" or self._can_install() or (
+        start_on = self.screen in {"list", "suite", "suite-confirm"} or self._can_install() or (
             self.screen == "reboot" and not self.failed
         )
         return start_on, True
@@ -122,6 +144,14 @@ class SoftwareMenu:
             rows = ["About", "Brewski", about_line(update_source, version, revision), "STOP back"]
         elif self.screen == "networking":
             rows = network_lines(address, hostname)
+        elif self.screen == "suite":
+            rows = self._suite_lines()
+        elif self.screen == "suite-confirm":
+            label = TEST_LABELS.get(self.chosen_test, TEST_LABEL)
+            rows = [f"{label}?", "Heaters will turn on", "START begin", "STOP cancel"]
+        elif self.screen == "notice":
+            heading, detail = self.notice
+            rows = [heading, detail, "", "STOP back"]
         elif self.screen == "checking":
             rows = ["Check for Update", "Checking...", "", "STOP cancel"]
         elif self.screen == "update":
@@ -136,27 +166,30 @@ class SoftwareMenu:
             rows = self._list_lines()
         return [clip_line(row) for row in rows]
 
+    def _slide(self, count: int, steps: int, index_name: str, top_name: str) -> bool:
+        index = getattr(self, index_name) + int(steps)
+        if index < 0:
+            index = 0
+        elif index >= count:
+            index = count - 1
+        if index == getattr(self, index_name):
+            return False
+        setattr(self, index_name, index)
+        setattr(self, top_name, _window_top(index, getattr(self, top_name), count))
+        return True
+
     def _reveal(self) -> None:
         """Slide the window so the highlight stays on the three item rows."""
 
-        visible = min(VISIBLE, len(ITEMS))
-        if self.index < self.top:
-            self.top = self.index
-        elif self.index >= self.top + visible:
-            self.top = self.index - visible + 1
+        self.top = _window_top(self.index, self.top, len(ITEMS))
 
     def _list_lines(self) -> list[str]:
         self._reveal()
-        visible = min(VISIBLE, len(ITEMS))
-        hint = scroll_hint(self.top, visible, len(ITEMS))
-        rows = [menu_title(hint)]
-        for offset in range(visible):
-            index = self.top + offset
-            mark = ">" if index == self.index else " "
-            rows.append(f"{mark} {LABELS[ITEMS[index]]}")
-        while len(rows) < 4:
-            rows.append("")
-        return rows
+        return _menu_rows("Software Menu", ITEMS, LABELS, self.index, self.top)
+
+    def _suite_lines(self) -> list[str]:
+        self.suite_top = _window_top(self.suite_index, self.suite_top, len(TESTS))
+        return _menu_rows("Test Suite", TESTS, TEST_LABELS, self.suite_index, self.suite_top)
 
     def _can_install(self) -> bool:
         release = self.release
@@ -182,6 +215,34 @@ class SoftwareMenu:
         return ["Update available", f"{left} -> {right}", action, "STOP back"]
 
 
+def _window_top(index: int, top: int, count: int) -> int:
+    visible = min(VISIBLE, count)
+    if index < top:
+        return index
+    if index >= top + visible:
+        return index - visible + 1
+    return top
+
+
+def _menu_rows(
+    title: str,
+    items: tuple[str, ...],
+    labels: dict[str, str],
+    index: int,
+    top: int,
+) -> list[str]:
+    visible = min(VISIBLE, len(items))
+    hint = scroll_hint(top, visible, len(items))
+    rows = [menu_title(hint, title)]
+    for offset in range(visible):
+        item_index = top + offset
+        mark = ">" if item_index == index else " "
+        rows.append(f"{mark} {labels[items[item_index]]}")
+    while len(rows) < 4:
+        rows.append("")
+    return rows
+
+
 def scroll_hint(top: int, visible: int, count: int) -> str:
     """A mark for rows above the window, rows below it, or both."""
 
@@ -196,8 +257,7 @@ def scroll_hint(top: int, visible: int, count: int) -> str:
     return ""
 
 
-def menu_title(hint: str) -> str:
-    left = "Software Menu"
+def menu_title(hint: str, left: str = "Software Menu") -> str:
     if not hint:
         return left
     gap = COLUMNS - len(left) - len(hint)

@@ -34,9 +34,9 @@ stateDiagram-v2
     Paused --> Running: Resume
     Running --> Stopped: Stop
     Paused --> Stopped: Stop
-    Stopped --> Cooldown: control probe above 90°F
+    Stopped --> Cooldown: control probe above 100°F
     Calibrating --> Cooldown: run closes
-    Cooldown --> Idle: probe under 90°F
+    Cooldown --> Idle: probe under 100°F
 ```
 
 ### First launch
@@ -66,7 +66,7 @@ Until that model exists, heaters turn off by the measured coast, sooner when the
 - Without a measured cooling rate, they turn back on when the probe falls 2°F below that coast.
 - Once a cooling rate is known but the exponential model is not, a run still turns off at that coast, then uses one short pulse when the probe sags about 1°F.
 
-While the pot is rising, Brewski estimates how long until the target, including the coast after the SSR opens. While it is falling, Brewski estimates how long until the control probe is under 90°F. Both show on the status payload, the LCD target line, and the sample log.
+While the pot is rising, Brewski estimates how long until the target, including the coast after the SSR opens. While it is falling, Brewski estimates how long until the control probe is under 100°F. Both show on the status payload, the LCD target line, and the sample log.
 
 A heater that has just turned on stays on for at least the minimum on time, and one that has just turned off stays off for at least the minimum off time (each 1 second unless changed). Both dwells keep a zero-crossing SSR from chattering. Pause and Stop still turn the heaters off immediately. Disabled heaters stay off.
 
@@ -94,9 +94,7 @@ From the dashboard, with the pot filled with water. Calibrate does not use the r
 | Pulse | One predicted pulse climbs toward 160°F and stays on until opening now would crest at 160°F. A shorter pulse follows only when that coast lands short. |
 | Holding | Keeps 160°F for ten minutes. Opens before the probe reaches 160°F so the coast finishes on the target. |
 
-A later calibration is averaged into the model already saved, one equal share per run. Clean Calibration, after a confirmation, erases that model and locks normal runs until the next calibration. Past runs stay in the history.
-
-After the run closes, a full pass over the samples can revise the model for the next run. That pass uses Grok when `GROK_API_KEY` is set, and the local fit stands when the key is missing or the answer is far from the math. The heater loop never waits on it.
+A later calibration is averaged into the model already saved, one equal share per run. Clean Calibration, after a confirmation, erases that model and locks normal runs until the next calibration. Past runs stay in the history. The saved model is the local fit. A calibration run does not ask Grok to revise it.
 
 The calibration uses the still size from setup. A different size scales rates and rises, not the soak or coast time constants.
 
@@ -104,11 +102,11 @@ Calibration runs stay in the log with their own badge and are left out of the ru
 
 ### Cooldown
 
-A cooldown is the stretch after a run while the control probe is still above 90°F. Timing starts the first time the control probe reaches the aim during the run, and also when Stop finds the probe above 90°F even if the aim was never reached. Heaters stay off. The cooldown ends when the probe falls under 90°F. Those readings stay on the dashboard chart, and the time is saved.
+A cooldown is the stretch after a run while the control probe is still above 100°F. Timing starts the first time the control probe reaches the aim during the run, and also when Stop finds the probe above 100°F even if the aim was never reached. Heaters stay off. The cooldown ends when the probe falls under 100°F. Those readings stay on the dashboard chart, and the time is saved.
 
-A power cut resumes an open cooldown. The dashboard and the LCD estimate how long until the probe is under 90°F from the live falling slope, or from the learned cooling rate. The dashboard and the history page show the average of every finished cooldown.
+A power cut resumes an open cooldown. The dashboard and the LCD estimate how long until the probe is under 100°F from the live falling slope, or from the learned cooling rate. The dashboard and the history page show the average of every finished cooldown.
 
-Starting a new run marks the open cooldown interrupted. A stop at or under 90°F does not open one.
+Starting a new run marks the open cooldown interrupted. A stop at or under 100°F does not open one.
 
 ### Changes during a run
 
@@ -228,9 +226,9 @@ The Vite dev server reloads the UI as you edit `web/`, and it proxies `/api` to 
 | `BREWSKI_PORT` | API port. |
 | `BREWSKI_DATA_DIR` | Database directory. |
 | `BREWSKI_DEV_PORT` | Vite port. Default 5173. |
-| `GROK_API_KEY` | Lets a calibration ask Grok for a second reading of each stage. |
+| `GROK_API_KEY` | Read by the unused calibration analysis in `src/brewski/analysis.py`. A calibration run does not call it. |
 
-Dev can put `GROK_API_KEY` in a local `.env`. The Pi service does not load dotenv: set the key in the service environment if the Pi should call Grok. The key is never written into the repository or into `deploy/brewski.service`.
+Dev can put `GROK_API_KEY` in a local `.env`. The Pi service does not load dotenv. The key is never written into the repository or into `deploy/brewski.service`.
 
 ## Install on a Raspberry Pi
 
@@ -301,7 +299,7 @@ Time, elapsed seconds, temperatures, heater states, and the target that was acti
 
 ### Control log
 
-Each calibration and each still run keeps a diagnostic log. A line is written about once a second, including while the run is paused and while the pot cools, and also when the heaters change, a calibration stage changes, the heating model is saved, or an analysis result comes back. The line records the control temperature, which heaters are on, and the slope, crest, and coast that decision used.
+Each calibration and each still run keeps a diagnostic log. A line is written about once a second, including while the run is paused and while the pot cools, and also when the heaters change, a calibration stage changes, or the heating model is saved. The line records the control temperature, which heaters are on, and the slope, crest, and coast that decision used.
 
 The run page shows the log. Export downloads a zip of that log as a CSV and the console output captured while the run was open, including cooldown. Resetting data clears both with the runs.
 

@@ -27,6 +27,41 @@ def test_a_heating_line_shows_the_probe_slope_when_the_sheath_is_still_flat():
     assert "90s to target" in message
 
 
+def test_a_hold_line_names_the_ramp_pulse_and_whether_it_fires():
+    firing = format_control(
+        {
+            "path": "hold",
+            "temp_f": 159.8,
+            "goal_f": 160,
+            "target_f": 160,
+            "predicted_crest_f": 160.13,
+            "linear_rate_f_per_sec": 0.328,
+            "pulse_seconds": 1.0,
+            "on_seconds": 0,
+            "heat": True,
+            "heaters_on": [True, True],
+        }
+    )
+    assert "159.8°F" in firing
+    assert "A 1.0s pulse at 0.328°F/s would land at 160.1°F" in firing
+    assert "Firing." in firing
+    waiting = format_control(
+        {
+            "path": "hold",
+            "temp_f": 160.1,
+            "goal_f": 160,
+            "predicted_crest_f": 160.43,
+            "linear_rate_f_per_sec": 0.328,
+            "pulse_seconds": 1.0,
+            "on_seconds": 0,
+            "heat": False,
+            "heaters_on": [False, False],
+        }
+    )
+    assert "Waiting." in waiting
+    assert "The probe is at the target." in waiting
+
+
 def test_a_flat_minimum_pulse_is_not_described_as_a_climb():
     message = format_control(
         {

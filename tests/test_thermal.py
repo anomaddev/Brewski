@@ -24,6 +24,7 @@ from brewski.thermal import (
     fit_startup_quad,
     heating_lag_coast,
     coast_sized_should_heat,
+    hold_maintenance_plan,
     hold_should_heat,
     predicted_crest,
     pulse_plan,
@@ -109,24 +110,26 @@ def test_linear_heat_projects_the_same_crest_from_the_current_temp():
     assert later < inside
 
 
-def test_hold_pulses_instead_of_running_to_the_target():
-    model = ThermalModel(
-        cold_start_seconds=20,
-        cold_start_quad=0.01,
-        linear_rate_f_per_sec=0.4,
-        coast_rise_f=8,
-        coast_seconds=20,
-        coast_quad=-8 / 400,
-    )
-    # Inside one crest, still on, slope not yet at the line. Turn off.
-    # Running until the probe reads 150 would release the whole crest past it.
-    assert hold_should_heat(146, 150, 5.0, model, 1.0, slope_f_per_sec=0.0) is False
-    # Far below: keep heating so the slope can reach the line.
-    assert hold_should_heat(100, 150, 5.0, model, 1.0, slope_f_per_sec=0.05) is True
-    # Off and cold: a minimum pulse still lands under the target, so start one.
-    assert hold_should_heat(146, 150, 0.0, model, 1.0, slope_f_per_sec=0.0) is True
-    # Off and already at the start of the crest: another pulse coasts past.
-    assert hold_should_heat(146, 150, 0.0, model, 1.0, slope_f_per_sec=0.4) is False
+def test_hold_pulses_at_the_measured_ramp_inside_one_degree():
+    # Calibration 16's ramp. A 1 second minimum adds 0.328°F.
+    model = ThermalModel(linear_rate_f_per_sec=0.328)
+    # Still on the target. A pulse waits.
+    assert hold_should_heat(160.1, 160.0, 0.0, model, 1.0) is False
+    # 159.8 + 0.328 = 160.13, inside 161, so the heaters close.
+    assert hold_should_heat(159.8, 160.0, 0.0, model, 1.0) is True
+    plan = hold_maintenance_plan(159.8, 160.0, 0.0, model, 1.0)
+    assert plan["predicted_crest_f"] == pytest.approx(160.13, abs=0.01)
+    assert plan["gain_f"] == pytest.approx(0.33, abs=0.01)
+    assert plan["linear_rate_f_per_sec"] == pytest.approx(0.328)
+    # Five seconds at this ramp lands at 161.54, past the band, so wait.
+    assert hold_should_heat(159.9, 160.0, 0.0, model, 5.0) is False
+    # A tiny ramp at 159°F lands short of 160, and the floor fires.
+    slow = ThermalModel(linear_rate_f_per_sec=0.05)
+    assert hold_should_heat(159.0, 160.0, 0.0, slow, 1.0) is True
+    assert hold_should_heat(159.5, 160.0, 0.0, slow, 1.0) is False
+    # A pulse already started runs out the minimum, then opens.
+    assert hold_should_heat(160.2, 160.0, 0.4, model, 1.0) is True
+    assert hold_should_heat(160.2, 160.0, 1.0, model, 1.0) is False
 
 
 def test_stage_three_holds_the_pulse_until_the_stored_coast_reaches_the_target():
@@ -160,13 +163,13 @@ def test_stage_three_holds_the_pulse_until_the_stored_coast_reaches_the_target()
     session = CalibrationSession()
     session.phase = "hold"
     session.guess = model
-    session.sheath_slope = 0.0
-    session._set_heat(10.0, 146.0, 5.0, 1.0)
+    # 159.7 + 0.4°F/s × 1s = 160.1, inside the band, so the hold fires.
+    session._set_heat(10.0, 159.7, 0.0, 1.0)
     assert session.heat is True
-    session.sheath_slope = 0.4
-    session._set_heat(20.0, 152.0, 15.0, 1.0)
+    assert session.predicted_crest == pytest.approx(160.1, abs=0.05)
+    # The minimum on time is already done, so this pulse opens.
+    session._set_heat(11.0, 159.9, 1.0, 1.0)
     assert session.heat is False
-    assert session.predicted_crest == pytest.approx(160.0, abs=0.05)
 
 
 def test_the_next_minute_is_the_coast_from_cutting_the_heaters_off_now():
@@ -449,9 +452,33 @@ def test_a_short_pulse_is_followed_by_a_shorter_one_and_hold_opens_before_160():
 
     session.phase = "hold"
     session.pulse_coasting = False
-    session.sheath_slope = 0.2
-    # 153°F plus 0.2°F/s times the coast constant lands on 160, so the hold opens now.
-    session._set_heat(300.0, 153.0, 20.0, 1.0)
+    # Seed ramp is 0.40°F/s. 159.7 + 0.40 lands at 160.1, so the hold fires.
+    session._set_heat(300.0, 159.7, 0.0, 1.0)
+    assert session.heat is True
+    assert session.predicted_crest == pytest.approx(160.1, abs=0.05)
+    assert session.pulse_coasting is False
+
+
+def test_a_hold_open_does_not_refit_the_coast():
+    session = CalibrationSession()
+    session.phase = "hold"
+    session.phase_started = 0.0
+    session.was_heating = True
+    session.heat = True
+    before = session.guess.coast_rise_f
+    # The probe is above the aim and the heaters have opened. That open is
+    # regulation, so the coast watch stays off and the rise stays put.
+    session.observe(10.0, 160.5, 0.0, 1.0)
+    assert session.phase == "hold"
     assert session.heat is False
-    assert session.predicted_crest == pytest.approx(CALIBRATION_TEMP_F, abs=0.5)
-    assert 153.0 < CALIBRATION_TEMP_F
+    assert session.pulse_coasting is False
+    assert session.guess.coast_rise_f == before
+
+    proving = CalibrationSession()
+    proving.phase = "pulse"
+    proving.was_heating = True
+    proving.sheath_slope = proving.guess.linear_rate_f_per_sec or 0.0
+    proving.observe(40.0, 150.0, 80.0, 1.0)
+    assert proving.phase == "pulse"
+    assert proving.heat is False
+    assert proving.pulse_coasting is True

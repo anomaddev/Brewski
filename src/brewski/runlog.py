@@ -11,6 +11,8 @@ import csv
 import io
 import math
 
+from brewski.thermal import SAFE_TEMP_F
+
 # Names that match the lines drawn on the run chart.
 PHASE_LABELS = {
     "settle": "Settle",
@@ -280,7 +282,9 @@ def format_control(detail: dict) -> str:
         return _approach(detail, coasting=False)
     if path in {"approach_coast", "pulse_coast"}:
         return _approach(detail, coasting=True)
-    if path in {"pulses", "hold", "model"}:
+    if path == "hold":
+        return _hold_sentence(detail)
+    if path in {"pulses", "model"}:
         return _crest_sentence(detail)
     if path == "sustain":
         return _sustain(detail)
@@ -322,6 +326,53 @@ def _approach(detail: dict, *, coasting: bool) -> str:
         body = _generic(detail, title="Pulse")
         return body
     return _join(body, _slope_sentence(detail)) + _eta(detail)
+
+
+def _hold_sentence(detail: dict) -> str:
+    """The hold names the minimum pulse, the ramp, and the landing."""
+
+    temp = _deg(detail.get("temp_f"))
+    landing = _deg(detail.get("predicted_crest_f"))
+    rate = _rate(detail.get("linear_rate_f_per_sec"))
+    pulse = _deg(detail.get("pulse_seconds"), 1)
+    on = detail.get("on_seconds")
+    on_now = isinstance(on, (int, float)) and not isinstance(on, bool) and on > 0
+    firing = bool(detail.get("heat"))
+    parts = ["Holding."]
+    if temp:
+        parts.append(f"{temp}°F.")
+    if on_now and pulse:
+        parts.append(f"On for {float(on):.1f}s of a {pulse}s pulse.")
+    elif pulse and rate and landing:
+        parts.append(f"A {pulse}s pulse at {rate}°F/s would land at {landing}°F.")
+    elif landing:
+        parts.append(f"Landing {landing}°F.")
+    parts.append("Firing." if firing else "Waiting.")
+    if not firing and not on_now:
+        reason = _hold_wait_reason(detail)
+        if reason:
+            parts.append(reason)
+    parts.append(heat_phrase(detail) + ".")
+    return " ".join(part for part in parts if part) + _eta(detail)
+
+
+def _hold_wait_reason(detail: dict) -> str:
+    """Why a hold sample left the heaters off."""
+
+    temp = _number(detail.get("temp_f"))
+    landing = _number(detail.get("predicted_crest_f"))
+    goal = _number(detail.get("goal_f"))
+    if goal is None:
+        goal = _number(detail.get("target_f"))
+    if temp is None or goal is None:
+        return ""
+    if temp >= goal:
+        return "The probe is at the target."
+    if landing is not None and landing > goal + 1.0:
+        return "That clears the target by more than 1°F."
+    if landing is not None and landing < goal:
+        return "That lands short of the target."
+    return ""
 
 
 def _crest_sentence(detail: dict) -> str:
@@ -472,7 +523,7 @@ def _eta(detail: dict) -> str:
     if isinstance(target, (int, float)) and not isinstance(target, bool):
         return f" ETA {float(target):.0f}s to target."
     if isinstance(cool, (int, float)) and not isinstance(cool, bool):
-        return f" {float(cool):.0f}s until 90°F."
+        return f" {float(cool):.0f}s until {SAFE_TEMP_F:.0f}°F."
     return ""
 
 

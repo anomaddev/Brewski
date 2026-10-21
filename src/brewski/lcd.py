@@ -94,6 +94,7 @@ class HardwareDisplay:
         self._lcd = lcd
         self._last: list[str] | None = None
         self._closed = False
+        self._hide_cursor()
 
     @property
     def hardware(self) -> bool:
@@ -111,16 +112,54 @@ class HardwareDisplay:
         for row, line in enumerate(framed):
             if previous is not None and previous[row] == line:
                 continue
-            self._lcd.cursor_pos = (row, 0)  # type: ignore[attr-defined]
-            try:
-                # Pad to the width so a shorter line erases what was there.
-                # RPLCD 1.3 then steps the cursor to column 20. That position
-                # is illegal, write_string raises, and the rows under this
-                # one never get sent. The glass keeps the previous screen.
-                self._lcd.write_string(f"{line:<{COLUMNS}}")  # type: ignore[attr-defined]
-            except ValueError:
-                pass
+            self._paint_row(row, line)
         self._last = framed
+
+    def _paint_row(self, row: int, line: str) -> None:
+        """Paint one row and leave the cursor on its last cell.
+
+        The rows of a 20×4 module are not stored in order. Column 20 of the
+        first row is the first cell of the third row, and column 20 of the
+        second row is the first cell of the fourth. RPLCD steps the cursor
+        onto that cell after the twentieth character, so the next reading is
+        drawn on the wrong line.
+        """
+
+        padded = f"{line:<{COLUMNS}}"
+        try:
+            self._lcd.cursor_pos = (row, 0)  # type: ignore[attr-defined]
+        except ValueError:
+            return
+        try:
+            self._lcd.write_string(padded[:-1])  # type: ignore[attr-defined]
+        except ValueError:
+            pass
+        self._write_last_cell(row, padded[-1])
+
+    def _write_last_cell(self, row: int, char: str) -> None:
+        col = COLUMNS - 1
+        try:
+            self._lcd.cursor_pos = (row, col)  # type: ignore[attr-defined]
+        except ValueError:
+            return
+        try:
+            self._lcd.write_string(char)  # type: ignore[attr-defined]
+        except ValueError:
+            pass
+        # The character above steps the cursor to column 20. Put it back on
+        # this cell so the address counter stays on this row.
+        try:
+            self._lcd.cursor_pos = (row, col)  # type: ignore[attr-defined]
+        except ValueError:
+            pass
+
+    def _hide_cursor(self) -> None:
+        if not hasattr(self._lcd, "cursor_mode"):
+            return
+        try:
+            self._lcd.cursor_mode = "hide"  # type: ignore[attr-defined]
+        except Exception:
+            logger.exception("Could not hide the LCD cursor")
 
     def clear(self) -> None:
         if self._closed:

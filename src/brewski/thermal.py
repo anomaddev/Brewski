@@ -32,11 +32,13 @@ TUNE_RATE_CAP_F_PER_SEC = 0.01
 TUNE_TAU_CAP_SECONDS = 2.0
 TUNE_RISE_CAP_F = 0.4
 # A cooldown is over, and the pot is safe to handle, under this temperature.
-SAFE_TEMP_F = 90.0
+SAFE_TEMP_F = 100.0
 SETTLE_SECONDS = 3.0
 LINEAR_HOLD_SECONDS = 15.0
 MOMENTUM_SECONDS = 2 * 60.0
 HOLD_SECONDS = 10 * 60.0
+# The hold stays inside this many degrees of 160°F, above and below.
+HOLD_BAND_F = 1.0
 # Stage I must not walk the pot up to the target. Leave the cold start here.
 COLD_START_MAX_SECONDS = 3 * 60.0
 SLOPE_WINDOW_SECONDS = 8.0
@@ -1216,7 +1218,7 @@ def coast_sized_should_heat(
     min_on_seconds: float,
     slope_f_per_sec: float | None = None,
 ) -> bool:
-    """True while a hold pulse should keep storing heat.
+    """True while a proving pulse should keep storing heat.
 
     The pulse stays on until the coast from the slope stored so far reaches
     the target. The heaters then open and that coast plays out. A wider gap
@@ -1236,29 +1238,72 @@ def coast_sized_should_heat(
     )["heat"]
 
 
+def hold_maintenance_plan(
+    temp_f: float,
+    target_f: float,
+    on_seconds: float,
+    model: ThermalModel,
+    min_on_seconds: float,
+) -> dict:
+    """Landing of one minimum pulse at the measured ramp, and whether to fire it.
+
+    The pulse adds ``linear_rate × min_on`` degrees. The coast after the SSR
+    opens is left out, because that crest kept a hold from firing while the
+    pot sagged. Heaters that are already on finish the minimum and then open.
+    A new pulse fires when that landing is on the target and at most
+    ``HOLD_BAND_F`` above it. A landing above the band waits. A landing short
+    of the target waits too, unless the probe is already ``HOLD_BAND_F`` below
+    the target, where the pulse fires so the sag stops.
+    """
+
+    rate = max(0.0, float(model.linear_rate_f_per_sec or 0.0))
+    minimum = max(0.0, float(min_on_seconds))
+    rise = rate * minimum
+    on = max(0.0, float(on_seconds))
+    if on > 0:
+        heat = minimum > 0 and on < minimum
+        landing = temp_f + rate * max(0.0, minimum - on)
+    else:
+        landing = temp_f + rise
+        if temp_f >= target_f:
+            heat = False
+        elif landing > target_f + HOLD_BAND_F:
+            heat = False
+        elif landing >= target_f or temp_f <= target_f - HOLD_BAND_F:
+            heat = True
+        else:
+            heat = False
+    return {
+        "heat": heat,
+        "slope_f_per_sec": round(rate, 5),
+        "linear_rate_f_per_sec": round(rate, 5),
+        "predicted_crest_f": round(landing, 2),
+        "gain_f": round(rise, 2),
+        "pulse_seconds": round(minimum, 2),
+        "on_seconds": round(on, 2),
+    }
+
+
 def hold_should_heat(
     temp_f: float,
     target_f: float,
     on_seconds: float,
     model: ThermalModel,
     min_on_seconds: float,
-    slope_f_per_sec: float | None = None,
 ) -> bool:
-    """True when the heater should be on so the fixed crest lands on target.
+    """True when a hold pulse at the measured ramp should be on.
 
-    Near the target the element pulses. It turns off once the crest from the
-    current sheath slope reaches the target, instead of staying on until the
-    probe itself reads the setpoint and then coasting past it.
+    A new pulse fires when the minimum on time, at the locked ramp, lands on
+    the target without clearing it by more than one degree. A pulse that has
+    already started stays on until that minimum has elapsed.
     """
 
-    return pulse_plan(
+    return hold_maintenance_plan(
         temp_f,
         target_f,
         on_seconds,
         model,
         min_on_seconds,
-        slope_f_per_sec,
-        budgeted=True,
     )["heat"]
 
 

@@ -428,7 +428,7 @@ def test_a_line_that_ends_early_still_paints_the_rows_under_it():
 
         def write_string(self, text: str) -> None:
             self.writes.append((self._pos, text))
-            if len(text) >= COLUMNS:
+            if self._pos[1] + len(text) >= COLUMNS:
                 raise ValueError("Cursor position (0, 20) invalid on a 4x20 LCD.")
 
     lcd = _Lcd()
@@ -441,13 +441,73 @@ def test_a_line_that_ends_early_still_paints_the_rows_under_it():
             "STOP end",
         ]
     )
-    assert [text.strip() for _pos, text in lcd.writes] == [
+    painted = [""] * 4
+    for pos, text in lcd.writes:
+        painted[pos[0]] = (painted[pos[0]] + (" " * pos[1]))[: pos[1]] + text
+    assert [line.strip() for line in painted] == [
         "Recording saved",
         "On:             3:00",
         "Off:            3:00",
         "STOP end",
     ]
-    assert [pos[0] for pos, _text in lcd.writes] == [0, 1, 2, 3]
+    assert lcd.cursor_pos == (3, COLUMNS - 1)
+
+
+def test_a_full_line_leaves_the_cursor_on_that_row():
+    """Column 20 of a 20x4 is the first cell of another row.
+
+    RPLCD steps there after the last character and does not raise when
+    automatic line breaks are off. The next reading is then drawn on the
+    wrong line.
+    """
+
+    # DDRAM: row 0 is 0x00, row 1 is 0x40, row 2 is 0x14, row 3 is 0x54.
+    offsets = (0x00, 0x40, COLUMNS, 0x40 + COLUMNS)
+
+    class _Lcd:
+        def __init__(self) -> None:
+            self.grid = [[" "] * COLUMNS for _ in range(4)]
+            self._pos = (0, 0)
+
+        @property
+        def cursor_pos(self) -> tuple[int, int]:
+            return self._pos
+
+        @cursor_pos.setter
+        def cursor_pos(self, value: tuple[int, int]) -> None:
+            row, col = value
+            if not 0 <= row < 4:
+                raise ValueError(f"Cursor position {value} invalid on a 4x20 LCD.")
+            address = offsets[row] + col
+            self._pos = _cell_at(address)
+
+        def write_string(self, text: str) -> None:
+            for char in text:
+                row, col = self._pos
+                if 0 <= row < 4 and 0 <= col < COLUMNS:
+                    self.grid[row][col] = char
+                self.cursor_pos = (row, col + 1)
+
+    lcd = _Lcd()
+    display = HardwareDisplay(lcd)
+    lines = ["Idle", "Target 165 F", "Boiler 76.4 F", "Heaters off"]
+    display.write(lines)
+    assert ["".join(row).rstrip() for row in lcd.grid] == lines
+    assert lcd.cursor_pos == (3, COLUMNS - 1)
+    lcd.grid[2][0] = "X"
+    display.write(["Idle", "Target 170 F", "Boiler 76.4 F", "Heaters off"])
+    assert lcd.grid[2][0] == "X"
+    assert "".join(lcd.grid[1]).rstrip() == "Target 170 F"
+
+
+def _cell_at(address: int) -> tuple[int, int]:
+    """Visual cell for one DDRAM address of a 20x4 module."""
+
+    spans = ((0, 0x00), (2, 0x14), (1, 0x40), (3, 0x54))
+    for row, start in spans:
+        if start <= address < start + COLUMNS:
+            return (row, address - start)
+    return (-1, address)
 
 
 def test_a_target_change_rewrites_only_that_row():
@@ -466,9 +526,9 @@ def test_a_target_change_rewrites_only_that_row():
     display.write(first)
     lcd.writes.clear()
     display.write(second)
-    assert len(lcd.writes) == 1
+    assert {pos[0] for pos, _text in lcd.writes} == {1}
     assert lcd.writes[0][0] == (1, 0)
-    assert "170 F" in lcd.writes[0][1]
+    assert "170 F" in "".join(text for _pos, text in lcd.writes)
 
 
 def test_a_broken_lgpio_import_does_not_stop_startup(tmp_path, monkeypatch):

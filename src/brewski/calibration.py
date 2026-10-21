@@ -5,7 +5,7 @@ straight rate, then the heaters open while the probe is still under 140°F.
 The coast learns the negative exponential up to equilibrium. That equilibrium
 is scored against 140°F and the guess is tuned. One predicted pulse climbs to
 160°F. A shorter pulse follows only when that coast lands short. The hold
-keeps 160°F for ten minutes.
+keeps 160°F for ten minutes with minimum pulses at the measured ramp.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from brewski.thermal import (
     fit_coast_exponential,
     formula_slope,
     heating_formula_temp,
+    hold_maintenance_plan,
     pulse_plan,
     seed_model,
     settled_linear_rate,
@@ -111,7 +112,7 @@ class CalibrationSession:
         )
         self._advance(elapsed, float(temp))
         self._set_heat(elapsed, float(temp), max(0.0, on_seconds), max(0.0, min_on))
-        if self.phase in {"pulse", "hold"} and self.was_heating and not self.heat:
+        if self.phase == "pulse" and self.was_heating and not self.heat:
             self.pulse_coasting = True
             self.open_elapsed = elapsed
             self.open_temp = temp
@@ -375,7 +376,14 @@ class CalibrationSession:
                 "slope_f_per_sec": round(slope, 5),
             }
             return
-        if self.phase in {"pulse", "hold"}:
+        if self.phase == "hold":
+            goal = CALIBRATION_TEMP_F
+            plan = hold_maintenance_plan(temp, goal, on_seconds, self.guess, min_on)
+            self.predicted_crest = plan["predicted_crest_f"]
+            self.heat = bool(plan["heat"])
+            self.trace = {"path": self.phase, "goal_f": goal, **plan}
+            return
+        if self.phase == "pulse":
             goal = CALIBRATION_TEMP_F
             plan = pulse_plan(
                 temp,

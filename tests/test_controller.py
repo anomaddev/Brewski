@@ -282,7 +282,7 @@ def test_time_to_target_includes_the_coast_and_cooldown_waits_for_a_fall():
     cool = seconds_to_cooldown(145.0, rate)
     assert cool is not None
     assert 0 < cool <= PREDICT_MAX_HORIZON_SECONDS
-    assert seconds_to_cooldown(160.0, None, learned_rate_f_per_min=2.0) == pytest.approx((160 - 90) / (2 / 60))
+    assert seconds_to_cooldown(160.0, None, learned_rate_f_per_min=2.0) == pytest.approx((160 - 100) / (2 / 60))
     assert seconds_to_cooldown(160.0, 0.2) is None
 
 
@@ -391,7 +391,7 @@ def test_calibration_learns_the_soak_then_opens_under_140(store):
         "Linear heating",
         "Coasting",
     ]
-    assert all(item["grok"] is None and item["accepted"] is False for item in run["analysis"])
+    assert run["analysis"] == []
 
     source.temps = [80.0, 70.0]
     controller.stop()
@@ -750,8 +750,8 @@ def test_restart_marks_an_open_run_stopped(store):
     assert saved["ended_at"]
 
 
-def test_a_run_that_stops_at_or_under_90_has_no_cooldown(store):
-    source = StaticSource([80.0, 70.0])
+def test_a_run_that_stops_at_or_under_100_has_no_cooldown(store):
+    source = StaticSource([100.0, 70.0])
     controller = Controller(store, source)
     controller.start()
     controller.tick(2)
@@ -772,7 +772,7 @@ def test_a_run_that_never_reaches_target_still_cools_when_it_is_hot(store):
     assert controller.runs()["stats"]["average_cooldown_seconds"] is None
 
 
-def test_cooldown_runs_until_the_probe_falls_under_90(store):
+def test_cooldown_runs_until_the_probe_falls_under_100(store):
     source = StaticSource([100.0, 90.0])
     controller = Controller(store, source)
     controller.start()
@@ -788,7 +788,7 @@ def test_cooldown_runs_until_the_probe_falls_under_90(store):
     controller.tick(60)
     assert controller.status()["mode"] == "cooling"
 
-    source.temps = [89.0, 80.0]
+    source.temps = [99.0, 80.0]
     controller.tick(1)
     assert controller.status()["mode"] == "idle"
 
@@ -841,14 +841,14 @@ def test_cooldown_resumes_after_a_restart(store):
     assert resumed.status()["elapsed_seconds"] == pytest.approx(14)
 
 
-def test_a_restart_already_under_90_closes_the_cooldown(store):
+def test_a_restart_already_under_100_closes_the_cooldown(store):
     source = StaticSource([165.0, 150.0])
     first = Controller(store, source)
     first.start()
     first.tick(1)
     run_id = first.stop()["cooldown_run_id"]
 
-    resumed = Controller(store, StaticSource([80.0, 70.0]))
+    resumed = Controller(store, StaticSource([99.0, 70.0]))
     assert resumed.status()["mode"] == "idle"
     assert store.get_run(run_id)["cooldown_status"] == "complete"
 
@@ -881,7 +881,39 @@ def test_a_ready_model_shuts_off_when_the_predicted_crest_reaches_the_target(sto
     assert source.heaters[:2] == [False, False]
 
 
-def test_grok_can_replace_a_stage_slope_when_it_agrees(store, monkeypatch):
+def test_a_calibration_run_does_not_ask_grok(store, monkeypatch):
+    monkeypatch.setenv("GROK_API_KEY", "test-key")
+    monkeypatch.setenv("BREWSKI_ANALYSIS_INLINE", "1")
+    calls = {"rate": 0, "model": 0}
+
+    def rate(samples, kind):
+        calls["rate"] += 1
+        return 0.41
+
+    def revised(samples, local):
+        calls["model"] += 1
+        return {
+            "linear_rate_f_per_sec": 0.41,
+            "coast_rise_f": (local.get("coast_rise_f") or 0) + 0.2,
+            "cooldown_f_per_min": local.get("cooldown_f_per_min") or 2,
+        }
+
+    monkeypatch.setattr("brewski.analysis.analyze_rate", rate)
+    monkeypatch.setattr("brewski.analysis.analyze_model", revised)
+    source = StaticSource([70.0, 70.0])
+    controller = Controller(store, source)
+    controller.start({"kind": "calibration"})
+    _drive(controller, source, _heating_temp, 80, "linear")
+    _drive(controller, source, _heating_temp, 40, "coast")
+    fitted = store.get_settings().thermal_model["linear_rate_f_per_sec"]
+    source.temps = [80.0, 70.0]
+    controller.stop()
+    assert calls == {"rate": 0, "model": 0}
+    assert store.get_settings().thermal_model["linear_rate_f_per_sec"] == fitted
+    assert controller.runs()["runs"][0]["analysis"] == []
+
+
+def test_queued_grok_analysis_can_still_replace_an_agreeing_rate(store, monkeypatch):
     monkeypatch.setenv("GROK_API_KEY", "test-key")
     monkeypatch.setenv("BREWSKI_ANALYSIS_INLINE", "1")
     monkeypatch.setattr("brewski.analysis.analyze_rate", lambda samples, kind: 0.41)
@@ -897,14 +929,21 @@ def test_grok_can_replace_a_stage_slope_when_it_agrees(store, monkeypatch):
     controller = Controller(store, source)
     controller.start({"kind": "calibration"})
     _drive(controller, source, _heating_temp, 80, "linear")
-    _drive(controller, source, _heating_temp, 40, "coast")
-    model = store.get_settings().thermal_model
-    assert model["linear_rate_f_per_sec"] == pytest.approx(0.41)
-    source.temps = [80.0, 70.0]
-    controller.stop()
+    local = controller._session.model.linear_rate_f_per_sec
+    controller._queue_analysis(
+        {
+            "kind": "linear",
+            "field": "linear_rate_f_per_sec",
+            "local": local,
+            "samples": [[0.0, 70.0], [1.0, 70.4]],
+        }
+    )
+    assert store.get_settings().thermal_model["linear_rate_f_per_sec"] == pytest.approx(0.41)
+    session = controller._session
+    controller._session = None
+    controller._queue_full_analysis(session)
     revised = store.get_settings().thermal_model
     assert revised["linear_rate_f_per_sec"] == pytest.approx(0.41)
-    assert revised["coast_rise_f"] is None
     kinds = {item["kind"]: item["accepted"] for item in controller.runs()["runs"][0]["analysis"]}
     assert kinds["linear"] is True
     assert kinds["full"] is True

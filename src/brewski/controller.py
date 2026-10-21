@@ -110,7 +110,7 @@ logger = logging.getLogger(__name__)
 # Width of the hysteresis band. The element turns back on only after the
 # probe falls this far below the early-cutoff temperature.
 DEADBAND_F = 2.0
-# After a run, cooldown stays open while the control probe is above 90°F.
+# After a run, cooldown stays open while the control probe is above 100°F.
 SAMPLE_INTERVAL_SECONDS = 5.0
 # The control log keeps each control-loop reading. The loop decides about
 # once a second, and a 5 second gap hides the slope and the shutoff.
@@ -548,7 +548,7 @@ def seconds_to_cooldown(
     *,
     learned_rate_f_per_min: float | None = None,
 ) -> float | None:
-    """Seconds for the probe to fall under 90°F.
+    """Seconds for the probe to fall under 100°F.
 
     A live falling slope is used as a straight line. A rise is not a cooldown.
     A flat window, or a window that is still too short, uses the learned
@@ -1496,11 +1496,8 @@ class Controller:
             self._display_coast = saved.learned_coast_f
             self._display_rate = saved.learned_cooldown_f_per_min
             self._calibration_settled = session.reached_target
-            # The revision is for the next run. Detach this session first so
-            # a live heater decision cannot pick the revised numbers up.
             self._session = None
             self._calibration_prior = None
-            self._queue_full_analysis(session)
         elif self._run_kind == "calibration" and self._coast_f is not None:
             self._display_coast = self._coast_f
         self._session = None
@@ -1613,7 +1610,7 @@ class Controller:
         self._persist_cooldown()
 
     def _open_cooldown_if_hot(self, settings: Settings) -> None:
-        """Start a cooldown when a run stops above 90°F without having reached its aim."""
+        """Start a cooldown when a run stops above 100°F without having reached its aim."""
 
         if self._run_id is None or self._cooldown_run_id is not None:
             return
@@ -1847,8 +1844,7 @@ class Controller:
         )
         for name in session.pending_marks:
             self._add_mark(name)
-        for item in session.pending_analysis:
-            self._queue_analysis(item)
+        # The session still prepares stage analysis. This run does not send it.
         if session.reached_target:
             self._calibration_settled = True
         if session.commit:

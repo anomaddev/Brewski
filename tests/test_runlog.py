@@ -60,6 +60,36 @@ def test_a_hold_line_names_the_ramp_pulse_and_whether_it_fires():
     )
     assert "Waiting." in waiting
     assert "The probe is at the target." in waiting
+    coasting = format_control(
+        {
+            "path": "hold",
+            "temp_f": 159.7,
+            "goal_f": 160,
+            "predicted_crest_f": 164.2,
+            "remaining_coast_f": 4.4,
+            "pulse_seconds": 1.0,
+            "on_seconds": 0,
+            "heat": False,
+            "heaters_on": [False, False],
+            "hold_wait": "overshoot",
+        }
+    )
+    assert "including 4.4°F of coast" in coasting
+    assert "That clears the target by more than 1°F." in coasting
+    rising = format_control(
+        {
+            "path": "hold",
+            "temp_f": 159.4,
+            "goal_f": 160,
+            "predicted_crest_f": 159.8,
+            "pulse_seconds": 1.0,
+            "on_seconds": 0,
+            "heat": False,
+            "heaters_on": [False, False],
+            "hold_wait": "rising",
+        }
+    )
+    assert "The probe is still rising." in rising
 
 
 def test_a_flat_minimum_pulse_is_not_described_as_a_climb():

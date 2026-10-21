@@ -634,6 +634,47 @@ def test_minimum_on_time_follows_the_setting(store):
     assert source.heaters[:2] == [False, False]
 
 
+def test_a_long_tick_does_not_stack_hold_pulses(store):
+    # Calibration 17 ran the target 4°F hot: the hold fired again before the
+    # coast of the last pulse showed up, and a multi-second tick toggled the
+    # SSR once per simulated second.
+    source = StaticSource([159.7, 140.0])
+    controller = Controller(store, source)
+    controller.start({"kind": "calibration", "charge_gallons": 5})
+    session = controller._session
+    assert session is not None
+    session.phase = "hold"
+    session.phase_started = controller._elapsed
+    edges: list[list[bool]] = []
+    seen = list(source.heaters)
+    original = source.set_heaters
+
+    def track(states):
+        now = [bool(item) for item in list(states)[:2]]
+        if now != seen:
+            edges.append(now)
+            seen[:] = now
+        original(states)
+
+    source.set_heaters = track
+    controller.tick(3)
+    assert edges == [[True, True]]
+    assert source.heaters[:2] == [True, True]
+
+    controller.tick(1)
+    assert source.heaters[:2] == [False, False]
+    assert edges == [[True, True], [False, False]]
+
+    source.temps = [159.0, 140.0]
+    controller.tick(0.4)
+    assert source.heaters[:2] == [False, False]
+
+    for step in range(12):
+        source.temps = [min(164.5, 159.8 + 0.35 * step), 140.0]
+        controller.tick(1)
+        assert source.heaters[:2] == [False, False]
+
+
 def test_pause_turns_heaters_off_before_the_minimum(store):
     source = StaticSource([100.0, 90.0])
     controller = Controller(store, source)

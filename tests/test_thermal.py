@@ -130,6 +130,45 @@ def test_hold_pulses_at_the_measured_ramp_inside_one_degree():
     # A pulse already started runs out the minimum, then opens.
     assert hold_should_heat(160.2, 160.0, 0.4, model, 1.0) is True
     assert hold_should_heat(160.2, 160.0, 1.0, model, 1.0) is False
+    # The probe is still climbing from the last pulse, so another one waits.
+    rising = hold_maintenance_plan(159.8, 160.0, 0.0, model, 1.0, probe_slope=0.05)
+    assert rising["heat"] is False
+    assert rising["hold_wait"] == "rising"
+    # The minimum off time has not elapsed.
+    assert hold_should_heat(
+        159.0, 160.0, 0.0, model, 1.0, off_seconds=0.2, min_off_seconds=1.0
+    ) is False
+    assert hold_should_heat(
+        159.0,
+        160.0,
+        0.0,
+        model,
+        1.0,
+        off_seconds=1.0,
+        min_off_seconds=1.0,
+        probe_slope=-0.01,
+    ) is True
+
+
+def test_a_hot_sheath_does_not_get_another_minimum_pulse():
+    # Seed coast is 14°F at the straight rate. A cold 1 second pulse stores
+    # a small slice of that. The slope left by the climb stores the whole coast.
+    model = seed_model()
+    cold = hold_maintenance_plan(159.7, 160.0, 0.0, model, 1.0, sheath_slope=0.0)
+    assert cold["heat"] is True
+    assert cold["predicted_crest_f"] <= 161.0
+    assert cold["remaining_coast_f"] < 1.0
+    hot = hold_maintenance_plan(
+        159.7,
+        160.0,
+        0.0,
+        model,
+        1.0,
+        sheath_slope=model.linear_rate_f_per_sec or 0.0,
+    )
+    assert hot["heat"] is False
+    assert hot["hold_wait"] == "overshoot"
+    assert hot["predicted_crest_f"] > 164.0
 
 
 def test_stage_three_holds_the_pulse_until_the_stored_coast_reaches_the_target():
@@ -452,11 +491,20 @@ def test_a_short_pulse_is_followed_by_a_shorter_one_and_hold_opens_before_160():
 
     session.phase = "hold"
     session.pulse_coasting = False
-    # Seed ramp is 0.40°F/s. 159.7 + 0.40 lands at 160.1, so the hold fires.
+    session.sheath_slope = 0.0
+    session.samples.clear()
+    session.hold_released_at = None
+    # A cold sheath stores only a fraction of the 14°F coast in one second.
     session._set_heat(300.0, 159.7, 0.0, 1.0)
     assert session.heat is True
     assert session.predicted_crest == pytest.approx(160.1, abs=0.05)
     assert session.pulse_coasting is False
+    session.was_heating = True
+    session.heat = False
+    session.hold_released_at = 300.0
+    session._set_heat(302.0, 159.6, 0.0, 1.0)
+    assert session.heat is False
+    assert session.trace.get("hold_wait") == "coast"
 
 
 def test_a_hold_open_does_not_refit_the_coast():

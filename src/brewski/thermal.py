@@ -4,7 +4,8 @@ Soak is an exponential lag: the slope climbs as ``R (1 - e^{-t/τ})`` until
 the rise is straight. After the SSR opens, temperature climbs as
 ``S τ (1 - e^{-t/τ})`` and levels at an equilibrium. Calibration learns those
 shapes while the probe is still under 140°F, then one predicted pulse climbs
-to 160°F and a ten-minute hold stays there.
+to 160°F. The ten-minute hold stays there with minimum pulses that include
+the coast those pulses store.
 """
 
 from __future__ import annotations
@@ -39,6 +40,11 @@ MOMENTUM_SECONDS = 2 * 60.0
 HOLD_SECONDS = 10 * 60.0
 # The hold stays inside this many degrees of 160°F, above and below.
 HOLD_BAND_F = 1.0
+# A new hold pulse waits while the probe is still climbing this fast.
+# That rise is the previous pulse's coast, and another pulse would stack on it.
+HOLD_RISE_F_PER_SEC = 0.02
+HOLD_SLOPE_WINDOW_SECONDS = 6.0
+HOLD_SLOPE_MIN_SPAN_SECONDS = 4.0
 # Stage I must not walk the pot up to the target. Leave the cold start here.
 COLD_START_MAX_SECONDS = 3 * 60.0
 SLOPE_WINDOW_SECONDS = 8.0
@@ -1238,50 +1244,120 @@ def coast_sized_should_heat(
     )["heat"]
 
 
+def _hold_can_track_a_short_pulse(model: ThermalModel) -> bool:
+    """True when the sheath model knows a 1 second pulse is not full heat."""
+
+    return (model.soak_tau_seconds or 0.0) > 0 or (model.cold_start_seconds or 0.0) > 0
+
+
+def hold_pulse_landing(
+    temp_f: float,
+    model: ThermalModel,
+    min_on_seconds: float,
+    sheath_slope: float = 0.0,
+) -> tuple[float, float, float, float]:
+    """Landing, on-pulse gain, coast after shutoff, and the slope at shutoff.
+
+    With no coast on the model, the pulse is the straight rate times the
+    minimum. Once a coast has been learned, the landing is the climb while
+    the element is on plus the coast that slope still delivers after the SSR
+    opens. Slope already stored in the sheath is part of that coast, so the
+    next pulse is not planned as if the element were cold.
+    """
+
+    rate = max(0.0, float(model.linear_rate_f_per_sec or 0.0))
+    minimum = max(0.0, float(min_on_seconds))
+    slope0 = max(0.0, float(sheath_slope))
+    if coast_tau_of(model) <= 0 or not _hold_can_track_a_short_pulse(model):
+        gain = rate * minimum
+        return temp_f + gain, gain, 0.0, rate
+    if minimum <= 0:
+        coast = remaining_coast_f(model, slope0, temp_f) if slope0 > 0 else 0.0
+        return temp_f + coast, 0.0, coast, slope0
+    slope1 = step_sheath_slope(model, slope0, heating=True, dt=minimum)
+    average = (slope0 + max(0.0, slope1)) * 0.5
+    if rate > 0:
+        average = min(average, rate)
+    gain = max(0.0, average * minimum)
+    coast = remaining_coast_f(model, slope1, temp_f + gain)
+    return temp_f + gain + coast, gain, coast, slope1
+
+
 def hold_maintenance_plan(
     temp_f: float,
     target_f: float,
     on_seconds: float,
     model: ThermalModel,
     min_on_seconds: float,
+    *,
+    sheath_slope: float = 0.0,
+    off_seconds: float = 0.0,
+    min_off_seconds: float = 0.0,
+    probe_slope: float | None = None,
 ) -> dict:
-    """Landing of one minimum pulse at the measured ramp, and whether to fire it.
+    """Landing of one minimum pulse, and whether to fire it.
 
-    The pulse adds ``linear_rate × min_on`` degrees. The coast after the SSR
-    opens is left out, because that crest kept a hold from firing while the
-    pot sagged. Heaters that are already on finish the minimum and then open.
-    A new pulse fires when that landing is on the target and at most
-    ``HOLD_BAND_F`` above it. A landing above the band waits. A landing short
-    of the target waits too, unless the probe is already ``HOLD_BAND_F`` below
-    the target, where the pulse fires so the sag stops.
+    Heaters that are already on finish the minimum and then open. A new pulse
+    waits out the minimum off time, waits while the probe is still rising
+    from the last coast, and fires only when the landing — climb plus coast —
+    is on the target and at most ``HOLD_BAND_F`` above it. A landing above
+    the band waits. A landing short of the target waits too, unless the probe
+    is already ``HOLD_BAND_F`` below the target.
     """
 
     rate = max(0.0, float(model.linear_rate_f_per_sec or 0.0))
     minimum = max(0.0, float(min_on_seconds))
-    rise = rate * minimum
     on = max(0.0, float(on_seconds))
+    off = float(off_seconds)
+    if not math.isfinite(off):
+        off = math.inf
+    else:
+        off = max(0.0, off)
+    minimum_off = max(0.0, float(min_off_seconds))
+    landing, gain, coast, shutoff = hold_pulse_landing(temp_f, model, minimum, sheath_slope)
+    hold_wait = None
     if on > 0:
         heat = minimum > 0 and on < minimum
-        landing = temp_f + rate * max(0.0, minimum - on)
+        remaining = max(0.0, minimum - on)
+        if heat and remaining < minimum:
+            landing, gain, coast, shutoff = hold_pulse_landing(
+                temp_f, model, remaining, sheath_slope
+            )
+    elif temp_f >= target_f:
+        heat = False
+        hold_wait = "at_target"
+    elif minimum_off > 0 and off < minimum_off:
+        heat = False
+        hold_wait = "min_off"
+    elif probe_slope is not None and probe_slope > HOLD_RISE_F_PER_SEC:
+        heat = False
+        hold_wait = "rising"
+    elif landing > target_f + HOLD_BAND_F:
+        heat = False
+        hold_wait = "overshoot"
+    elif landing >= target_f or temp_f <= target_f - HOLD_BAND_F:
+        heat = True
     else:
-        landing = temp_f + rise
-        if temp_f >= target_f:
-            heat = False
-        elif landing > target_f + HOLD_BAND_F:
-            heat = False
-        elif landing >= target_f or temp_f <= target_f - HOLD_BAND_F:
-            heat = True
-        else:
-            heat = False
-    return {
+        heat = False
+        hold_wait = "short"
+    plan = {
         "heat": heat,
-        "slope_f_per_sec": round(rate, 5),
+        "slope_f_per_sec": round(shutoff, 5),
         "linear_rate_f_per_sec": round(rate, 5),
         "predicted_crest_f": round(landing, 2),
-        "gain_f": round(rise, 2),
+        "gain_f": round(gain, 2),
+        "remaining_coast_f": round(coast, 2),
         "pulse_seconds": round(minimum, 2),
         "on_seconds": round(on, 2),
+        "sheath_slope_f_per_sec": round(max(0.0, float(sheath_slope)), 5),
     }
+    if math.isfinite(off):
+        plan["off_seconds"] = round(off, 2)
+    if probe_slope is not None and math.isfinite(float(probe_slope)):
+        plan["live_slope_f_per_sec"] = round(float(probe_slope), 5)
+    if hold_wait and not heat:
+        plan["hold_wait"] = hold_wait
+    return plan
 
 
 def hold_should_heat(
@@ -1290,12 +1366,18 @@ def hold_should_heat(
     on_seconds: float,
     model: ThermalModel,
     min_on_seconds: float,
+    *,
+    sheath_slope: float = 0.0,
+    off_seconds: float = 0.0,
+    min_off_seconds: float = 0.0,
+    probe_slope: float | None = None,
 ) -> bool:
-    """True when a hold pulse at the measured ramp should be on.
+    """True when a hold pulse should be on.
 
-    A new pulse fires when the minimum on time, at the locked ramp, lands on
-    the target without clearing it by more than one degree. A pulse that has
-    already started stays on until that minimum has elapsed.
+    A new pulse fires when the minimum on time, including the coast that
+    pulse stores, lands on the target without clearing it by more than one
+    degree. A pulse that has already started stays on until that minimum
+    has elapsed.
     """
 
     return hold_maintenance_plan(
@@ -1304,6 +1386,10 @@ def hold_should_heat(
         on_seconds,
         model,
         min_on_seconds,
+        sheath_slope=sheath_slope,
+        off_seconds=off_seconds,
+        min_off_seconds=min_off_seconds,
+        probe_slope=probe_slope,
     )["heat"]
 
 

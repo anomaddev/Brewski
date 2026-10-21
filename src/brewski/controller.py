@@ -742,6 +742,9 @@ class Controller:
         # The last control-law choice, before the minimum on and off times.
         self._decision: dict = {}
         self._desired = [False] * SLOT_COUNT
+        # One heater change per tick(). Later seconds in that same call keep
+        # the mask from the first edge so the SSR is not buzzed.
+        self._tick_heater_lock: list[bool] | None = None
         # Heater mask already written to this run's log, so a later tick only
         # records a line when the SSR actually changes.
         self._logged_heaters: list[bool] | None = None
@@ -833,16 +836,23 @@ class Controller:
         self._detach_console()
 
     def tick(self, dt: float) -> None:
-        """Advance the simulation and the run clock by ``dt`` seconds."""
+        """Advance the run clock by ``dt`` seconds.
+
+        Each second is evaluated so a long step still settles and logs. The
+        heater may change only once in that step. A second edge would land
+        on the SSR immediately, and a 1 second minimum would become a buzz.
+        """
 
         self._apply_panel()
         self._flush_dial_target()
         remaining = min(max(0.0, float(dt)), MAX_TICK_SECONDS)
         with self._lock:
+            self._tick_heater_lock = None
             while remaining > 0:
                 slice_dt = min(1.0, remaining)
                 self._tick(slice_dt)
                 remaining -= slice_dt
+            self._tick_heater_lock = None
 
     def status(self) -> dict:
         with self._lock:
@@ -1773,6 +1783,10 @@ class Controller:
                 states.append(False)
                 continue
             states.append(bool(desired[index]))
+        if self._tick_heater_lock is not None:
+            states = list(self._tick_heater_lock)
+        elif states != self._heaters:
+            self._tick_heater_lock = list(states)
         self._set_heaters(states)
         self._note_coast_curve(settings)
 
@@ -1841,6 +1855,8 @@ class Controller:
             found[1],
             self._pulse_on_seconds(settings),
             settings.heater_min_on_seconds,
+            self._hold_off_seconds(settings),
+            settings.heater_min_off_seconds,
         )
         for name in session.pending_marks:
             self._add_mark(name)
@@ -1922,6 +1938,28 @@ class Controller:
         if not opened:
             return 0.0
         return max(opened)
+
+    def _hold_off_seconds(self, settings: Settings) -> float:
+        """Seconds the enabled elements have been off.
+
+        Infinity means the off dwell is already satisfied, including the
+        start of a run. Zero while an element is on.
+        """
+
+        if self._elements_on(settings):
+            return 0.0
+        shortest = math.inf
+        saw = False
+        for index in range(SLOT_COUNT):
+            if not settings.heaters[index].enabled or self._heaters[index]:
+                continue
+            saw = True
+            off = self._heater_off_for[index]
+            if math.isfinite(off):
+                shortest = min(shortest, off)
+        if not saw:
+            return 0.0
+        return shortest
 
     def _coast_off_seconds(self, settings: Settings) -> float:
         """How long the enabled elements have been off since they opened."""

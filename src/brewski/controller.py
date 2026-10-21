@@ -6,9 +6,12 @@ A timeline reading is saved on the same cadence whether or not a run is open,
 so the dashboard can scroll the controller clock after a reload.
 The first enabled probe is the one compared with the target. Once a
 calibration has saved a heating model, heaters turn off when the predicted
-crest reaches the target. Until then they turn off by the measured coast,
-and sooner when the pot is rising faster than that measurement, so heat
-still stored in the element can finish the rise. Disabled heaters stay off.
+crest reaches the target, stay off while that projected coast is still
+arriving, then hold the target with minimum pulses until the run stops, the hold
+timer ends, or the max program duration is reached.
+Until that model exists they turn off by the measured coast, and sooner
+when the pot is rising faster than that measurement, so heat still stored
+in the element can finish the rise. Disabled heaters stay off.
 The installed service drives the SSRs,
 the MAX31865 probes, and the HTS221. After setup, this loop also drives
 the I2C LCD, the panel buttons, the LED relays, and the target encoder.
@@ -27,7 +30,7 @@ import zipfile
 from dataclasses import replace
 
 from brewski import __version__, analysis
-from brewski.calibration import MARK_START, CalibrationSession
+from brewski.calibration import MARK_HOLDING, MARK_START, CalibrationSession
 from brewski.consolelog import ConsoleCapture, console_log_text
 from brewski.emergency import summary
 from brewski.lcd import (
@@ -43,6 +46,7 @@ from brewski.lcd import (
 from brewski.menu import SoftwareMenu
 from brewski.network import display_identity
 from brewski.panel import indicator_leds, open_panel, panel_key
+from brewski.program import MAX_DURATION_SECONDS, Program, program_end
 from brewski.runlog import (
     analysis_message,
     clean_detail,
@@ -52,6 +56,7 @@ from brewski.runlog import (
     model_message,
     model_numbers,
     suite_result_message,
+    phase_keys,
     phase_message,
     start_message,
 )
@@ -85,21 +90,30 @@ from brewski.store import (
 )
 from brewski.thermal import (
     CALIBRATION_TEMP_F,
+    HOLD_BAND_F,
+    HOLD_RISE_F_PER_SEC,
+    HOLD_SLOPE_MIN_SPAN_SECONDS,
+    HOLD_SLOPE_WINDOW_SECONDS,
     LEARN_TEMP_F,
     GROK_RATE_BAND_F_PER_MIN,
     GROK_RATE_BAND_F_PER_SEC,
     GROK_RISE_BAND_F,
     SAFE_TEMP_F,
+    TUNE_DEADBAND_F,
     ThermalModel,
     accept_grok,
     apply_grok_value,
     blend_model,
-    model_from_dict,
     coast_entry_slope,
-    pulse_plan,
-    scale_model,
+    coast_tau_of,
+    endpoint_rate,
+    hold_maintenance_plan,
+    hold_pulse_landing,
+    model_from_dict,
     project_temperature,
+    pulse_plan,
     remaining_coast_f,
+    scale_model,
     seconds_to_landing,
     step_sheath_slope,
 )
@@ -115,6 +129,11 @@ SAMPLE_INTERVAL_SECONDS = 5.0
 # The control log keeps each control-loop reading. The loop decides about
 # once a second, and a 5 second gap hides the slope and the shutoff.
 LOG_INTERVAL_SECONDS = 1.0
+# The run page asks for one of these. Anything else would turn a review into
+# another full-table read.
+REVIEW_PAGE_SIZES = (10, 25, 50, 100)
+REVIEW_EVENTS = ("start", "sample", "heat", "phase", "model", "analysis", "test")
+REVIEW_CLOCKS = ("run", "cooldown", "both")
 # Ignore a stalled clock that tries to replay more than an hour in one tick.
 MAX_TICK_SECONDS = 3600.0
 # A calibration only trusts a coast after the element has been on long enough
@@ -684,6 +703,12 @@ class Controller:
         # after the run. The lower stop is read from the last 5 minutes of this.
         self._cooldown_window: list[tuple[float, float]] = []
         self._run_kind = "run"
+        self._program: Program | None = None
+        # Elapsed time when this run first latched hold. None until then, so
+        # the heat-up does not count toward a timed hold.
+        self._hold_started_at: float | None = None
+        # Set just before an automatic close: "duration" or "max".
+        self._program_end: str | None = None
         self._charge_gallons: float | None = None
         self._session: CalibrationSession | None = None
         self._suite: InitialHeatingSession | None = None
@@ -701,10 +726,26 @@ class Controller:
         self._display_rate: float | None = None
         # Elapsed time when the current sustain pulse should end.
         self._pulse_until: float | None = None
-        # Set once this run has already climbed above the sustain point.
+        # Set once this run has already climbed above the sustain point, and
+        # once a model run's projected coast has landed inside the hold band.
         # The approach has to stay off after the coast cutoff; a pulse before
         # that point heats the rest of the way and the stored heat overshoots.
         self._hold_ready = False
+        # Elapsed time when the last hold pulse opened. The next pulse waits
+        # out that coast. None once the coast has crested or aged out.
+        self._hold_released_at: float | None = None
+        self._hold_marked = False
+        self._hold_mark_pending = False
+        # The previous model decision's heat flag, so a hold pulse that just
+        # opened can be told from one that is still on.
+        self._model_was_heating = False
+        # True after a climb shutoff until that projected coast is spent.
+        self._climb_coasting = False
+        # climb, coast, or hold. None until a ready model decides.
+        self._run_step: str | None = None
+        # Dial target used on the previous model decision, so a raised target
+        # can leave the hold.
+        self._last_target: float | None = None
         self._heaters = [False] * SLOT_COUNT
         # (predict clock seconds, control temperature). The clock follows tick
         # time, including pause, so a test can advance it without sleeping.
@@ -878,9 +919,19 @@ class Controller:
         capped = min(5000, max(50, int(max_points)))
         return self.store.timeline(int(start_ms), int(end_ms), capped)
 
-    def run(self, run_id: int, *, include_logs: bool = True) -> dict:
+    def run(
+        self,
+        run_id: int,
+        *,
+        include_logs: bool = True,
+        include_samples: bool = True,
+    ) -> dict:
         with self._lock:
-            record = self.store.get_run(run_id, include_logs=include_logs)
+            record = self.store.get_run(
+                run_id,
+                include_logs=include_logs,
+                include_samples=include_samples,
+            )
             if record is None:
                 raise ControllerError("Run not found", 404)
             overlay = self._live_overlay()
@@ -888,14 +939,80 @@ class Controller:
                 record["elapsed_seconds"] = round(self._elapsed, 2)
                 record["status"] = self._mode
                 # The database elapsed lags the in-memory clock between samples.
-                record["heater_on_seconds"] = heater_on_seconds(
-                    record["samples"], record["elapsed_seconds"]
-                )
+                if "samples" in record:
+                    record["heater_on_seconds"] = heater_on_seconds(
+                        record["samples"], record["elapsed_seconds"]
+                    )
+                else:
+                    record["heater_on_seconds"] = self.store.heater_on_seconds_for(
+                        run_id, record["elapsed_seconds"]
+                    )
             cooldown = self._cooldown_overlay()
             if cooldown is not None and cooldown["id"] == run_id:
                 record["cooldown_seconds"] = round(self._cooldown_elapsed, 2)
                 record["cooldown_status"] = "open"
             return record
+
+    def chart_samples(self, run_id: int, after_id: int = 0) -> dict:
+        """Chart readings newer than ``after_id``. The run page appends these."""
+
+        samples = self.store.chart_samples(run_id, after_id)
+        if samples is None:
+            raise ControllerError("Run not found", 404)
+        return {"samples": samples}
+
+    def review_window(
+        self,
+        run_id: int,
+        *,
+        limit: int,
+        log_offset: int = 0,
+        sample_offset: int = 0,
+        from_elapsed: float | None = None,
+        to_elapsed: float | None = None,
+        clock: str = "run",
+        events: list[str] | None = None,
+        phase: str | None = None,
+        tail: bool = False,
+    ) -> dict:
+        """One page of both logs for the run review."""
+
+        if int(limit) not in REVIEW_PAGE_SIZES:
+            raise ControllerError("Page size must be 10, 25, 50, or 100", 400)
+        if (from_elapsed is None) != (to_elapsed is None):
+            raise ControllerError("A custom window needs both ends", 400)
+        if from_elapsed is not None and to_elapsed is not None:
+            if from_elapsed < 0 or to_elapsed < 0 or from_elapsed > to_elapsed:
+                raise ControllerError("Window end is before the start", 400)
+            from_elapsed = round(float(from_elapsed), 2)
+            to_elapsed = round(float(to_elapsed), 2)
+        if clock not in REVIEW_CLOCKS:
+            raise ControllerError("Clock must be run, cooldown, or both", 400)
+        chosen = list(events or [])
+        unknown = [name for name in chosen if name not in REVIEW_EVENTS]
+        if unknown:
+            raise ControllerError("Unknown control-log event", 400)
+        phases: list[str] = []
+        if phase:
+            phases_for = phase_keys(phase)
+            if phases_for is None:
+                raise ControllerError("Unknown phase", 400)
+            phases = list(phases_for)
+        page = self.store.review_window(
+            run_id,
+            limit=int(limit),
+            log_offset=max(0, int(log_offset)),
+            sample_offset=max(0, int(sample_offset)),
+            from_elapsed=from_elapsed,
+            to_elapsed=to_elapsed,
+            clock=clock,
+            events=chosen,
+            phases=phases,
+            tail=bool(tail),
+        )
+        if page is None:
+            raise ControllerError("Run not found", 404)
+        return page
 
     def run_logs(self, run_id: int, after_id: int = 0) -> dict:
         """Control-log lines newer than ``after_id``. The run page appends these."""
@@ -1091,14 +1208,18 @@ class Controller:
             elif self._mode != "idle":
                 raise ControllerError("A run is already open", 409)
             patch = patch or {}
-            if set(patch) - {"target_temp_f", "kind", "charge_gallons", "test"}:
+            program_keys = {"program_mode", "program_continuous", "program_duration_seconds"}
+            if set(patch) - {"target_temp_f", "kind", "charge_gallons", "test", *program_keys}:
                 raise ControllerError(
-                    "Start only accepts target_temp_f, kind, charge_gallons, and test",
+                    "Start only accepts target_temp_f, kind, charge_gallons, test, "
+                    "and the hold program",
                     400,
                 )
             kind = patch.get("kind", "run")
             if kind not in ("run", "calibration", "test"):
                 raise ControllerError("kind must be run, calibration, or test", 400)
+            if program_keys & set(patch) and kind != "run":
+                raise ControllerError("A program is only for a run", 400)
             if kind == "test":
                 if patch.get("test") != TEST_INITIAL_HEATING:
                     raise ControllerError("Unknown test", 400)
@@ -1130,6 +1251,15 @@ class Controller:
                 self.store.save_settings(updated)
                 self._dial_target = None
                 self._dial_dirty = False
+            if kind == "run" and program_keys & set(patch):
+                try:
+                    updated = merge_settings(
+                        self.store.get_settings(),
+                        {key: patch[key] for key in program_keys if key in patch},
+                    )
+                except SettingsError as exc:
+                    raise ControllerError(str(exc), 400) from exc
+                self.store.save_settings(updated)
             settings = self.store.get_settings()
             if kind == "calibration" and gallons is None:
                 gallons = settings.charge_gallons
@@ -1140,6 +1270,9 @@ class Controller:
             )
             self._run_kind = kind
             self._charge_gallons = gallons
+            self._program = None
+            self._hold_started_at = None
+            self._program_end = None
             self._session = (
                 CalibrationSession(self._calibration_prior) if kind == "calibration" else None
             )
@@ -1154,7 +1287,8 @@ class Controller:
             self._display_coast = None
             self._display_rate = None
             self._pulse_until = None
-            self._hold_ready = False
+            self._reset_model_run()
+            self._last_target = float(self._target_value(settings))
             self._clear_predict()
             self._coast_curve.clear()
             self._live_temps = self.source.read_temperatures(SLOT_COUNT)
@@ -1163,6 +1297,12 @@ class Controller:
             if self._emergency:
                 self._set_heaters([False] * SLOT_COUNT, release_off_dwell=True)
                 raise ControllerError("Emergency stop is active", 409)
+            if kind == "run":
+                self._program = Program(
+                    mode=settings.program_mode,
+                    continuous=settings.program_continuous,
+                    duration_seconds=settings.program_duration_seconds,
+                )
             # Running before the first heater command so a calibration aims at
             # the learning temperature on that command, not at the saved run
             # setpoint. The first three seconds stay off.
@@ -1174,8 +1314,14 @@ class Controller:
             run_settings = settings
             if kind == "calibration":
                 run_settings = replace(settings, target_temp_f=int(CALIBRATION_TEMP_F))
-            run = self.store.create_run(run_settings, kind=kind, charge_gallons=gallons)
+            run = self.store.create_run(
+                run_settings,
+                kind=kind,
+                charge_gallons=gallons,
+                program=self._program,
+            )
             self._run_id = int(run["id"])
+            self._flush_hold_mark()
             if kind in ("calibration", "test"):
                 self._add_mark(MARK_START)
             detail = self._control_detail(settings)
@@ -1207,6 +1353,11 @@ class Controller:
                 raise ControllerError("A test cannot be paused", 409)
             settings = self.store.get_settings()
             self._pulse_until = None
+            # The hold latch does not survive a pause. Resume decides again
+            # from the probe and the target.
+            self._hold_ready = False
+            self._hold_released_at = None
+            self._model_was_heating = False
             self._decision = {"path": "pause", "heat": False}
             self._desired = [False] * SLOT_COUNT
             self._set_heaters([False] * SLOT_COUNT, release_off_dwell=True)
@@ -1293,6 +1444,8 @@ class Controller:
                     except Exception:
                         logger.exception("Could not read the network address")
                         address, hostname = "No address", "—"
+                if self._menu.screen == "hold" and not self._menu.editing:
+                    self._load_menu_program()
                 revision = installed_revision() if self._menu.screen == "about" else None
                 lines = self._menu.lines(
                     __version__,
@@ -1382,6 +1535,15 @@ class Controller:
         else:
             eta_seconds = None
             eta_kind = None
+        view = self._program_status(settings)["program"]
+        hold_remaining = None
+        if (
+            self._mode in ("running", "paused")
+            and self._run_kind == "run"
+            and view["state"] == "holding"
+            and view["remaining_seconds"] is not None
+        ):
+            hold_remaining = view["remaining_seconds"]
         return status_lines(
             mode=self._mode,
             elapsed_seconds=elapsed,
@@ -1400,6 +1562,8 @@ class Controller:
             calibration_rate_f=lcd.get("rate"),
             eta_seconds=eta_seconds,
             eta_kind=eta_kind,
+            program_mode=settings.program_mode,
+            hold_remaining_seconds=hold_remaining,
         )
 
     def _loop(self) -> None:
@@ -1464,10 +1628,14 @@ class Controller:
             if self._mode == "cooling":
                 self._tick_cooldown(dt, settings)
             elif self._mode == "paused":
+                if self._close_for_program(settings):
+                    return
                 self._advance_cooldown_clock(dt, settings)
                 self._note_control_log(dt, settings)
             return
         self._elapsed += dt
+        if self._close_for_program(settings):
+            return
         self._note_heater_dwell(dt)
         phase_before = self._active_phase()
         self._advance_calibration(settings)
@@ -1476,6 +1644,9 @@ class Controller:
             return
         self._step_sheath(dt, settings)
         self._command_heaters(settings)
+        self._note_hold_clock()
+        if self._close_for_program(settings):
+            return
         self._log_output_changes(settings, phase_before)
         if self._mode != "running":
             return
@@ -1506,6 +1677,8 @@ class Controller:
             self._suite = None
             self._run_kind = "run"
         session = self._session
+        end_reason = self._program_end
+        completed = (session is not None and session.finished) or end_reason in {"duration", "max"}
         if session is not None:
             if session.model.coast_rise_f is not None or session.model.linear_rate_f_per_sec is not None:
                 self._commit_model(settings)
@@ -1520,9 +1693,9 @@ class Controller:
         self._session = None
         self._run_model = None
         self._pulse_until = None
-        self._hold_ready = False
+        self._reset_model_run()
         self._flush_heater_life()
-        self._decision = {"path": "stop", "heat": False}
+        self._decision = {"path": "complete" if completed else "stop", "heat": False}
         self._desired = [False] * SLOT_COUNT
         self._set_heaters([False] * SLOT_COUNT, release_off_dwell=True)
         self._logged_heaters = [False] * SLOT_COUNT
@@ -1530,19 +1703,103 @@ class Controller:
         if self._run_id is not None:
             self._record_sample(settings)
             self._record_control_log(settings)
-            self.store.update_run(
-                self._run_id,
-                status="stopped",
-                elapsed_seconds=self._elapsed,
-                ended_at=utc_now(),
-            )
-            logger.info("Run %s stopped at %ss", self._run_id, round(self._elapsed, 1))
+            closing = "complete" if completed else "stopped"
+            fields: dict[str, object] = {
+                "status": closing,
+                "elapsed_seconds": self._elapsed,
+                "ended_at": utc_now(),
+            }
+            if end_reason:
+                fields["program_end"] = end_reason
+            self.store.update_run(self._run_id, **fields)
+            logger.info("Run %s %s at %ss", self._run_id, closing, round(self._elapsed, 1))
             self._begin_cooldown(self._run_id)
         self._run_id = None
         self._elapsed = 0.0
         self._since_sample = 0.0
+        self._program = None
+        self._hold_started_at = None
+        self._program_end = None
         if self._mode != "cooling":
             self._mode = "idle"
+
+    def _note_hold_clock(self) -> None:
+        """Start the hold timer the first time this run is holding.
+
+        Caller holds ``self._lock``. A later sag does not move the start.
+        """
+
+        if self._program is None or self._run_kind != "run" or self._mode != "running":
+            return
+        if self._hold_started_at is None and self._hold_ready:
+            self._hold_started_at = self._elapsed
+
+    def _close_for_program(self, settings: Settings) -> bool:
+        """Complete the run when the hold timer or the emergency cap is due.
+
+        Caller holds ``self._lock``. True when the run was closed.
+        """
+
+        if self._mode not in ("running", "paused") or self._run_id is None:
+            return False
+        program = self._program if self._program is not None else Program(continuous=True)
+        hold = None
+        if self._program is not None and self._hold_started_at is not None:
+            hold = max(0.0, self._elapsed - self._hold_started_at)
+        reason = program_end(
+            program,
+            elapsed_seconds=self._elapsed,
+            hold_seconds=hold,
+            max_program_hours=settings.max_program_hours,
+        )
+        if reason is None:
+            return False
+        self._program_end = reason
+        self._finish_run()
+        return True
+
+    def _program_status(self, settings: Settings) -> dict:
+        """Armed program while idle, and the open program while a run is going."""
+
+        active = (
+            self._mode in ("running", "paused")
+            and self._run_kind == "run"
+            and self._program is not None
+        )
+        program = self._program if active and self._program is not None else Program(
+            mode=settings.program_mode,
+            continuous=settings.program_continuous,
+            duration_seconds=settings.program_duration_seconds,
+        )
+        hold = None
+        if active and self._hold_started_at is not None:
+            hold = max(0.0, self._elapsed - self._hold_started_at)
+        if not active:
+            state = "idle"
+        elif self._mode == "paused":
+            state = "paused"
+        elif hold is not None:
+            state = "holding"
+        else:
+            state = "heating"
+        remaining = None
+        if program.mode == "hold" and not program.continuous and hold is not None:
+            remaining = max(0.0, program.duration_seconds - hold)
+        cap_left = None
+        if self._mode in ("running", "paused") and self._run_id is not None:
+            cap_left = max(0.0, settings.max_program_hours * 3600 - self._elapsed)
+        return {
+            "program": {
+                "mode": program.mode,
+                "continuous": program.continuous,
+                "duration_seconds": program.duration_seconds,
+                "state": state,
+                "hold_seconds": None if hold is None else round(hold, 1),
+                "remaining_seconds": None if remaining is None else round(remaining, 1),
+            },
+            "max_program_hours": settings.max_program_hours,
+            "max_program_remaining_seconds": None if cap_left is None else round(cap_left, 1),
+        }
 
     def _begin_cooldown(self, run_id: int) -> None:
         settings = self.store.get_settings()
@@ -1900,7 +2157,30 @@ class Controller:
             return self._session.phase
         if self._suite is not None:
             return self._suite.phase
-        return None
+        return self._published_run_step()
+
+    def _published_run_step(self) -> str | None:
+        """Climb, coast, or hold while a ready model is running the heaters."""
+
+        if self._mode not in ("running", "paused") or self._run_kind != "run":
+            return None
+        if self._session is not None or self._suite is not None:
+            return None
+        if self._run_model is None or not self._run_model.ready():
+            return None
+        return self._run_step
+
+    def _status_predicted_crest(self) -> float | None:
+        """The crest the live decision is using, for the dashboard sentence."""
+
+        if self._session is not None and self._session.predicted_crest is not None:
+            return round(self._session.predicted_crest, 1)
+        if self._published_run_step() is None:
+            return None
+        crest = self._decision.get("predicted_crest_f")
+        if crest is None:
+            return None
+        return round(float(crest), 1)
 
     def _test_payload(self) -> dict | None:
         if self._suite is not None and self._mode in ("running", "paused"):
@@ -2214,6 +2494,9 @@ class Controller:
 
     def _clear_coast(self) -> None:
         self._run_kind = "run"
+        self._program = None
+        self._hold_started_at = None
+        self._program_end = None
         self._charge_gallons = None
         self._session = None
         self._run_model = None
@@ -2221,7 +2504,29 @@ class Controller:
         self._coast_seconds = None
         self._calibration_settled = False
         self._pulse_until = None
+        self._reset_model_run()
+
+    def _reset_model_run(self) -> None:
+        """Drop the climb, coast, and hold latch. The saved model stays."""
+
         self._hold_ready = False
+        self._hold_released_at = None
+        self._hold_marked = False
+        self._hold_mark_pending = False
+        self._model_was_heating = False
+        self._climb_coasting = False
+        self._run_step = None
+        self._last_target = None
+        self._coast_open_temp = None
+        self._coast_open_slope = 0.0
+
+    def _flush_hold_mark(self) -> None:
+        """Write the Holding mark once the run row exists."""
+
+        if not self._hold_mark_pending or self._run_id is None:
+            return
+        self._hold_mark_pending = False
+        self._add_mark(MARK_HOLDING)
 
     def _clear_predict(self) -> None:
         self._predict_clock = 0.0
@@ -2542,6 +2847,243 @@ class Controller:
             self._pulse_until = self._elapsed + duration
         return list(enabled)
 
+    def _model_mask(self, settings: Settings, primary: float, model: ThermalModel) -> list[bool]:
+        """Climb on the predicted crest, follow the projected coast, then hold.
+
+        The hold lasts until Stop, pause, or an emergency. A raised target,
+        or a sag one minimum pulse cannot bring back inside the band, climbs
+        again. The saved model is not changed here.
+        """
+
+        target = float(self._target_value(settings))
+        on = self._pulse_on_seconds(settings)
+        if self._hold_ready and self._hold_should_release(primary, target, model, settings):
+            self._hold_ready = False
+            self._hold_released_at = None
+        self._last_target = target
+        if self._hold_ready:
+            return self._hold_mask(settings, primary, model, target, on)
+        if not self._elements_on(settings) and self._projected_coast_pending(
+            settings, primary, model, target
+        ):
+            return self._coast_mask(primary, model, target)
+        if not self._elements_on(settings):
+            self._climb_coasting = False
+            if primary >= target - HOLD_BAND_F:
+                return self._hold_mask(settings, primary, model, target, on)
+        return self._climb_mask(settings, primary, model, target, on)
+
+    def _hold_should_release(
+        self,
+        temp: float,
+        target: float,
+        model: ThermalModel,
+        settings: Settings,
+    ) -> bool:
+        """True when the hold should give the climb the heaters back."""
+
+        if (
+            self._last_target is not None
+            and target > self._last_target
+            and temp < target - HOLD_BAND_F
+        ):
+            return True
+        landing, _, _, _ = hold_pulse_landing(
+            temp,
+            model,
+            settings.heater_min_on_seconds,
+            self._sheath_slope,
+        )
+        return landing < target - HOLD_BAND_F
+
+    def _projected_coast_pending(
+        self,
+        settings: Settings,
+        temp: float,
+        model: ThermalModel,
+        target: float,
+    ) -> bool:
+        """True while the shutoff the chart is drawing still has rise left.
+
+        A high projection cannot wait forever. A falling probe, a spent
+        remainder, three coast time constants, or a probe already on the
+        target ends the wait.
+        """
+
+        if not self._climb_coasting:
+            return False
+        if self._coast_open_temp is None or self._coast_open_slope <= 0:
+            return False
+        if temp >= target:
+            return False
+        unspent = self._unspent_coast_f(temp, model)
+        if unspent is None or unspent <= TUNE_DEADBAND_F:
+            return False
+        slope = self._probe_slope()
+        if slope is not None and slope <= -HOLD_RISE_F_PER_SEC:
+            return False
+        tau = coast_tau_of(model)
+        if tau > 0 and self._coast_off_seconds(settings) >= 3.0 * tau:
+            return False
+        return True
+
+    def _probe_slope(self) -> float | None:
+        """°F/s over the same short window the calibration hold uses."""
+
+        recent = [
+            (stamp, reading)
+            for stamp, reading in self._predict_samples
+            if stamp >= self._predict_clock - HOLD_SLOPE_WINDOW_SECONDS
+        ]
+        if len(recent) < 2 or recent[-1][0] - recent[0][0] < HOLD_SLOPE_MIN_SPAN_SECONDS:
+            return None
+        return endpoint_rate(recent)
+
+    def _coast_mask(self, primary: float, model: ThermalModel, target: float) -> list[bool]:
+        """Stay off. The crest is the one chosen when the heaters opened."""
+
+        unspent = self._unspent_coast_f(primary, model)
+        opened = self._coast_open_temp
+        crest = primary if unspent is None else primary + max(0.0, unspent)
+        self._model_was_heating = False
+        self._run_step = "coast"
+        self._decision = {
+            "path": "coast",
+            "heat": False,
+            "target_f": target,
+            "goal_f": target,
+            "predicted_crest_f": round(crest, 2),
+            "remaining_coast_f": None if unspent is None else round(unspent, 2),
+            "live_rise_f": None if opened is None else round(primary - opened, 2),
+            "sheath_slope_f_per_sec": round(self._sheath_slope, 5),
+            "slope_f_per_sec": round(self._coast_open_slope, 5),
+        }
+        return [False] * SLOT_COUNT
+
+    def _latch_hold(self) -> None:
+        """Remember that this run has arrived, and mark the chart once."""
+
+        arrived = not self._hold_ready
+        self._hold_ready = True
+        self._climb_coasting = False
+        if not arrived or self._hold_marked:
+            return
+        self._hold_marked = True
+        if self._run_id is None:
+            self._hold_mark_pending = True
+            return
+        self._add_mark(MARK_HOLDING)
+
+    def _hold_coast_arriving(self, model: ThermalModel) -> bool:
+        """True after a hold pulse until its coast has crested or aged out."""
+
+        opened = self._hold_released_at
+        if opened is None:
+            return False
+        age = self._elapsed - opened
+        tau = coast_tau_of(model)
+        limit = tau if tau > 0 else 30.0
+        slope = self._probe_slope()
+        if (slope is not None and slope < -HOLD_RISE_F_PER_SEC) or age >= limit:
+            self._hold_released_at = None
+            return False
+        return True
+
+    def _hold_mask(
+        self,
+        settings: Settings,
+        primary: float,
+        model: ThermalModel,
+        target: float,
+        on: float,
+    ) -> list[bool]:
+        """Minimum pulses whose landing stays inside the hold band."""
+
+        plan = hold_maintenance_plan(
+            primary,
+            target,
+            on,
+            model,
+            settings.heater_min_on_seconds,
+            sheath_slope=self._sheath_slope,
+            off_seconds=self._hold_off_seconds(settings),
+            min_off_seconds=settings.heater_min_off_seconds,
+            probe_slope=self._probe_slope(),
+        )
+        waiting = plan.get("hold_wait")
+        if (
+            on <= 0
+            and waiting not in {"at_target", "min_off"}
+            and self._hold_coast_arriving(model)
+        ):
+            plan = dict(plan)
+            plan["heat"] = False
+            plan["hold_wait"] = "coast"
+        heating = bool(plan["heat"])
+        if self._run_step == "hold" and self._model_was_heating and not heating:
+            self._hold_released_at = self._elapsed
+        self._model_was_heating = heating
+        self._latch_hold()
+        self._run_step = "hold"
+        self._decision = {"path": "hold", "target_f": target, "goal_f": target, **plan}
+        return [
+            heating and settings.heaters[index].enabled for index in range(SLOT_COUNT)
+        ]
+
+    def _climb_mask(
+        self,
+        settings: Settings,
+        primary: float,
+        model: ThermalModel,
+        target: float,
+        on: float,
+    ) -> list[bool]:
+        """Stay on until the budgeted crest reaches the dial target.
+
+        A minimum pulse whose crest is only a degree past the target is
+        allowed to start, so the pot is not parked just short of the band.
+        """
+
+        live = slope_f_per_sec(self._predict_samples)
+        slope = self._sheath_slope
+        if live is not None and live > slope:
+            slope = live
+        plan = pulse_plan(
+            primary,
+            target,
+            on,
+            model,
+            settings.heater_min_on_seconds,
+            slope_f_per_sec=slope,
+            budgeted=True,
+        )
+        crest = float(plan["predicted_crest_f"])
+        if (
+            not plan["heat"]
+            and on <= 0
+            and primary < target - TUNE_DEADBAND_F
+            and crest <= target + HOLD_BAND_F
+        ):
+            plan = dict(plan)
+            plan["heat"] = True
+        heating = bool(plan["heat"])
+        if heating:
+            self._climb_coasting = False
+        elif on > 0 and crest >= target:
+            self._climb_coasting = True
+        self._model_was_heating = heating
+        self._run_step = "climb"
+        self._decision = {
+            "path": "model",
+            "target_f": target,
+            "live_slope_f_per_sec": None if live is None else round(live, 5),
+            "sheath_slope_f_per_sec": round(self._sheath_slope, 5),
+            **plan,
+        }
+        return [
+            heating and settings.heaters[index].enabled for index in range(SLOT_COUNT)
+        ]
+
     def _decide(self, settings: Settings, temps: list[float]) -> list[bool]:
         """Physical heater mask. Index 0 is heater 1. Disabled slots stay off.
 
@@ -2581,28 +3123,7 @@ class Controller:
         primary = float(raw)
         model = self._run_model
         if model is not None and model.ready():
-            live = slope_f_per_sec(self._predict_samples)
-            slope = self._sheath_slope
-            if live is not None and live > slope:
-                slope = live
-            target = float(self._target_value(settings))
-            plan = pulse_plan(
-                primary,
-                target,
-                self._pulse_on_seconds(settings),
-                model,
-                settings.heater_min_on_seconds,
-                slope_f_per_sec=slope,
-                budgeted=True,
-            )
-            self._decision = {
-                "path": "model",
-                "target_f": target,
-                "live_slope_f_per_sec": None if live is None else round(live, 5),
-                "sheath_slope_f_per_sec": round(self._sheath_slope, 5),
-                **plan,
-            }
-            return [bool(plan["heat"]) and settings.heaters[index].enabled for index in range(SLOT_COUNT)]
+            return self._model_mask(settings, primary, model)
         current = list(self._heaters[:SLOT_COUNT])
         while len(current) < SLOT_COUNT:
             current.append(False)
@@ -2712,7 +3233,7 @@ class Controller:
         found = self._current_control(settings)
         decision = dict(self._decision)
         path = str(decision.get("path") or "run")
-        if path in {"pause", "stop"}:
+        if path in {"pause", "stop", "complete"}:
             phase = path
         elif self._mode == "cooling" or path == "cooldown":
             phase = "cooldown"
@@ -2729,10 +3250,10 @@ class Controller:
             "heat": bool(decision.get("heat")),
         }
         detail.update(decision_fields(decision))
-        if "on_seconds" not in detail and path not in {"pause", "stop", "cooldown"}:
+        if "on_seconds" not in detail and path not in {"pause", "stop", "complete", "cooldown"}:
             detail["on_seconds"] = round(self._pulse_on_seconds(settings), 2)
         off = self._coast_off_seconds(settings)
-        if off and path not in {"pause", "stop"}:
+        if off and path not in {"pause", "stop", "complete"}:
             detail["off_seconds"] = round(off, 2)
         live = slope_f_per_sec(self._predict_samples)
         if live is not None and "live_slope_f_per_sec" not in detail:
@@ -2740,7 +3261,7 @@ class Controller:
         dwell = self._dwell_kind(settings, heaters)
         if dwell:
             detail["dwell"] = dwell
-        if path not in {"pause", "stop"}:
+        if path not in {"pause", "stop", "complete"}:
             forecast = self._forecast(settings)
             if forecast["seconds_to_target"] is not None:
                 detail["seconds_to_target"] = forecast["seconds_to_target"]
@@ -2882,9 +3403,8 @@ class Controller:
             "learned_cooldown_f_per_min": settings.learned_cooldown_f_per_min,
             "calibration_count": model_from_dict(settings.thermal_model).calibration_count,
             "calibration_step": self._calibration_lcd().get("step"),
-            "predicted_crest_f": None
-            if self._session is None or self._session.predicted_crest is None
-            else round(self._session.predicted_crest, 1),
+            "run_step": self._published_run_step(),
+            "predicted_crest_f": self._status_predicted_crest(),
             "charge_gallons": self._charge_gallons
             if self._mode in ("running", "paused") and self._run_kind == "calibration"
             else settings.charge_gallons,
@@ -2919,6 +3439,7 @@ class Controller:
             "emergency": [{"code": code, "summary": summary(code)} for code in self._emergency],
             "update_source": settings.update_source,
             "now_ms": int(time.time() * 1000),
+            **self._program_status(settings),
         }
 
 
@@ -3233,7 +3754,10 @@ class Controller:
                     close = True
                 changed = True
             if not close and steps:
-                changed = menu.move(steps) or changed
+                if menu.editing:
+                    changed = menu.nudge(steps) or changed
+                else:
+                    changed = menu.move(steps) or changed
             if not close and starts and not stops:
                 action = menu.select()
                 if action == "check":
@@ -3242,7 +3766,7 @@ class Controller:
                 if action == "test":
                     test_id = menu.chosen_test
                 changed = True
-        if changed:
+        if changed and action != "program-save":
             self._refresh_display()
         if action == "check":
             self._start_menu_check(generation)
@@ -3252,7 +3776,63 @@ class Controller:
             self._reboot_from_menu()
         elif action == "test":
             self._start_suite(test_id or "")
+        elif action == "program-save":
+            self._save_menu_program()
+            self._refresh_display()
         return changed
+
+    def _load_menu_program(self) -> None:
+        """Copy the saved Hold program onto the editor. Caller holds ``self._lock``."""
+
+        menu = self._menu
+        if menu is None:
+            return
+        settings = self.store.get_settings()
+        menu.load_program(
+            self._target_value(settings),
+            settings.program_continuous,
+            settings.program_duration_seconds,
+        )
+
+    def _save_menu_program(self) -> None:
+        """Write the Hold editor back to settings. A bad time is left unsaved."""
+
+        with self._lock:
+            menu = self._menu
+            if menu is None or menu.screen != "hold":
+                return
+            seconds = menu.duration_seconds()
+            target = menu.target
+            continuous = menu.continuous
+        if seconds < 1 or seconds > MAX_DURATION_SECONDS:
+            with self._lock:
+                menu = self._menu
+                if menu is None:
+                    return
+                menu.fault = "Need 1 second" if seconds < 1 else "72 hours max"
+                self._load_menu_program()
+            return
+        try:
+            self.update_settings(
+                {
+                    "target_temp_f": target,
+                    "program_mode": "hold",
+                    "program_continuous": continuous,
+                    "program_duration_seconds": seconds,
+                }
+            )
+        except ControllerError:
+            with self._lock:
+                menu = self._menu
+                if menu is None:
+                    return
+                menu.fault = "Not saved"
+                self._load_menu_program()
+            return
+        with self._lock:
+            menu = self._menu
+            if menu is not None:
+                menu.fault = ""
 
     def _start_suite(self, test_id: str) -> None:
         try:

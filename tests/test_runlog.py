@@ -149,6 +149,11 @@ def test_a_run_line_shows_the_shutoff_coast_and_a_held_heater():
     assert "minimum on time" in message
 
 
+def test_a_finished_calibration_is_logged_as_complete():
+    message = format_control({"path": "complete", "temp_f": 160.0, "heaters_on": [False, False]})
+    assert message == "Complete. 160.0°F. Heaters off."
+
+
 def test_start_and_model_lines_name_the_numbers_a_run_began_with():
     assert start_message("calibration", 140, None, None) == (
         "Calibration started at 140°F. No prior heating model."

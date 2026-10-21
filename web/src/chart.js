@@ -150,7 +150,88 @@ const offSpansPlugin = {
   },
 }
 
-Chart.register(offSpansPlugin, runMarkersPlugin)
+const WINDOW_FILL = 'rgba(142, 162, 255, 0.18)'
+const WINDOW_EDGE = 'rgba(142, 162, 255, 0.95)'
+const PREVIEW_FILL = 'rgba(142, 162, 255, 0.32)'
+
+function bandFor(chart, span) {
+  const elapsed = chart.$elapsed
+  const area = chart.chartArea
+  const xScale = chart.scales?.x
+  if (!span || !elapsed?.length || !area || !xScale) return null
+  const start = Math.min(Number(span.from), Number(span.to))
+  const end = Math.max(Number(span.from), Number(span.to))
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null
+  let first = -1
+  let last = -1
+  elapsed.forEach((value, index) => {
+    if (!Number.isFinite(value) || value < start - 0.05 || value > end + 0.05) return
+    if (first < 0) first = index
+    last = index
+  })
+  if (first < 0) return null
+  let left = xScale.getPixelForValue(first)
+  let right = xScale.getPixelForValue(last)
+  if (!Number.isFinite(left) || !Number.isFinite(right)) return null
+  if (first > 0) {
+    const previous = xScale.getPixelForValue(first - 1)
+    if (Number.isFinite(previous)) left -= (left - previous) / 2
+  }
+  if (last < elapsed.length - 1) {
+    const next = xScale.getPixelForValue(last + 1)
+    if (Number.isFinite(next)) right += (next - right) / 2
+  } else if (last > first) {
+    const previous = xScale.getPixelForValue(last - 1)
+    if (Number.isFinite(previous)) right += (right - previous) / 2
+  }
+  if (right < left) {
+    const swap = left
+    left = right
+    right = swap
+  }
+  if (right - left < 10) {
+    const mid = (left + right) / 2
+    left = mid - 5
+    right = mid + 5
+  }
+  left = Math.max(area.left, left)
+  right = Math.min(area.right, right)
+  if (right - left < 1) return null
+  return { left, right }
+}
+
+function paintBand(ctx, area, band, fill, edge) {
+  ctx.fillStyle = fill
+  ctx.fillRect(band.left, area.top, band.right - band.left, area.bottom - area.top)
+  ctx.strokeStyle = edge
+  ctx.lineWidth = 1.5
+  ctx.beginPath()
+  ctx.moveTo(band.left, area.top)
+  ctx.lineTo(band.left, area.bottom)
+  ctx.moveTo(band.right, area.top)
+  ctx.lineTo(band.right, area.bottom)
+  ctx.stroke()
+}
+
+const windowBandPlugin = {
+  id: 'windowBand',
+  beforeDatasetsDraw(chart) {
+    const area = chart.chartArea
+    if (!area) return
+    const ctx = chart.ctx
+    ctx.save()
+    ctx.beginPath()
+    ctx.rect(area.left, area.top, area.right - area.left, area.bottom - area.top)
+    ctx.clip()
+    const selected = bandFor(chart, chart.$window)
+    if (selected) paintBand(ctx, area, selected, WINDOW_FILL, WINDOW_EDGE)
+    const preview = bandFor(chart, chart.$windowPreview)
+    if (preview) paintBand(ctx, area, preview, PREVIEW_FILL, WINDOW_EDGE)
+    ctx.restore()
+  },
+}
+
+Chart.register(offSpansPlugin, windowBandPlugin, runMarkersPlugin)
 
 function clockLabel(at, spanMs) {
   const date = new Date(at)
@@ -322,8 +403,91 @@ function pointValue(point, index, timed) {
   return { x: point.at, y: point.temps[index] ?? null }
 }
 
+export function setChartWindow(chart, span) {
+  chart.$window = span && Number.isFinite(Number(span.from)) && Number.isFinite(Number(span.to))
+    ? { from: Number(span.from), to: Number(span.to) }
+    : null
+  chart.update('none')
+}
+
+function elapsedAt(chart, pixel) {
+  const scale = chart.scales?.x
+  const elapsed = chart.$elapsed || []
+  if (!scale || !elapsed.length || !Number.isFinite(pixel)) return null
+  const index = scale.getValueForPixel(pixel)
+  if (!Number.isFinite(index)) return null
+  const clamped = Math.max(0, Math.min(elapsed.length - 1, Math.round(index)))
+  const value = Number(elapsed[clamped])
+  return Number.isFinite(value) ? value : null
+}
+
+export function bindChartWindowSelect(chart, onSelect) {
+  const canvas = chart.canvas
+  let origin = null
+  let moved = false
+
+  function clearPreview() {
+    chart.$windowPreview = null
+    canvas.classList.remove('is-selecting')
+  }
+
+  function onDown(event) {
+    if (event.button != null && event.button !== 0) return
+    origin = event.offsetX
+    moved = false
+    if (canvas.setPointerCapture) canvas.setPointerCapture(event.pointerId)
+  }
+
+  function onMove(event) {
+    if (origin == null) return
+    if (Math.abs(event.offsetX - origin) < 8) return
+    moved = true
+    const from = elapsedAt(chart, origin)
+    const to = elapsedAt(chart, event.offsetX)
+    if (from == null || to == null) return
+    chart.$windowPreview = { from, to }
+    canvas.classList.add('is-selecting')
+    chart.update('none')
+  }
+
+  function onUp(event) {
+    if (origin == null) return
+    const from = elapsedAt(chart, origin)
+    const to = elapsedAt(chart, event.offsetX)
+    const choose = moved && from != null && to != null && Math.abs(to - from) >= 0.5
+    origin = null
+    moved = false
+    clearPreview()
+    if (choose) onSelect({ from: Math.min(from, to), to: Math.max(from, to) })
+    else chart.update('none')
+  }
+
+  function onCancel() {
+    if (origin == null) return
+    origin = null
+    moved = false
+    clearPreview()
+    chart.update('none')
+  }
+
+  canvas.addEventListener('pointerdown', onDown)
+  canvas.addEventListener('pointermove', onMove)
+  canvas.addEventListener('pointerup', onUp)
+  canvas.addEventListener('pointercancel', onCancel)
+  return () => {
+    canvas.removeEventListener('pointerdown', onDown)
+    canvas.removeEventListener('pointermove', onMove)
+    canvas.removeEventListener('pointerup', onUp)
+    canvas.removeEventListener('pointercancel', onCancel)
+  }
+}
+
 export function setChartPoints(chart, points, sensorNames, markers = [], view = null) {
   chart.$markers = markers
+  chart.$elapsed = points.map((point) => {
+    const value = Number(point.elapsed)
+    return Number.isFinite(value) ? value : null
+  })
   const timed = Boolean(chart.$timed)
   const spans = view ? view.spans || [] : timed ? offSpans(points, OFF_GAP_MS) : []
   chart.$offSpans = spans

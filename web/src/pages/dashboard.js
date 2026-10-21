@@ -1,4 +1,5 @@
 import { api } from '../api.js'
+import { numberStepper } from '../controls.js'
 import { openPath } from '../router.js'
 import { createTempChart, setChartPoints } from '../chart.js'
 import {
@@ -23,6 +24,9 @@ import {
   formatTarget,
   formatWhen,
   kindBadge,
+  programBadge,
+  runStatusClass,
+  runStatusLabel,
   statusClass,
   statusLabel,
   testSummary,
@@ -61,6 +65,22 @@ function coastText(status) {
     const line = steps[status.calibration_step] || 'Calibrating. Learning under 140°F, then holding 160°F.'
     return withEta(`${line}${crest}`)
   }
+  if (
+    status.run_step &&
+    status.run_kind !== 'calibration' &&
+    (status.mode === 'running' || status.mode === 'paused')
+  ) {
+    const crest =
+      status.predicted_crest_f == null ? '' : ` Predicted crest ${Number(status.predicted_crest_f).toFixed(1)}°F.`
+    const target = Math.round(Number(status.target_temp_f))
+    const steps = {
+      climb: 'Heating toward the target on the predicted crest.',
+      coast: 'Coasting. The projected rise is still on its way to the target.',
+      hold: `Holding ${target}°F.`,
+    }
+    const line = steps[status.run_step] || 'Heating toward the target.'
+    return withEta(`${line}${crest}`)
+  }
   if (status.learned_coast_f == null) {
     return withEta('Calibrate with water in the pot. Runs stay locked until that measurement is saved.')
   }
@@ -78,8 +98,8 @@ function coastText(status) {
 }
 
 function runBadge(run) {
-  const status = `<span class="status-badge ${statusClass(run.status)}">${statusLabel(run.status)}</span>`
-  return `${kindBadge(run.kind)}${status}`
+  const status = `<span class="status-badge ${runStatusClass(run)}">${runStatusLabel(run)}</span>`
+  return `${kindBadge(run.kind)}${programBadge(run)}${status}`
 }
 
 function runsInWindow(runs, windowStart, windowEnd, now) {
@@ -141,6 +161,33 @@ export function mountDashboard(root) {
             <p id="test-review-copy"></p>
           </div>
           <div class="console-launch">
+            <div class="program-panel" id="program-panel">
+              <div class="mode-choice source-choice" id="mode-choice" role="radiogroup" aria-label="Program mode">
+                <label>Hold
+                  <input type="radio" name="program_mode" value="hold" checked />
+                </label>
+              </div>
+              <div class="hold-fields" id="hold-fields">
+                <div class="duration-field" aria-label="Hold time">
+                  <label class="clock-part">Hours
+                    ${numberStepper('<input id="hold-hours" type="number" min="0" max="72" step="1" inputmode="numeric" value="1" />')}
+                  </label>
+                  <label class="clock-part">Minutes
+                    ${numberStepper('<input id="hold-minutes" type="number" min="0" max="59" step="1" inputmode="numeric" value="0" />')}
+                  </label>
+                  <label class="clock-part">Seconds
+                    ${numberStepper('<input id="hold-seconds" type="number" min="0" max="59" step="1" inputmode="numeric" value="0" />')}
+                  </label>
+                </div>
+                <label class="continuous-field">
+                  <input id="hold-continuous" type="checkbox" checked />
+                  Continuous
+                </label>
+              </div>
+              <p class="program-readout" id="program-readout" hidden></p>
+              <p class="program-cap" id="program-cap" hidden></p>
+            </div>
+            <div class="launch-row">
             <div class="status-actions" id="actions"></div>
             <div class="run-setup" id="run-setup">
               <label class="gallons-field" for="charge-gallons" title="The still size from setup. Change it when this calibration is for a different size.">
@@ -150,6 +197,7 @@ export function mountDashboard(root) {
                   <span>gal</span>
                 </span>
               </label>
+            </div>
             </div>
           </div>
           <p class="form-error" id="action-error" hidden></p>
@@ -296,15 +344,124 @@ export function mountDashboard(root) {
     targetInput.dispatchEvent(new Event('change'))
   })
 
+  const MAX_HOLD_SECONDS = 72 * 3600
+  let fillingProgram = false
+
+  function durationSeconds() {
+    const hours = Math.round(Number(document.getElementById('hold-hours').value) || 0)
+    const minutes = Math.round(Number(document.getElementById('hold-minutes').value) || 0)
+    const seconds = Math.round(Number(document.getElementById('hold-seconds').value) || 0)
+    return hours * 3600 + minutes * 60 + seconds
+  }
+
+  function selectedProgramMode() {
+    const chosen = document.querySelector('#mode-choice input:checked')
+    return chosen ? chosen.value : 'hold'
+  }
+
+  function syncDurationEnabled() {
+    const continuous = document.getElementById('hold-continuous').checked
+    for (const id of ['hold-hours', 'hold-minutes', 'hold-seconds']) {
+      document.getElementById(id).disabled = continuous
+    }
+  }
+
+  function programFocused() {
+    const active = document.activeElement
+    return Boolean(active && active.closest && active.closest('#hold-fields, #mode-choice'))
+  }
+
+  function programInvalid(continuous, seconds) {
+    if (continuous) return ''
+    if (seconds < 1) return 'Hold time has to be at least one second.'
+    if (seconds > MAX_HOLD_SECONDS) return 'Hold time has to be 72 hours or less.'
+    return ''
+  }
+
+  function fillProgram(program) {
+    if (programFocused()) return
+    fillingProgram = true
+    document.getElementById('hold-continuous').checked = program.continuous !== false
+    const total = Math.max(0, Math.round(Number(program.duration_seconds) || 3600))
+    document.getElementById('hold-hours').value = String(Math.floor(total / 3600))
+    document.getElementById('hold-minutes').value = String(Math.floor((total % 3600) / 60))
+    document.getElementById('hold-seconds').value = String(total % 60)
+    const mode = document.querySelector(`#mode-choice input[value="${program.mode || 'hold'}"]`)
+    if (mode) mode.checked = true
+    syncDurationEnabled()
+    fillingProgram = false
+  }
+
+  async function saveProgram() {
+    if (fillingProgram) return
+    syncDurationEnabled()
+    const continuous = document.getElementById('hold-continuous').checked
+    const seconds = durationSeconds()
+    const invalid = programInvalid(continuous, seconds)
+    if (invalid) {
+      showError(invalid)
+      return
+    }
+    try {
+      await api.saveSettings({
+        program_mode: selectedProgramMode(),
+        program_continuous: continuous,
+        program_duration_seconds: seconds,
+      })
+      clearError()
+    } catch (error) {
+      showError(error.message)
+    }
+  }
+
+  document.getElementById('program-panel').addEventListener('change', (event) => {
+    if (event.target.closest('#hold-fields, #mode-choice')) saveProgram()
+  })
+
+  function renderProgram(status) {
+    const live = status.mode === 'running' || status.mode === 'paused'
+    const program = status.program || {}
+    const holdRun = live && status.run_kind !== 'calibration' && status.run_kind !== 'test'
+    document.getElementById('mode-choice').hidden = live
+    document.getElementById('hold-fields').hidden = live || selectedProgramMode() !== 'hold'
+    const readout = document.getElementById('program-readout')
+    readout.hidden = !holdRun
+    if (holdRun) {
+      if (program.continuous) readout.textContent = 'Hold · Continuous'
+      else if (program.remaining_seconds != null) {
+        readout.textContent = `Hold · ${formatDuration(program.remaining_seconds)} left`
+      } else readout.textContent = `Hold · ${formatDuration(program.duration_seconds)} once it is holding`
+    }
+    const cap = document.getElementById('program-cap')
+    if (live && status.max_program_remaining_seconds != null) {
+      cap.hidden = false
+      cap.textContent = `${status.max_program_hours} hour limit · ${formatDuration(status.max_program_remaining_seconds)} left`
+    } else {
+      cap.hidden = true
+    }
+    if (!live) fillProgram(program)
+  }
+
   function targetValue() {
     return Math.round(Number(document.getElementById('target-input').value))
   }
 
   async function onStart() {
     if (busy) return
+    const continuous = document.getElementById('hold-continuous').checked
+    const invalid = programInvalid(continuous, durationSeconds())
+    if (invalid) {
+      showError(invalid)
+      return
+    }
     busy = true
     try {
-      await api.start({ target_temp_f: targetValue() })
+      await api.start({
+        target_temp_f: targetValue(),
+        program_mode: selectedProgramMode(),
+        program_continuous: document.getElementById('hold-continuous').checked,
+        program_duration_seconds: durationSeconds(),
+      })
       clearError()
       await refresh()
     } catch (error) {
@@ -616,6 +773,7 @@ export function mountDashboard(root) {
       renderedMode = actionKey
       renderActions(status)
     }
+    renderProgram(status)
     const charge = document.getElementById('charge-gallons')
     if (!charge.dataset.ready && status.charge_gallons != null && document.activeElement !== charge) {
       charge.value = String(status.charge_gallons)
@@ -647,7 +805,9 @@ export function mountDashboard(root) {
             ? 'Calibration'
             : status.run_kind === 'test'
               ? 'Test'
-              : 'Run'
+              : status.program && status.program.mode === 'hold'
+                ? 'Hold'
+                : 'Run'
           : ''
 
     lastStatus = status

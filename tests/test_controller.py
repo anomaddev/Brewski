@@ -406,6 +406,20 @@ def test_calibration_learns_the_soak_then_opens_under_140(store):
     assert controller.status()["mode"] == "idle"
 
 
+def test_a_finished_calibration_closes_as_complete(store):
+    source = StaticSource([80.0, 70.0])
+    controller = Controller(store, source)
+    started = controller.start({"kind": "calibration"})
+    controller._session.finished = True
+    controller.tick(1)
+    saved = store.get_run(started["run_id"])
+    assert saved["status"] == "complete"
+    closing = [item for item in saved["logs"] if item["detail"].get("path") == "complete"]
+    assert closing
+    assert closing[-1]["message"].startswith("Complete.")
+    assert controller.status()["mode"] == "idle"
+
+
 def test_a_slow_climb_does_not_end_the_coast(store):
     source = StaticSource([70.0, 70.0])
     controller = Controller(store, source)
@@ -1178,3 +1192,153 @@ def test_a_paused_run_keeps_logging_temperature_without_extra_samples(store):
     assert len(saved["samples"]) == before
     paused = [item for item in saved["logs"] if item["detail"].get("path") == "pause"]
     assert paused[-1]["detail"]["temp_f"] == pytest.approx(110)
+
+
+def _ready_model(store):
+    current = store.get_settings()
+    store.save_settings(
+        replace(
+            current,
+            thermal_model={
+                "soak_tau_seconds": 37,
+                "linear_rate_f_per_sec": 0.4,
+                "coast_rise_f": 4,
+                "coast_seconds": 30,
+                "coast_tau_seconds": 10,
+                "cooldown_f_per_min": 1,
+            },
+        )
+    )
+
+
+def _shut_off_on_the_crest(controller, source, temp=161.0):
+    """Open the SSR where a hot sheath's predicted crest is the 165°F target."""
+
+    controller._sheath_slope = 0.4
+    controller._heater_on_for = [10_000.0, 10_000.0]
+    source.temps = [temp, 90.0]
+    controller.tick(1)
+
+
+def test_a_ready_model_publishes_the_climb_and_its_crest(store):
+    _ready_model(store)
+    source = StaticSource([100.0, 90.0])
+    controller = Controller(store, source)
+    started = controller.start()
+    assert started["mode"] == "running"
+    assert started["run_step"] == "climb"
+    assert started["predicted_crest_f"] is not None
+    assert store.get_run(started["run_id"])["samples"][0]["phase"] == "climb"
+    assert source.heaters[:2] == [True, True]
+
+
+def test_an_unspent_coast_does_not_start_another_pulse(store):
+    _ready_model(store)
+    source = StaticSource([100.0, 90.0])
+    controller = Controller(store, source)
+    controller.start()
+    _shut_off_on_the_crest(controller, source)
+    assert source.heaters[:2] == [False, False]
+
+    source.temps = [162.0, 90.0]
+    controller.tick(1)
+    status = controller.status()
+    assert source.heaters[:2] == [False, False]
+    assert status["run_step"] == "coast"
+    assert status["mode"] == "running"
+    assert status["predicted_crest_f"] == pytest.approx(165, abs=0.2)
+    assert controller._decision["path"] == "coast"
+
+
+def test_a_ready_model_holds_inside_the_band_until_stop(store):
+    _ready_model(store)
+    source = StaticSource([100.0, 90.0])
+    controller = Controller(store, source)
+    run_id = controller.start()["run_id"]
+    _shut_off_on_the_crest(controller, source)
+    source.temps = [165.0, 90.0]
+    controller.tick(1)
+    status = controller.status()
+    assert status["run_step"] == "hold"
+    assert status["mode"] == "running"
+    assert source.heaters[:2] == [False, False]
+    assert "Holding" in [mark["name"] for mark in store.get_run(run_id)["marks"]]
+    phases = [item["detail"]["phase"] for item in store.get_run(run_id)["logs"] if item["event"] == "phase"]
+    assert "hold" in phases
+
+    source.temps = [165.0, 90.0]
+    controller.tick(30)
+    assert controller.status()["mode"] == "running"
+    assert controller.status()["run_step"] == "hold"
+    assert source.heaters[:2] == [False, False]
+
+    controller._sheath_slope = 0.0
+    source.temps = [164.0, 90.0]
+    controller.tick(1)
+    assert source.heaters[:2] == [True, True]
+    assert controller.status()["run_step"] == "hold"
+    assert controller._decision["path"] == "hold"
+
+    source.temps = [165.2, 90.0]
+    controller.tick(1)
+    assert source.heaters[:2] == [False, False]
+    assert controller.status()["mode"] == "running"
+    assert controller.status()["run_step"] == "hold"
+
+
+def test_a_coast_that_finishes_short_climbs_again(store):
+    _ready_model(store)
+    source = StaticSource([100.0, 90.0])
+    controller = Controller(store, source)
+    controller.start()
+    _shut_off_on_the_crest(controller, source)
+    source.temps = [158.0, 90.0]
+    controller.tick(8)
+    assert controller.status()["run_step"] == "climb"
+    assert source.heaters[:2] == [True, True]
+    assert controller.status()["mode"] == "running"
+
+
+def test_raising_the_target_leaves_hold_and_climbs_on_the_budgeted_crest(store):
+    _ready_model(store)
+    source = StaticSource([100.0, 90.0])
+    controller = Controller(store, source)
+    controller.start()
+    _shut_off_on_the_crest(controller, source)
+    source.temps = [165.0, 90.0]
+    controller.tick(1)
+    assert controller.status()["run_step"] == "hold"
+
+    current = store.get_settings()
+    store.save_settings(replace(current, target_temp_f=180))
+    source.temps = [165.0, 90.0]
+    controller.tick(1)
+    assert controller.status()["run_step"] == "climb"
+    assert controller._decision["path"] == "model"
+    assert source.heaters[:2] == [True, True]
+
+    controller._predict_samples.clear()
+    controller._sheath_slope = 0.4
+    controller._heater_on_for = [10_000.0, 10_000.0]
+    source.temps = [175.0, 90.0]
+    controller.tick(1)
+    assert source.heaters[:2] == [True, True]
+
+    controller._predict_samples.clear()
+    controller._sheath_slope = 0.4
+    source.temps = [176.0, 90.0]
+    controller.tick(1)
+    assert source.heaters[:2] == [False, False]
+    assert controller._decision["predicted_crest_f"] == pytest.approx(180, abs=0.2)
+    assert controller.status()["mode"] == "running"
+
+
+def test_a_model_that_is_not_ready_still_uses_the_coast_cutoff(store):
+    source = StaticSource([100.0, 90.0])
+    controller = Controller(store, source)
+    started = controller.start()
+    assert started["run_step"] is None
+    assert started["predicted_crest_f"] is None
+    controller.tick(1)
+    assert controller.status()["run_step"] is None
+    assert controller._decision["path"] == "cutoff"

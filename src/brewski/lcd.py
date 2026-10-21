@@ -528,6 +528,8 @@ def status_lines(
     calibration_rate_f: float | None = None,
     eta_seconds: float | None = None,
     eta_kind: str | None = None,
+    program_mode: str | None = None,
+    hold_remaining_seconds: float | None = None,
 ) -> list[str]:
     """Four 20-column lines. Labels sit on the left and values on the right."""
 
@@ -573,9 +575,13 @@ def status_lines(
     elif mode in {"running", "paused", "cooling"}:
         label = _mode_label(mode, calibrating)
         head = _pair(label, clock)
+    elif mode == "idle" and program_mode == "hold":
+        head = "Hold:"
     else:
         head = "Idle:"
-    if eta_seconds is None:
+    if hold_remaining_seconds is not None and not calibrating and mode in {"running", "paused"}:
+        target_line = _pair(_whole_temp(target_f), _eta_label(hold_remaining_seconds, "hold"))
+    elif eta_seconds is None:
         target_line = _value_line("Target:", _whole_temp(target_f))
     else:
         target_line = _pair(_whole_temp(target_f), _eta_label(eta_seconds, eta_kind))
@@ -775,6 +781,8 @@ def _eta_label(seconds: float, kind: str | None) -> str:
         clock = f"{total}s"
     if kind == "cool":
         return f"cool {clock}"
+    if kind == "hold":
+        return f"hold {clock}"
     return f"~{clock}"
 
 

@@ -27,6 +27,7 @@ PHASE_LABELS = {
     "pulse": "Pulse",
     "pulse_coast": "Pulse coast",
     "pulses": "Pulse",
+    "climb": "Climb",
     "hold": "Holding",
     "heating": "Initial Heating",
     "run": "Run",
@@ -36,7 +37,21 @@ PHASE_LABELS = {
     "cooldown": "Cooldown",
     "pause": "Paused",
     "stop": "Stopped",
+    "complete": "Complete",
 }
+
+
+def phase_keys(name: str) -> tuple[str, ...] | None:
+    """Stored phase names that share one chart label.
+
+    ``name`` may be any key in :data:`PHASE_LABELS`. Unknown names return None.
+    """
+
+    label = PHASE_LABELS.get(str(name))
+    if label is None:
+        return None
+    return tuple(key for key, text in PHASE_LABELS.items() if text == label)
+
 
 _DECISION_KEYS = (
     "slope_f_per_sec",
@@ -252,7 +267,7 @@ def format_control(detail: dict) -> str:
     """The calculation sentence for one sample or one heater change."""
 
     path = str(detail.get("path") or detail.get("phase") or "run")
-    if detail.get("temp_f") is None and path not in {"pause", "stop"}:
+    if detail.get("temp_f") is None and path not in {"pause", "stop", "complete"}:
         title = PHASE_LABELS.get(path, "Run")
         return f"{title}. No control-probe reading. {heat_phrase(detail)}."
     if path == "settle":
@@ -297,6 +312,8 @@ def format_control(detail: dict) -> str:
         return f"Paused. {_temp(detail)} Heaters off."
     if path == "stop":
         return f"Stopped. {_temp(detail)} Heaters off."
+    if path == "complete":
+        return f"Complete. {_temp(detail)} Heaters off."
     return _generic(detail)
 
 

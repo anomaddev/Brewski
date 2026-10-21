@@ -14,7 +14,7 @@ export function mountSettings(root) {
         <h1>Settings</h1>
       </header>
       <p class="lock-banner" id="lock-banner" hidden>
-        Heater, probe, and GPIO setup is locked while a run is open. The target, the cabinet limit, the minimum on and off times, and the update source can still be changed.
+        Heater, probe, and GPIO setup is locked while a run is open. The target, the cabinet limit, the max program duration, the minimum on and off times, and the update source can still be changed.
       </p>
       <div class="settings-top">
         <section class="dashboard-card settings-card" aria-labelledby="control-title">
@@ -49,6 +49,21 @@ export function mountSettings(root) {
               },
               `<label class="field target-field-setting">Maximum (°F)
                 ${numberStepper('<input name="cabinet_limit_f" id="cabinet-limit" type="number" min="100" max="200" step="1" inputmode="numeric" required />')}
+              </label>`,
+            )}
+            ${settingRow(
+              'Max program duration',
+              {
+                lead: 'Every program stops when the run clock reaches this, including a continuous hold.',
+                rows: [
+                  ['Range', '6–72 hours'],
+                  ['Default', '24 hours'],
+                  ['Pause', 'The clock stays put'],
+                  ['Next start', 'Still allowed'],
+                ],
+              },
+              `<label class="field target-field-setting">Hours
+                ${numberStepper('<input name="max_program_hours" id="max-program-hours" type="number" min="6" max="72" step="1" inputmode="numeric" required />')}
               </label>`,
             )}
             ${settingRow(
@@ -223,7 +238,7 @@ export function mountSettings(root) {
       button.disabled = isLocked
     }
     for (const input of form.querySelectorAll(
-      'input:not([name="target_temp_f"]):not([name="cabinet_limit_f"]):not([name="heater_min_on_seconds"]):not([name="heater_min_off_seconds"]):not([name="update_source"]), select',
+      'input:not([name="target_temp_f"]):not([name="cabinet_limit_f"]):not([name="max_program_hours"]):not([name="heater_min_on_seconds"]):not([name="heater_min_off_seconds"]):not([name="update_source"]), select',
     )) {
       input.disabled = isLocked
     }
@@ -396,6 +411,7 @@ export function mountSettings(root) {
     const body = {
       target_temp_f: Math.round(Number(form.elements.target_temp_f.value)),
       cabinet_limit_f: Math.round(Number(form.elements.cabinet_limit_f.value)),
+      max_program_hours: Math.round(Number(form.elements.max_program_hours.value)),
       heater_min_on_seconds: Number(form.elements.heater_min_on_seconds.value),
       heater_min_off_seconds: Number(form.elements.heater_min_off_seconds.value),
       update_source: form.elements.update_source.value === 'beta' ? 'beta' : 'main',
@@ -454,6 +470,10 @@ export function mountSettings(root) {
     const cabinet = form.elements.cabinet_limit_f
     if (document.activeElement !== cabinet && settings.cabinet_limit_f != null) {
       cabinet.value = String(Math.round(Number(settings.cabinet_limit_f)))
+    }
+    const maxHours = form.elements.max_program_hours
+    if (document.activeElement !== maxHours && settings.max_program_hours != null) {
+      maxHours.value = String(Math.round(Number(settings.max_program_hours)))
     }
     const minOff = form.elements.heater_min_off_seconds
     if (document.activeElement !== minOff) {

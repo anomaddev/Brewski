@@ -76,7 +76,18 @@ def create_app(controller: Controller) -> Flask:
     @app.get("/api/runs/<int:run_id>")
     def run(run_id: int):
         include_logs = request.args.get("logs", "1").lower() not in {"0", "false", "no"}
-        return jsonify(controller.run(run_id, include_logs=include_logs))
+        include_samples = request.args.get("samples", "1").lower() not in {"0", "false", "no"}
+        return jsonify(
+            controller.run(run_id, include_logs=include_logs, include_samples=include_samples)
+        )
+
+    @app.get("/api/runs/<int:run_id>/chart")
+    def run_chart(run_id: int):
+        return jsonify(controller.chart_samples(run_id, _logs_after()))
+
+    @app.get("/api/runs/<int:run_id>/review")
+    def run_review(run_id: int):
+        return jsonify(controller.review_window(run_id, **_review_query()))
 
     @app.get("/api/runs/<int:run_id>/logs")
     def run_logs(run_id: int):
@@ -168,6 +179,53 @@ def _timeline_max() -> int:
         return int(raw)
     except ValueError as exc:
         raise ControllerError("max must be an integer", 400) from exc
+
+
+def _review_query() -> dict:
+    raw_limit = request.args.get("limit", "25")
+    try:
+        limit = int(raw_limit)
+    except ValueError as exc:
+        raise ControllerError("Page size must be 10, 25, 50, or 100", 400) from exc
+    start = _optional_elapsed("from")
+    end = _optional_elapsed("to")
+    events_raw = request.args.get("events", "")
+    events = [part.strip() for part in events_raw.split(",") if part.strip()] if events_raw else []
+    phase = request.args.get("phase", "").strip() or None
+    return {
+        "limit": limit,
+        "log_offset": _query_int("log_offset"),
+        "sample_offset": _query_int("sample_offset"),
+        "from_elapsed": start,
+        "to_elapsed": end,
+        "clock": request.args.get("clock", "run") or "run",
+        "events": events,
+        "phase": phase,
+        "tail": request.args.get("tail", "").lower() in {"1", "true", "yes"},
+    }
+
+
+def _optional_elapsed(name: str) -> float | None:
+    raw = request.args.get(name)
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ControllerError(f"{name} must be seconds", 400) from exc
+
+
+def _query_int(name: str, default: int = 0) -> int:
+    raw = request.args.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ControllerError(f"{name} must be an integer", 400) from exc
+    if value < 0:
+        raise ControllerError(f"{name} must be an integer", 400)
+    return value
 
 
 def _logs_after() -> int:

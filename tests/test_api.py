@@ -90,6 +90,39 @@ def test_a_run_log_can_be_read_in_pages_and_exported(client, controller):
     assert client.get("/api/runs/999/export.zip").status_code == 404
 
 
+def test_a_run_review_pages_both_logs_and_leaves_the_chart_incremental(client, controller):
+    run_id = client.post("/api/runs/start").get_json()["run_id"]
+    controller.tick(1)
+    controller.tick(1)
+    slim = client.get(f"/api/runs/{run_id}?logs=0&samples=0").get_json()
+    assert "logs" not in slim
+    assert "samples" not in slim
+    assert "heater_on_seconds" in slim
+
+    chart = client.get(f"/api/runs/{run_id}/chart").get_json()["samples"]
+    assert chart
+    assert "heaters_on" not in chart[0]
+    assert client.get(f"/api/runs/{run_id}/chart?after={chart[-1]['id']}").get_json()["samples"] == []
+
+    page = client.get(f"/api/runs/{run_id}/review?limit=10").get_json()
+    assert page["limit"] == 10
+    assert page["mode"] == "page"
+    assert page["logs"]["rows"]
+    assert page["window"]["from"] is not None
+    assert client.get(f"/api/runs/{run_id}/review?limit=15").status_code == 400
+    assert client.get(f"/api/runs/{run_id}/review?from=5&to=1").status_code == 400
+    assert client.get(f"/api/runs/{run_id}/review?events=nope").status_code == 400
+    assert client.get(f"/api/runs/{run_id}/review?phase=nope").status_code == 400
+    assert client.get("/api/runs/999/review").status_code == 404
+    assert client.get("/api/runs/999/chart").status_code == 404
+
+    custom = client.get(f"/api/runs/{run_id}/review?from=0&to=1&clock=run").get_json()
+    assert custom["mode"] == "custom"
+    assert custom["window"]["from"] == 0
+    assert custom["window"]["to"] == 1
+    assert all(0 <= row["elapsed_seconds"] <= 1 for row in custom["logs"]["rows"])
+
+
 def test_console_output_stays_on_a_run_after_it_closes_and_while_it_cools(controller):
     run_id = controller.start()["run_id"]
     controller.source.temps = [140.0, 110.0]

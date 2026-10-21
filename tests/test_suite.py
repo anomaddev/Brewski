@@ -212,7 +212,7 @@ def test_initial_heating_leaves_the_model_and_holds_the_result(store):
     cleared = controller.end_test()
     assert cleared["test"] is None
     controller._refresh_display()
-    assert controller._display.lines[0] == "Idle:"
+    assert controller._display.lines[0] == "Hold:"
 
 
 def test_stopping_during_settle_holds_an_early_result(store):
@@ -238,7 +238,7 @@ def test_stopping_during_settle_holds_an_early_result(store):
 def test_the_menu_starts_initial_heating(controller):
     controller._panel = _Panel((0, 0, 1, 0))
     controller._apply_panel()
-    controller._panel = _Panel((0, 0, 0, 2))
+    controller._panel = _Panel((0, 0, 0, 3))
     controller._apply_panel()
     assert controller._display.lines[3] == "> Test Suite"
     controller._panel = _Panel((1, 0, 0, 0))

@@ -256,18 +256,18 @@ def test_software_menu_lines_and_leds():
     menu = SoftwareMenu()
     assert menu.lines("0.6.5") == [
         menu_title("v"),
-        "> About",
+        "> Program",
+        "  About",
         "  Networking",
-        "  Test Suite",
     ]
     assert len(menu.lines("0.6.5")[0]) == 20
     assert menu.leds() == (True, True)
     assert menu.move(2) is True
-    assert menu.lines("0.6.5")[3] == "> Test Suite"
+    assert menu.lines("0.6.5")[3] == "> Networking"
     menu.index = 0
     menu.top = 0
     assert menu.move(-1) is False
-    assert menu.lines("0.6.5")[1] == "> About"
+    assert menu.lines("0.6.5")[1] == "> Program"
     menu.index = len(ITEMS) - 1
     menu.top = len(ITEMS) - VISIBLE
     assert menu.move(1) is False
@@ -279,7 +279,7 @@ def test_software_menu_lines_and_leds():
     assert menu.back() is True
     assert menu.lines("0.6.5")[0].startswith("Software Menu")
 
-    menu.index = 0
+    menu.index = 1
     menu.select()
     assert menu.lines("9.9.9") == ["About", "Brewski", "Release 9.9.9", "STOP back"]
     installed = "abc1234" + "a" * 33
@@ -299,7 +299,7 @@ def test_software_menu_lines_and_leds():
     assert menu.select() is None
 
     menu.back()
-    menu.index = 3
+    menu.index = 4
     assert menu.select() == "check"
     assert menu.lines("0.6.5")[1] == "Checking..."
     menu.show_release(
@@ -343,7 +343,7 @@ def test_software_menu_lines_and_leds():
 
 def test_the_menu_scrolls_when_the_highlight_leaves_the_window():
     menu = SoftwareMenu()
-    menu.move(4)
+    menu.move(5)
     assert menu.lines("0.6.5") == [
         menu_title("^"),
         "  Test Suite",
@@ -361,7 +361,7 @@ def test_the_menu_scrolls_when_the_highlight_leaves_the_window():
 
 def test_networking_screen_shows_the_address_and_hostname():
     menu = SoftwareMenu()
-    menu.index = 1
+    menu.index = 2
     assert menu.select() is None
     assert menu.screen == "networking"
     assert menu.leds() == (False, True)
@@ -382,7 +382,7 @@ def test_networking_screen_shows_the_address_and_hostname():
 
 def test_test_suite_confirms_before_initial_heating():
     menu = SoftwareMenu()
-    menu.index = 2
+    menu.index = 3
     assert menu.select() is None
     assert menu.screen == "suite"
     assert menu.lines("0.6.5") == [
@@ -410,3 +410,31 @@ def test_test_suite_confirms_before_initial_heating():
     assert menu.leds() == (False, True)
     assert menu.back() is True
     assert menu.screen == "list"
+
+
+def test_hold_editor_changes_one_field_and_toggles_continuous():
+    menu = SoftwareMenu()
+    menu.load_program(165, True, 3600)
+    menu.index = 0
+    assert menu.select() is None
+    assert menu.screen == "program"
+    assert menu.lines("0.6.5")[1] == "> Hold"
+    assert menu.select() is None
+    assert menu.screen == "hold"
+    assert menu.lines("0.6.5")[1].startswith("> Target")
+    assert menu.lines("0.6.5")[1].endswith("165 F")
+    assert menu.select() is None
+    assert menu.editing is True
+    assert menu.lines("0.6.5")[0].startswith("Editing")
+    assert menu.nudge(2) is True
+    assert menu.lines("0.6.5")[1].endswith("167 F")
+    assert menu.select() == "program-save"
+    assert menu.editing is False
+    assert menu.target == 167
+    menu.move(4)
+    assert "Continuous" in menu.lines("0.6.5")[3]
+    assert menu.select() == "program-save"
+    assert menu.continuous is False
+    assert menu.back() is True
+    assert menu.screen == "program"
+    assert all(len(line) <= 20 for line in menu.lines("0.6.5"))

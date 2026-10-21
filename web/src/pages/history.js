@@ -1,6 +1,6 @@
 import { api } from '../api.js'
 import { openPath } from '../router.js'
-import { escapeHtml, formatCooldown, formatDuration, formatHours, formatTarget, formatWhen, kindBadge, statusClass, statusLabel } from '../format.js'
+import { escapeHtml, formatCooldown, formatDuration, formatHours, formatTarget, formatWhen, kindBadge, programBadge, runStatusClass, runStatusLabel } from '../format.js'
 import { setSourceBadge } from '../layout.js'
 
 export function mountHistory(root) {
@@ -96,7 +96,7 @@ export function mountHistory(root) {
         ]
         cells.push([
           'Status',
-          `${kindBadge(run.kind)}<span class="status-badge ${statusClass(run.status)}">${statusLabel(run.status)}</span>`,
+          `${kindBadge(run.kind)}${programBadge(run)}<span class="status-badge ${runStatusClass(run)}">${runStatusLabel(run)}</span>`,
         ])
         return `
           <tr data-href="/history/${run.id}">

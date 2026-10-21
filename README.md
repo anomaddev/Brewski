@@ -61,6 +61,12 @@ About once a second the controller reads the probes. **The first enabled probe i
 
 Once a calibration has saved the full model, the elements stay on until the predicted crest reaches the dial target. That prediction plays the exponential soak, then the straight heating rate, then the leveling coast. There is no extra margin under the target.
 
+The run then stays off while that same projected coast still has rise left. The chart draws the next minute of the curve; the shutoff uses the whole crest, because the coast can outlast that minute. When the crest has landed within 1°F of the dial target, minimum pulses hold it there. A pulse waits while the previous coast is still arriving, and it fires only when its landing is on the target and at most 1°F above it. A shortfall of more than that, or a higher target, climbs again on the same prediction. Pause, Stop, and an emergency open the heaters. The saved model is not changed during the run.
+
+A normal run is a Hold program. With Continuous on, it holds until Stop. With Continuous off, it holds for the set time and is saved as complete. That clock starts the first time the run is holding, and a later sag does not reset it. Pause freezes it, along with the run clock. The dashboard and the software menu on the LCD edit the same program: target, hours, minutes, seconds, and Continuous. Start on the panel uses whatever was saved.
+
+Settings has a max program duration, 24 hours unless changed, from 6 to 72. Every open run, including a calibration and a test, is saved as complete when its elapsed time reaches that cap. The cap wins over a longer hold. It does not refuse the next Start.
+
 Until that model exists, heaters turn off by the measured coast, sooner when the recent rise is faster, and only the fraction of the coast a cold sheath has stored.
 
 - Without a measured cooling rate, they turn back on when the probe falls 2°F below that coast.
@@ -98,7 +104,7 @@ A later calibration is averaged into the model already saved, one equal share pe
 
 The calibration uses the still size from setup. A different size scales rates and rises, not the soak or coast time constants.
 
-Calibration runs stay in the log with their own badge and are left out of the run count, average duration, average cooldown, and the per-run heater-on totals. They still add to each element's hour meter, because the element was powered.
+Calibration runs stay in the log with their own badge and are left out of the run count, average duration, and the per-run heater-on totals. They still add to each element's hour meter, because the element was powered. A finished calibration cooldown is included in the average cooldown.
 
 ### Cooldown
 
@@ -112,7 +118,7 @@ Starting a new run marks the open cooldown interrupted. A stop at or under 100°
 
 Each heater and each probe can be enabled or disabled on its own. Changing names, which devices are enabled, a heater's GPIO pin, a probe's MAX31865 chip select, RTD, wire count, or reference resistor, or any other GPIO pin, is locked while a run is open.
 
-The target temperature, the cabinet limit, and the minimum on and off times can still be changed. Later samples record the new target, and the run keeps the target it started with. The target dial on the panel changes that same target by 1°F, from 90 to 240.
+The target temperature, the cabinet limit, the max program duration, and the minimum on and off times can still be changed. Later samples record the new target, and the run keeps the target it started with. The hold time and Continuous are fixed when Start is pressed. If the open run has already passed a newly lowered cap, it completes on the next tick. The target dial on the panel changes that same target by 1°F, from 90 to 240.
 
 ### Cabinet interlock
 
@@ -171,12 +177,13 @@ The LCD is a 20×4 I2C display on the saved SDA and SCL pins, after setup. It pr
 
 The running controller keeps the start and stop buttons, their LED relays, and the target encoder open. An LED is solid on only while that button will do something. While Stop is held, its lamp stays dark until the hold is long enough, then comes on, and goes out again when the button is released. The boot update prompt turns both LEDs on and does not blink them.
 
-After the controller is up, the LCD shows the mode and clock, the target, the probe or probes, and both heaters. During a run the target line also shows the estimated time to the target, or the estimated time to cool once the pot is falling. During a calibration those first lines name the step: Settle, Initial heating, Linear heating, Coasting, Adjusted, Pulse, Holding, and then the saved coast and cooling rate while the pot cools. A still that has never been calibrated asks for Start. An emergency code replaces that screen until it clears.
+After the controller is up, the LCD shows the mode and clock, the target, the probe or probes, and both heaters. A calibrated still that is idle shows Hold, which is what Start will run. During a run the target line also shows the estimated time to the target, or the estimated time to cool once the pot is falling. While a timed Hold is holding, that line shows the hold time remaining instead. During a calibration those first lines name the step: Settle, Initial heating, Linear heating, Coasting, Adjusted, Pulse, Holding, and then the saved coast and cooling rate while the pot cools. A still that has never been calibrated asks for Start. An emergency code replaces that screen until it clears.
 
 Holding Stop for 4 seconds while the still is idle or cooling opens a Software Menu:
 
 | Item | What it does |
 | --- | --- |
+| Program | The mode Start will run. Hold sets the target, the hours, minutes, and seconds, and Continuous. The dial changes the open number, Start confirms it, and Stop leaves it. |
 | About | Brewski and the installed version. |
 | Networking | This Pi's address and hostname. The port is on the address line, so the dashboard can be opened from another computer. |
 | Test Suite | Live heating tests. The list scrolls, so a later item still fits on the four-line display. |

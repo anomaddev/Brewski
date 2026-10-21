@@ -192,8 +192,8 @@ def test_initial_heating_names_the_phase_and_holds_the_slope():
 
 
 def test_idle_paused_and_cooling():
-    idle = _screen(mode="idle")
-    assert idle[0] == "Idle:"
+    idle = _screen(mode="idle", program_mode="hold")
+    assert idle[0] == "Hold:"
     assert idle[1] == "Target:        165 F"
     assert idle[3] == "H1: OFF      H2: OFF"
 
@@ -204,6 +204,11 @@ def test_idle_paused_and_cooling():
     cooling = _screen(mode="cooling", elapsed_seconds=5, probes=[("Boiler", 150.0)])
     assert cooling[0] == "Cooling:    00:00:05"
     assert len(cooling[0]) == COLUMNS
+
+    holding = _screen(mode="running", hold_remaining_seconds=125, target_f=165)
+    assert holding[1].endswith("hold 2m")
+    assert "165 F" in holding[1]
+    assert all(len(line) <= COLUMNS for line in holding)
 
 
 def test_emergency_screens():

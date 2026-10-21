@@ -26,7 +26,15 @@ export const api = {
   reboot: () => request('/api/reboot', { method: 'POST' }),
   timeline: (from, to, max = 1600) => request(`/api/timeline?from=${from}&to=${to}&max=${max}`),
   runs: () => request('/api/runs'),
-  run: (id, { logs = true } = {}) => request(`/api/runs/${id}${logs ? '' : '?logs=0'}`),
+  run: (id, { logs = true, samples = true } = {}) => {
+    const params = new URLSearchParams()
+    if (!logs) params.set('logs', '0')
+    if (!samples) params.set('samples', '0')
+    const query = params.toString()
+    return request(`/api/runs/${id}${query ? `?${query}` : ''}`)
+  },
+  chart: (id, after = 0) => request(`/api/runs/${id}/chart?after=${after}`),
+  review: (id, query) => request(`/api/runs/${id}/review?${new URLSearchParams(query)}`),
   runLogs: (id, after = 0) => request(`/api/runs/${id}/logs?after=${after}`),
   start: (body) => request('/api/runs/start', { method: 'POST', body: JSON.stringify(body || {}) }),
   cleanCalibration: () => request('/api/calibration/clean', { method: 'POST' }),

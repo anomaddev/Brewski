@@ -224,23 +224,26 @@ def test_stop_hold_opens_the_software_menu_without_changing_the_target(controlle
     assert controller._apply_panel() is True
     assert controller._display.lines == [
         "Software Menu      v",
-        "> About",
+        "> Program",
+        "  About",
         "  Networking",
-        "  Test Suite",
     ]
     assert store.get_settings().target_temp_f == 165
     assert controller.status()["target_temp_f"] == 165
 
-    controller._panel = _Panel((0, 0, 0, 4))
+    controller._panel = _Panel((0, 0, 0, 5))
     controller._apply_panel()
     assert controller._display.lines[3] == "> Reboot"
     assert store.get_settings().target_temp_f == 165
     assert controller.status()["target_temp_f"] == 165
 
-    controller._panel = _Panel((0, 0, 0, -4))
+    controller._panel = _Panel((0, 0, 0, -5))
     controller._apply_panel()
-    assert controller._display.lines[1] == "> About"
+    assert controller._display.lines[1] == "> Program"
 
+    controller._panel = _Panel((0, 0, 0, 1))
+    controller._apply_panel()
+    assert controller._display.lines[2] == "> About"
     controller._panel = _Panel((1, 0, 0, 0))
     controller._apply_panel()
     assert controller._display.lines == ["About", "Brewski", f"Release {__version__}", "STOP back"]
@@ -252,7 +255,7 @@ def test_stop_hold_opens_the_software_menu_without_changing_the_target(controlle
     controller._panel = _Panel((0, 1, 0, 0))
     controller._apply_panel()
     assert controller._menu is None
-    assert controller._display.lines[0] == "Idle:"
+    assert controller._display.lines[0] == "Hold:"
 
     controller._panel = _Panel((0, 0, 1, 0))
     controller._apply_panel()
@@ -266,7 +269,9 @@ def test_about_shows_the_commit_when_beta_is_installed(controller, store, monkey
         "brewski.controller.installed_revision",
         lambda: "abc1234" + "d" * 33,
     )
-    controller._panel = _Panel((0, 0, 1, 1))
+    controller._panel = _Panel((0, 0, 1, 0))
+    controller._apply_panel()
+    controller._panel = _Panel((0, 0, 0, 1))
     controller._apply_panel()
     controller._panel = _Panel((1, 0, 0, 0))
     controller._apply_panel()
@@ -328,7 +333,7 @@ def test_software_menu_closes_when_a_run_starts(controller):
 def _open_update_item(controller):
     controller._panel = _Panel((0, 0, 1, 0))
     controller._apply_panel()
-    controller._panel = _Panel((0, 0, 0, 3))
+    controller._panel = _Panel((0, 0, 0, 4))
     controller._apply_panel()
     controller._panel = _Panel((1, 0, 0, 0))
     controller._apply_panel()
@@ -395,7 +400,7 @@ def test_networking_screen_shows_how_to_open_the_dashboard(controller, monkeypat
     )
     controller._panel = _Panel((0, 0, 1, 0))
     controller._apply_panel()
-    controller._panel = _Panel((0, 0, 0, 1))
+    controller._panel = _Panel((0, 0, 0, 2))
     controller._apply_panel()
     controller._panel = _Panel((1, 0, 0, 0))
     controller._apply_panel()
@@ -414,7 +419,7 @@ def test_menu_reboot_confirms_then_reports_a_refusal(controller, monkeypatch):
     monkeypatch.setattr("brewski.controller.request_reboot", refuse)
     controller._panel = _Panel((0, 0, 1, 0))
     controller._apply_panel()
-    controller._panel = _Panel((0, 0, 0, 4))
+    controller._panel = _Panel((0, 0, 0, 5))
     controller._apply_panel()
     assert controller._display.lines[3] == "> Reboot"
     controller._panel = _Panel((1, 0, 0, 0))

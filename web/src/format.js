@@ -64,6 +64,25 @@ export function kindBadge(kind) {
   return ''
 }
 
+export function programBadge(run) {
+  if (!run || run.program_mode !== 'hold') return ''
+  return '<span class="status-badge status-hold">Hold</span> '
+}
+
+export function programSummary(run) {
+  if (!run || run.program_mode !== 'hold') return null
+  if (run.program_continuous) return 'Hold, continuous'
+  if (run.program_duration_seconds == null) return 'Hold'
+  return `Hold, ${formatDuration(run.program_duration_seconds)}`
+}
+
+export function programEndLabel(run) {
+  if (!run) return null
+  if (run.program_end === 'duration') return 'Hold timer'
+  if (run.program_end === 'max') return 'Program limit'
+  return null
+}
+
 function phaseClock(test) {
   const elapsed = Math.max(0, Math.round(Number(test.phase_seconds) || 0))
   const limit = Math.max(0, Math.round(Number(test.phase_limit) || 0))
@@ -110,8 +129,29 @@ export function statusLabel(status) {
   if (status === 'running') return 'Running'
   if (status === 'paused') return 'Paused'
   if (status === 'cooling') return 'Cooling'
+  if (status === 'complete') return 'Complete'
   if (status === 'stopped') return 'Stopped'
   return 'Idle'
+}
+
+export function runStatus(run) {
+  if (!run) return 'idle'
+  if (run.status === 'complete') return 'complete'
+  if (run.kind === 'calibration' && run.status === 'stopped' && calibrationFinished(run)) return 'complete'
+  return run.status
+}
+
+function calibrationFinished(run) {
+  const marks = Array.isArray(run.marks) ? run.marks : []
+  return marks.some((mark) => mark && mark.name === 'Cooldown')
+}
+
+export function runStatusLabel(run) {
+  return statusLabel(runStatus(run))
+}
+
+export function runStatusClass(run) {
+  return statusClass(runStatus(run))
 }
 
 export function formatCooldown(status, seconds) {
@@ -144,6 +184,7 @@ export function statusClass(status) {
   if (status === 'running') return 'status-running'
   if (status === 'paused') return 'status-paused'
   if (status === 'cooling') return 'status-cooling'
+  if (status === 'complete') return 'status-complete'
   if (status === 'stopped') return 'status-stopped'
   return 'status-idle'
 }

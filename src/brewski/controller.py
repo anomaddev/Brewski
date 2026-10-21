@@ -98,6 +98,7 @@ from brewski.thermal import (
     pulse_plan,
     scale_model,
     project_temperature,
+    remaining_coast_f,
     seconds_to_landing,
     step_sheath_slope,
 )
@@ -714,6 +715,10 @@ class Controller:
         self._rate_samples: list[tuple[float, float]] = []
         # Samples since the SSR opened, cleared when an element turns back on.
         self._coast_curve: list[tuple[float, float]] = []
+        # Temperature and slope at the moment the elements opened. The chart
+        # spends this coast instead of starting a new one from the live slope.
+        self._coast_open_temp: float | None = None
+        self._coast_open_slope: float = 0.0
         # Coast and slope from the last shutoff decision, captured while the
         # sheath on-time is still the one that decision used.
         self._last_shutoff_coast = 0.0
@@ -2269,10 +2274,19 @@ class Controller:
 
         if self._elements_on(settings):
             self._coast_curve.clear()
+            self._coast_open_temp = None
+            self._coast_open_slope = 0.0
             return
         found = self._current_control(settings)
         if found is None:
             return
+        if self._coast_open_temp is None:
+            self._coast_open_temp = found[1]
+            session = self._session
+            if session is not None and session.shutoff_slope > 0:
+                self._coast_open_slope = session.shutoff_slope
+            else:
+                self._coast_open_slope = self._sheath_slope
         self._coast_curve.append((self._predict_clock, found[1]))
         horizon = self._predict_clock - COAST_WATCH_MAX_SECONDS
         while len(self._coast_curve) >= 2 and self._coast_curve[1][0] <= horizon:
@@ -2886,8 +2900,9 @@ class Controller:
         """Slope the shutoff guess is using right now.
 
         While an element is on, that is the slope a cutoff at this instant
-        would carry onto the coast. While the elements are already open, the
-        probe's own recent slope is the rest of that coast or the fall.
+        would carry onto the coast. While the elements are already open, a
+        falling probe keeps falling. A rise still on the coast is limited
+        separately to the degrees left since shutoff.
         """
 
         live = slope_f_per_sec(self._predict_samples)
@@ -2905,6 +2920,36 @@ class Controller:
             return live
         return modeled
 
+    def _coast_origin(self) -> tuple[float, float | None]:
+        """Shutoff slope and temperature for the coast the heaters are on."""
+
+        session = self._session
+        if (
+            session is not None
+            and session.open_temp is not None
+            and session.shutoff_slope > 0
+            and (session.phase in {"coast", "pulse", "pulses", "hold"} or session.pulse_coasting)
+        ):
+            return session.shutoff_slope, session.open_temp
+        if self._coast_open_slope > 0 and self._coast_open_temp is not None:
+            return self._coast_open_slope, self._coast_open_temp
+        return 0.0, None
+
+    def _unspent_coast_f(self, temp_f: float, model: ThermalModel) -> float | None:
+        """Degrees still ahead on the coast that started when the heaters opened.
+
+        The live slope stays steep after the SSR opens, and treating it as a
+        new shutoff stacks another full rise on top of temperature the pot
+        has already gained. The crest stays the one chosen at shutoff.
+        """
+
+        shutoff, opened = self._coast_origin()
+        if shutoff <= 0 or opened is None:
+            return None
+        full = remaining_coast_f(model, shutoff)
+        climbed = max(0.0, temp_f - opened)
+        return max(0.0, full - climbed)
+
     def _projection(self, settings: Settings) -> list[dict[str, float]]:
         found = self._current_control(settings)
         if found is None:
@@ -2913,13 +2958,18 @@ class Controller:
         cool = settings.learned_cooldown_f_per_min
         if model is not None and model.cooldown_f_per_min is not None:
             cool = model.cooldown_f_per_min
+        slope = self._projection_slope(settings)
+        remaining = None
+        if model is not None and not self._elements_on(settings) and slope >= 0:
+            remaining = self._unspent_coast_f(found[1], model)
         return [
             {"offset_s": stamp, "temp_f": round(reading, 2)}
             for stamp, reading in project_temperature(
                 found[1],
-                self._projection_slope(settings),
+                slope,
                 model,
                 cool,
+                remaining_f=remaining,
             )
         ]
 

@@ -1039,28 +1039,38 @@ def project_temperature(
     *,
     seconds: float = PROJECTION_SECONDS,
     step: float = PROJECTION_STEP_SECONDS,
+    remaining_f: float | None = None,
 ) -> list[tuple[float, float]]:
-    """Temperature for the next ``seconds`` if the heaters are open from now.
+    """Temperature for the next ``seconds`` if the heaters stay as they are.
 
-    A rising slope is the entry onto the negative-exponential coast: the line
-    climbs toward ``temp + slope · τ`` and then follows the cooling rate. A
-    falling slope keeps falling. This is the shutoff the control loop is
-    weighing, not a projection that keeps the elements on.
+    While the elements are on, a rising slope is the shutoff being weighed:
+    the line climbs toward ``temp + slope · τ``. While they are already off,
+    ``remaining_f`` is the unspent part of that same coast, so the line
+    flattens at the crest chosen when the heaters opened. A falling slope
+    keeps falling.
     """
 
     horizon = max(0.0, seconds)
     pace = step if step > 0 else horizon or 1.0
     slope = slope_f_per_sec
-    rise = remaining_coast_f(model, slope) if model is not None and slope > 0 else 0.0
     cool = max(0.0, cooldown_f_per_min or 0.0) / 60.0
-    tau = (rise / slope) if slope > 0 and rise > 0 else 0.0
+    if remaining_f is not None:
+        rise = max(0.0, remaining_f)
+        tau = coast_tau_of(model) if model is not None else 0.0
+        if tau <= 0 and slope > 0 and rise > 0:
+            tau = rise / slope
+    else:
+        rise = remaining_coast_f(model, slope) if model is not None and slope > 0 else 0.0
+        tau = (rise / slope) if slope > 0 and rise > 0 else 0.0
     # Three time constants deliver about 95% of the rise. After that the
     # line is the equilibrium, then the cooling rate.
     settled = 3.0 * tau if tau > 0 else 0.0
     points: list[tuple[float, float]] = []
     stamp = 0.0
     while True:
-        if slope > 0 and tau > 0:
+        if remaining_f is not None and rise <= 0:
+            reading = temp_f - cool * stamp
+        elif rise > 0 and tau > 0:
             if stamp <= settled:
                 reading = temp_f + rise * (1.0 - math.exp(-stamp / tau))
             else:

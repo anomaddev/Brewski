@@ -68,6 +68,27 @@ def test_the_live_chart_projects_one_minute_of_cutoff_coast(controller):
     assert cooling[60] < 100
 
 
+def test_an_open_coast_projects_only_the_rise_still_ahead(controller):
+    controller._mode = "running"
+    controller._run_model = ThermalModel(
+        linear_rate_f_per_sec=0.4,
+        coast_rise_f=8,
+        coast_seconds=40,
+    )
+    controller._heaters = [False, False]
+    controller._coast_open_temp = 100.0
+    controller._coast_open_slope = 0.4
+    controller._live_temps = [104.0, 90.0]
+    # The recent window is still steep. That must not stack another full coast
+    # on the 4°F already gained since shutoff.
+    controller._predict_clock = 12
+    controller._predict_samples = [(0, 100.0), (4, 101.6), (8, 103.2), (12, 104.0)]
+    points = {item["offset_s"]: item["temp_f"] for item in controller.status()["projection"]}
+    assert points[0] == pytest.approx(104, abs=0.05)
+    assert points[60] == pytest.approx(104 + 4 * (1 - math.exp(-3)), abs=0.15)
+    assert points[60] < 108
+
+
 def _soak_sheath(controller):
     """Mark the elements hot without adding rise samples.
 

@@ -5,7 +5,8 @@ straight rate, then the heaters open while the probe is still under 140°F.
 The coast learns the negative exponential up to equilibrium. That equilibrium
 is scored against 140°F and the guess is tuned. One predicted pulse climbs to
 160°F. A shorter pulse follows only when that coast lands short. The hold
-keeps 160°F for ten minutes with minimum pulses at the measured ramp.
+keeps 160°F for ten minutes. Each pulse is the minimum on time, and the next
+one waits until that pulse's coast has arrived.
 """
 
 from __future__ import annotations
@@ -20,7 +21,10 @@ from brewski.thermal import (
     COAST_PLATEAU_RISE_F,
     COAST_PLATEAU_SECONDS,
     COAST_WATCH_MAX_SECONDS,
+    HOLD_RISE_F_PER_SEC,
     HOLD_SECONDS,
+    HOLD_SLOPE_MIN_SPAN_SECONDS,
+    HOLD_SLOPE_WINDOW_SECONDS,
     LEARN_HEAT_MAX_SECONDS,
     LEARN_TEMP_F,
     SETTLE_SECONDS,
@@ -81,6 +85,9 @@ class CalibrationSession:
         self.plateau_since: float | None = None
         self.below_since: float | None = None
         self.pulse_coasting = False
+        # Elapsed time when the hold last opened the SSR. The next pulse waits
+        # until that coast is falling, or until one coast time constant has passed.
+        self.hold_released_at: float | None = None
         self.rate_locked = False
         self._locked_rate: float | None = None
         self.was_heating = False
@@ -94,7 +101,15 @@ class CalibrationSession:
         self._slope_elapsed = 0.0
         self.trace: dict = {"path": "settle", "heat": False}
 
-    def observe(self, elapsed: float, temp: float, on_seconds: float, min_on: float) -> None:
+    def observe(
+        self,
+        elapsed: float,
+        temp: float,
+        on_seconds: float,
+        min_on: float,
+        off_seconds: float = 0.0,
+        min_off: float = 0.0,
+    ) -> None:
         """Advance one reading. Marks and analysis requests land on this object."""
 
         self.samples.append((elapsed, float(temp)))
@@ -111,7 +126,16 @@ class CalibrationSession:
             dt=dt,
         )
         self._advance(elapsed, float(temp))
-        self._set_heat(elapsed, float(temp), max(0.0, on_seconds), max(0.0, min_on))
+        self._set_heat(
+            elapsed,
+            float(temp),
+            max(0.0, on_seconds),
+            max(0.0, min_on),
+            off_seconds=off_seconds,
+            min_off=min_off,
+        )
+        if self.phase == "hold" and self.was_heating and not self.heat:
+            self.hold_released_at = elapsed
         if self.phase == "pulse" and self.was_heating and not self.heat:
             self.pulse_coasting = True
             self.open_elapsed = elapsed
@@ -344,7 +368,43 @@ class CalibrationSession:
         self.pending_marks.append(MARK_HOLDING)
         self.commit = True
 
-    def _set_heat(self, elapsed: float, temp: float, on_seconds: float, min_on: float) -> None:
+    def _probe_slope(self, elapsed: float) -> float | None:
+        """°F/s over the last few seconds, once that window is long enough."""
+
+        recent = [
+            (stamp, reading)
+            for stamp, reading in self.samples
+            if stamp >= elapsed - HOLD_SLOPE_WINDOW_SECONDS
+        ]
+        if len(recent) < 2 or recent[-1][0] - recent[0][0] < HOLD_SLOPE_MIN_SPAN_SECONDS:
+            return None
+        return endpoint_rate(recent)
+
+    def _coast_still_arriving(self, elapsed: float) -> bool:
+        """True after a hold pulse until its coast has crested or aged out."""
+
+        opened = self.hold_released_at
+        if opened is None:
+            return False
+        age = elapsed - opened
+        tau = coast_tau_of(self.guess)
+        limit = tau if tau > 0 else 30.0
+        slope = self._probe_slope(elapsed)
+        if (slope is not None and slope < -HOLD_RISE_F_PER_SEC) or age >= limit:
+            self.hold_released_at = None
+            return False
+        return True
+
+    def _set_heat(
+        self,
+        elapsed: float,
+        temp: float,
+        on_seconds: float,
+        min_on: float,
+        *,
+        off_seconds: float = 0.0,
+        min_off: float = 0.0,
+    ) -> None:
         self.live_rise = None
         self.live_rate = None
         self.predicted_crest = None
@@ -378,7 +438,28 @@ class CalibrationSession:
             return
         if self.phase == "hold":
             goal = CALIBRATION_TEMP_F
-            plan = hold_maintenance_plan(temp, goal, on_seconds, self.guess, min_on)
+            plan = hold_maintenance_plan(
+                temp,
+                goal,
+                on_seconds,
+                self.guess,
+                min_on,
+                sheath_slope=self.sheath_slope,
+                off_seconds=off_seconds,
+                min_off_seconds=min_off,
+                probe_slope=self._probe_slope(elapsed),
+            )
+            # A pulse that just opened is still delivering its coast. Block the
+            # next one, and say so, even when the cold-sheath landing looks short.
+            waiting = plan.get("hold_wait")
+            if (
+                on_seconds <= 0
+                and waiting not in {"at_target", "min_off"}
+                and self._coast_still_arriving(elapsed)
+            ):
+                plan = dict(plan)
+                plan["heat"] = False
+                plan["hold_wait"] = "coast"
             self.predicted_crest = plan["predicted_crest_f"]
             self.heat = bool(plan["heat"])
             self.trace = {"path": self.phase, "goal_f": goal, **plan}

@@ -59,6 +59,7 @@ _DECISION_KEYS = (
     "reheat_f",
     "pulse_seconds",
     "hold_ready",
+    "hold_wait",
     "seconds_to_target",
     "seconds_to_cooldown",
 )
@@ -341,8 +342,12 @@ def _hold_sentence(detail: dict) -> str:
     parts = ["Holding."]
     if temp:
         parts.append(f"{temp}°F.")
+    coast = _deg(detail.get("remaining_coast_f"))
+    coast_f = _number(detail.get("remaining_coast_f"))
     if on_now and pulse:
         parts.append(f"On for {float(on):.1f}s of a {pulse}s pulse.")
+    elif pulse and landing and coast and coast_f is not None and coast_f >= 0.05:
+        parts.append(f"A {pulse}s pulse would land at {landing}°F, including {coast}°F of coast.")
     elif pulse and rate and landing:
         parts.append(f"A {pulse}s pulse at {rate}°F/s would land at {landing}°F.")
     elif landing:
@@ -359,6 +364,19 @@ def _hold_sentence(detail: dict) -> str:
 def _hold_wait_reason(detail: dict) -> str:
     """Why a hold sample left the heaters off."""
 
+    reason = detail.get("hold_wait")
+    if reason == "at_target":
+        return "The probe is at the target."
+    if reason == "min_off":
+        return "Waiting out the minimum off time."
+    if reason == "rising":
+        return "The probe is still rising."
+    if reason == "coast":
+        return "Waiting for the last pulse to finish coasting."
+    if reason == "overshoot":
+        return "That clears the target by more than 1°F."
+    if reason == "short":
+        return "That lands short of the target."
     temp = _number(detail.get("temp_f"))
     landing = _number(detail.get("predicted_crest_f"))
     goal = _number(detail.get("goal_f"))

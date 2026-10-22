@@ -3048,7 +3048,7 @@ class Controller:
         target: float,
         on: float,
     ) -> list[bool]:
-        """Minimum pulses whose landing stays inside the hold band."""
+        """Pulses whose crest lands on the target and does not pass it."""
 
         plan = hold_maintenance_plan(
             primary,

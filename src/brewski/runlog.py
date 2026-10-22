@@ -406,7 +406,7 @@ def _hold_wait_reason(detail: dict) -> str:
     if landing is not None and landing > goal:
         return "That would carry past the target."
     if landing is not None and landing < goal:
-        return "That pulse would not raise the temperature."
+        return "That lands short of the target."
     return ""
 
 

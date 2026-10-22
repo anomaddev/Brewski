@@ -119,7 +119,7 @@ def test_hold_pulses_land_on_the_target_without_passing_it():
     model = ThermalModel(linear_rate_f_per_sec=0.328)
     # Still on the target. A pulse waits.
     assert hold_should_heat(160.1, 160.0, 0.0, model, 1.0) is False
-    # 159.8 + 0.328 = 160.13, past the target, so the heaters stay open.
+    # 159.8 + 0.328 = 160.13, past the target, so the pulse waits.
     assert hold_should_heat(159.8, 160.0, 0.0, model, 1.0) is False
     high = hold_maintenance_plan(159.8, 160.0, 0.0, model, 1.0)
     assert high["hold_wait"] == "overshoot"
@@ -171,10 +171,10 @@ def test_a_hot_sheath_does_not_get_another_minimum_pulse():
     # Seed coast is 14°F at the straight rate. A cold 1 second pulse stores
     # a small slice of that. The slope left by the climb stores the whole coast.
     model = seed_model()
-    cold = hold_maintenance_plan(159.7, 160.0, 0.0, model, 1.0, sheath_slope=0.0)
+    cold = hold_maintenance_plan(159.4, 160.0, 0.0, model, 1.0, sheath_slope=0.0)
     assert cold["heat"] is True
-    assert cold["predicted_crest_f"] <= 161.0
-    assert cold["remaining_coast_f"] < 1.0
+    assert cold["predicted_crest_f"] == pytest.approx(160.0, abs=0.05)
+    assert cold["remaining_coast_f"] < 2.0
     hot = hold_maintenance_plan(
         159.7,
         160.0,
@@ -219,11 +219,12 @@ def test_stage_three_holds_the_pulse_until_the_stored_coast_reaches_the_target()
     session = CalibrationSession()
     session.phase = "hold"
     session.guess = model
-    # 159.7 + 0.4°F/s × 1s = 160.1, inside the band, so the hold fires.
+    # A one-second pulse from here clears 160°F, so the hold waits.
     session._set_heat(10.0, 159.7, 0.0, 1.0)
-    assert session.heat is True
+    assert session.heat is False
     assert session.predicted_crest == pytest.approx(160.1, abs=0.05)
-    # The minimum on time is already done, so this pulse opens.
+    assert session.trace.get("hold_wait") == "overshoot"
+    # The minimum on time is already done, and another second would pass the aim.
     session._set_heat(11.0, 159.9, 1.0, 1.0)
     assert session.heat is False
 
@@ -511,10 +512,11 @@ def test_a_short_pulse_is_followed_by_a_shorter_one_and_hold_opens_before_160():
     session.sheath_slope = 0.0
     session.samples.clear()
     session.hold_released_at = None
-    # A cold sheath stores only a fraction of the 14°F coast in one second.
-    session._set_heat(300.0, 159.7, 0.0, 1.0)
+    # A cold sheath stores only a fraction of the 14°F coast, so the pulse
+    # is sized to land on 160°F.
+    session._set_heat(300.0, 159.4, 0.0, 1.0)
     assert session.heat is True
-    assert session.predicted_crest == pytest.approx(160.1, abs=0.05)
+    assert session.predicted_crest == pytest.approx(160.0, abs=0.05)
     assert session.pulse_coasting is False
     session.was_heating = True
     session.heat = False
@@ -574,7 +576,7 @@ def test_a_lagging_probe_does_not_collapse_the_soak():
     assert session.predicted_crest <= CALIBRATION_TEMP_F + 1.0
 
 
-def test_a_minimum_pulse_within_a_degree_of_160_still_starts():
+def test_a_minimum_pulse_that_would_pass_160_waits():
     session = CalibrationSession()
     session.phase = "pulse"
     session.guess = ThermalModel(
@@ -584,11 +586,14 @@ def test_a_minimum_pulse_within_a_degree_of_160_still_starts():
         coast_rise_f=8.0,
     )
     session.sheath_slope = 0.0
-    # One second stores about a degree. 159.2°F plus that coast is just over
-    # 160°F. Refusing it leaves the pot short of the aim.
+    # One second stores about a degree. 159.2°F plus that coast passes 160°F,
+    # so the pulse waits instead of running past the aim.
     session._set_heat(10.0, 159.2, 0.0, 1.0)
+    assert session.heat is False
+    # A tenth lower, the same pulse lands on the aim and starts.
+    session._set_heat(11.0, 159.0, 0.0, 1.0)
     assert session.heat is True
-    assert session.predicted_crest <= CALIBRATION_TEMP_F + 1.0
+    assert session.predicted_crest <= CALIBRATION_TEMP_F + 0.05
 
     # A coast the model says is many degrees past the aim stays off.
     session.guess.soak_tau_seconds = 1.0

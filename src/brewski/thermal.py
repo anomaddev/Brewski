@@ -1640,11 +1640,11 @@ def _seconds_from_fixed_crest(
             return None
         before = need - crest
         if before > 0:
-        if before / rate > horizon:
-            return None
-        # The shutoff equilibrium is the target, so the probe approaches it.
-        # Count the time to come within ARRIVAL_F of that crest.
-        tail = _exponential_coast_time(max(0.0, crest - ARRIVAL_F), crest, tau) or 0.0
+            if before / rate > horizon:
+                return None
+            # The shutoff equilibrium is the target, so the probe approaches it.
+            # Count the time to come within ARRIVAL_F of that crest.
+            tail = _exponential_coast_time(max(0.0, crest - ARRIVAL_F), crest, tau) or 0.0
             return min(horizon, before / rate + tail)
         return _exponential_coast_time(need, crest, tau)
     remaining = crest

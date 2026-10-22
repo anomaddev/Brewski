@@ -710,7 +710,8 @@ def test_a_long_tick_does_not_stack_hold_pulses(store):
     # Calibration 17 ran the target 4°F hot: the hold fired again before the
     # coast of the last pulse showed up, and a multi-second tick toggled the
     # SSR once per simulated second.
-    source = StaticSource([159.7, 140.0])
+    # 159.5°F plus a cold one-second pulse lands on 160°F. 159.7°F would pass it.
+    source = StaticSource([159.5, 140.0])
     controller = Controller(store, source)
     controller.start({"kind": "calibration", "charge_gallons": 5})
     session = controller._session

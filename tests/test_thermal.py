@@ -4,6 +4,7 @@ import pytest
 
 from brewski.calibration import CalibrationSession
 from brewski.thermal import (
+    ARRIVAL_F,
     CALIBRATION_TEMP_F,
     LEARN_TEMP_F,
     SEED_COAST_RISE_F,
@@ -99,8 +100,9 @@ def test_linear_heat_projects_the_same_crest_from_the_current_temp():
         coast_quad=-4 / 400,
     )
     # 61°F of straight heat, then the coast approaches the last 4°F.
+    # The forecast counts arrival once the tail is inside ARRIVAL_F.
     tau = 4 / 0.4
-    tail = -tau * math.log(1 - 3.5 / 4)
+    tail = -tau * math.log(1 - (4.0 - ARRIVAL_F) / 4.0)
     assert seconds_to_landing(100, 165, 40, model, heating=True, horizon=1000) == pytest.approx(
         61 / 0.4 + tail
     )
@@ -112,23 +114,36 @@ def test_linear_heat_projects_the_same_crest_from_the_current_temp():
     assert later < inside
 
 
-def test_hold_pulses_at_the_measured_ramp_inside_one_degree():
+def test_hold_pulses_land_on_the_target_without_passing_it():
     # Calibration 16's ramp. A 1 second minimum adds 0.328°F.
     model = ThermalModel(linear_rate_f_per_sec=0.328)
     # Still on the target. A pulse waits.
     assert hold_should_heat(160.1, 160.0, 0.0, model, 1.0) is False
-    # 159.8 + 0.328 = 160.13, inside 161, so the heaters close.
-    assert hold_should_heat(159.8, 160.0, 0.0, model, 1.0) is True
-    plan = hold_maintenance_plan(159.8, 160.0, 0.0, model, 1.0)
-    assert plan["predicted_crest_f"] == pytest.approx(160.13, abs=0.01)
+    # 159.8 + 0.328 = 160.13, past the target, so the heaters stay open.
+    assert hold_should_heat(159.8, 160.0, 0.0, model, 1.0) is False
+    high = hold_maintenance_plan(159.8, 160.0, 0.0, model, 1.0)
+    assert high["hold_wait"] == "overshoot"
+    assert high["predicted_crest_f"] == pytest.approx(160.13, abs=0.01)
+    # 159.672 + 0.328 = 160.0. That pulse lands on the target.
+    assert hold_should_heat(159.672, 160.0, 0.0, model, 1.0) is True
+    plan = hold_maintenance_plan(159.672, 160.0, 0.0, model, 1.0)
+    assert plan["predicted_crest_f"] == pytest.approx(160.0, abs=0.01)
     assert plan["gain_f"] == pytest.approx(0.33, abs=0.01)
     assert plan["linear_rate_f_per_sec"] == pytest.approx(0.328)
-    # Five seconds at this ramp lands at 161.54, past the band, so wait.
+    # Five seconds at this ramp lands at 161.54, past the target, so wait.
     assert hold_should_heat(159.9, 160.0, 0.0, model, 5.0) is False
-    # A tiny ramp at 159°F lands short of 160, and the floor fires.
+    # A tiny ramp lands short of 160, so the pulse runs long enough to arrive
+    # instead of waiting for a one-degree sag.
     slow = ThermalModel(linear_rate_f_per_sec=0.05)
     assert hold_should_heat(159.0, 160.0, 0.0, slow, 1.0) is True
-    assert hold_should_heat(159.5, 160.0, 0.0, slow, 1.0) is False
+    assert hold_should_heat(159.5, 160.0, 0.0, slow, 1.0) is True
+    short = hold_maintenance_plan(159.5, 160.0, 0.0, slow, 1.0)
+    assert short["predicted_crest_f"] == pytest.approx(160.0, abs=0.02)
+    assert short["pulse_seconds"] == pytest.approx(10.0, abs=0.2)
+    # The minimum is already done and another second would pass the target.
+    assert hold_should_heat(159.96, 160.0, 2.0, slow, 1.0) is False
+    # Opening now is still short, and another second stays under the target.
+    assert hold_should_heat(159.6, 160.0, 1.0, slow, 1.0) is True
     # A pulse already started runs out the minimum, then opens.
     assert hold_should_heat(160.2, 160.0, 0.4, model, 1.0) is True
     assert hold_should_heat(160.2, 160.0, 1.0, model, 1.0) is False

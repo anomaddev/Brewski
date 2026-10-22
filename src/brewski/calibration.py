@@ -5,8 +5,8 @@ straight rate, then the heaters open while the probe is still under 140°F.
 The coast learns the negative exponential up to equilibrium. That equilibrium
 is scored against 140°F and the guess is tuned. One predicted pulse climbs to
 160°F. A shorter pulse follows only when that coast lands short. The hold
-keeps 160°F for ten minutes. Each pulse is the minimum on time, and the next
-one waits until that pulse's coast has arrived.
+keeps 160°F for ten minutes. Each pulse is sized to land on 160°F and not
+past it, and the next one waits until that pulse's coast has arrived.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ from brewski.thermal import (
     COAST_PLATEAU_RISE_F,
     COAST_PLATEAU_SECONDS,
     COAST_WATCH_MAX_SECONDS,
-    HOLD_BAND_F,
     HOLD_RISE_F_PER_SEC,
     HOLD_SECONDS,
     HOLD_SLOPE_MIN_SPAN_SECONDS,
@@ -510,18 +509,9 @@ class CalibrationSession:
                 slope_f_per_sec=slope,
                 budgeted=False,
             )
-            # A minimum pulse whose crest is only barely past the aim is the
-            # hold's job to trim. Leaving the heaters off there parks the pot
-            # short of 160°F.
-            crest = plan["predicted_crest_f"]
-            if (
-                not plan["heat"]
-                and on_seconds <= 0
-                and temp < goal - TUNE_DEADBAND_F
-                and crest <= goal + HOLD_BAND_F
-            ):
-                plan = dict(plan)
-                plan["heat"] = True
+            # A pulse starts only when its crest is on 160°F or short of it.
+            # One that would pass the aim waits, instead of being let through
+            # and trimmed back from above.
             self.predicted_crest = plan["predicted_crest_f"]
             self.heat = bool(plan["heat"]) and temp < goal
             self.trace = {"path": self.phase, "goal_f": goal, **plan}

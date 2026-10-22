@@ -391,9 +391,9 @@ def _hold_wait_reason(detail: dict) -> str:
     if reason == "coast":
         return "Waiting for the last pulse to finish coasting."
     if reason == "overshoot":
-        return "That clears the target by more than 1°F."
+        return "That would carry past the target."
     if reason == "short":
-        return "That lands short of the target."
+        return "That pulse would not raise the temperature."
     temp = _number(detail.get("temp_f"))
     landing = _number(detail.get("predicted_crest_f"))
     goal = _number(detail.get("goal_f"))
@@ -403,10 +403,10 @@ def _hold_wait_reason(detail: dict) -> str:
         return ""
     if temp >= goal:
         return "The probe is at the target."
-    if landing is not None and landing > goal + 1.0:
-        return "That clears the target by more than 1°F."
+    if landing is not None and landing > goal:
+        return "That would carry past the target."
     if landing is not None and landing < goal:
-        return "That lands short of the target."
+        return "That pulse would not raise the temperature."
     return ""
 
 

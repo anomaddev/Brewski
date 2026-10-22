@@ -7,7 +7,8 @@ so the dashboard can scroll the controller clock after a reload.
 The first enabled probe is the one compared with the target. Once a
 calibration has saved a heating model, heaters turn off when the predicted
 crest reaches the target, stay off while that projected coast is still
-arriving, then hold the target with minimum pulses until the run stops, the hold
+arriving, then hold the target with pulses that land on it, and not past
+it, until the run stops, the hold
 timer ends, or the max program duration is reached.
 Until that model exists they turn off by the measured coast, and sooner
 when the pot is rising faster than that measurement, so heat still stored
@@ -97,14 +98,15 @@ from brewski.thermal import (
     LEARN_TEMP_F,
     GROK_RATE_BAND_F_PER_MIN,
     GROK_RATE_BAND_F_PER_SEC,
+    ARRIVAL_F,
     GROK_RISE_BAND_F,
     SAFE_TEMP_F,
-    TUNE_DEADBAND_F,
     ThermalModel,
     accept_grok,
     apply_grok_value,
     blend_model,
     coast_entry_slope,
+    coast_settle_seconds,
     coast_tau_of,
     endpoint_rate,
     hold_maintenance_plan,
@@ -2962,13 +2964,17 @@ class Controller:
         if temp >= target:
             return False
         unspent = self._unspent_coast_f(temp, model)
-        if unspent is None or unspent <= TUNE_DEADBAND_F:
+        if unspent is None or unspent <= ARRIVAL_F:
             return False
         slope = self._probe_slope()
         if slope is not None and slope <= -HOLD_RISE_F_PER_SEC:
             return False
         tau = coast_tau_of(model)
-        if tau > 0 and self._coast_off_seconds(settings) >= 3.0 * tau:
+        full = remaining_coast_f(model, self._coast_open_slope, self._coast_open_temp)
+        limit = coast_settle_seconds(tau, full)
+        # A correct coast is within a tenth of a degree by this time. Waiting
+        # only three time constants gave up while about half a degree was left.
+        if tau > 0 and limit > 0 and self._coast_off_seconds(settings) >= limit:
             return False
         return True
 
@@ -3085,8 +3091,9 @@ class Controller:
     ) -> list[bool]:
         """Stay on until the budgeted crest reaches the dial target.
 
-        A minimum pulse whose crest is only a degree past the target is
-        allowed to start, so the pot is not parked just short of the band.
+        A new pulse starts only when that crest is on the target or short of
+        it. One that would pass the target waits, so the pot is not driven
+        past the setpoint to avoid sitting a degree under it.
         """
 
         live = slope_f_per_sec(self._predict_samples)
@@ -3103,14 +3110,6 @@ class Controller:
             budgeted=True,
         )
         crest = float(plan["predicted_crest_f"])
-        if (
-            not plan["heat"]
-            and on <= 0
-            and primary < target - TUNE_DEADBAND_F
-            and crest <= target + HOLD_BAND_F
-        ):
-            plan = dict(plan)
-            plan["heat"] = True
         heating = bool(plan["heat"])
         if heating:
             self._climb_coasting = False

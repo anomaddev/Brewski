@@ -75,7 +75,7 @@ def test_a_hold_line_names_the_ramp_pulse_and_whether_it_fires():
         }
     )
     assert "including 4.4°F of coast" in coasting
-    assert "That clears the target by more than 1°F." in coasting
+    assert "That would carry past the target." in coasting
     rising = format_control(
         {
             "path": "hold",

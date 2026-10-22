@@ -1,4 +1,5 @@
 import Chart from 'chart.js/auto'
+import { stableTempBounds } from './temp-scale.js'
 
 const SENSOR_COLORS = ['#7dd3fc', '#fbbf24']
 const GRID = 'rgba(255, 255, 255, 0.06)'
@@ -346,6 +347,7 @@ export function createTempChart(canvas, { timed = false } = {}) {
       },
       scales: {
         y: {
+          bounds: 'data',
           title: { display: true, text: 'Temperature (°F)', color: TICK },
           ticks: { color: TICK },
           grid: { color: GRID },
@@ -395,6 +397,37 @@ export function createTempChart(canvas, { timed = false } = {}) {
   chart.$offSpans = []
   applyChartLayout(chart)
   return chart
+}
+
+function datasetExtent(datasets) {
+  let low = Infinity
+  let high = -Infinity
+  for (const dataset of datasets) {
+    if (!dataset || dataset.label === 'Off' || !dataset.data) continue
+    for (const value of dataset.data) {
+      const y = value != null && typeof value === 'object' ? value.y : value
+      if (!Number.isFinite(y)) continue
+      if (y < low) low = y
+      if (y > high) high = y
+    }
+  }
+  if (!Number.isFinite(low) || !Number.isFinite(high)) return null
+  return { low, high }
+}
+
+function applyTemperatureScale(chart, datasets) {
+  const scale = chart.options.scales.y
+  const extent = datasetExtent(datasets)
+  if (!extent) {
+    scale.min = undefined
+    scale.max = undefined
+    chart.$yBounds = null
+    return
+  }
+  const bounds = stableTempBounds(extent.low, extent.high, chart.$yBounds)
+  chart.$yBounds = bounds
+  scale.min = bounds.min
+  scale.max = bounds.max
 }
 
 function pointValue(point, index, timed) {
@@ -573,5 +606,6 @@ export function setChartPoints(chart, points, sensorNames, markers = [], view = 
       scale.max = undefined
     }
   }
+  applyTemperatureScale(chart, datasets)
   chart.update()
 }

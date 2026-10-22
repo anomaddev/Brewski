@@ -38,8 +38,12 @@ SETTLE_SECONDS = 3.0
 LINEAR_HOLD_SECONDS = 15.0
 MOMENTUM_SECONDS = 2 * 60.0
 HOLD_SECONDS = 10 * 60.0
-# The hold stays inside this many degrees of 160°F, above and below.
+# Inside this many degrees of the target, regulation trims with pulses.
+# Farther below, the climb has the heaters.
 HOLD_BAND_F = 1.0
+# The crest has reached the setpoint once it is this close. Stopping at half
+# a degree left the pot short of the target on every approach.
+ARRIVAL_F = 0.1
 # A new hold pulse waits while the probe is still climbing this fast.
 # That rise is the previous pulse's coast, and another pulse would stack on it.
 HOLD_RISE_F_PER_SEC = 0.02
@@ -566,6 +570,20 @@ def coast_tau_of(model: ThermalModel) -> float:
     if rate > 0 and rise > 0:
         return rise / rate
     return 0.0
+
+
+def coast_settle_seconds(tau_seconds: float, rise_f: float) -> float:
+    """Seconds for an exponential coast to come within ``ARRIVAL_F`` of its crest.
+
+    Three time constants still leave about five percent of the rise, which is
+    half a degree on a typical coast. This waits until that tail is a tenth.
+    """
+
+    tau = max(0.0, float(tau_seconds))
+    rise = max(0.0, float(rise_f))
+    if tau <= 0 or rise <= ARRIVAL_F:
+        return 0.0
+    return tau * math.log(rise / ARRIVAL_F)
 
 
 def settled_linear_rate(samples: list[tuple[float, float]]) -> float | None:
@@ -1200,9 +1218,9 @@ def project_temperature(
             else 0.0
         )
         tau = (rise / slope) if slope > 0 and rise > 0 else 0.0
-    # Three time constants deliver about 95% of the rise. After that the
-    # line is the equilibrium, then the cooling rate.
-    settled = 3.0 * tau if tau > 0 else 0.0
+    # Follow the exponential until the tail is within a tenth of a degree.
+    # Cutting the line off at three time constants drops the last half degree.
+    settled = coast_settle_seconds(tau, rise) if tau > 0 and rise > 0 else 0.0
     points: list[tuple[float, float]] = []
     stamp = 0.0
     while True:
@@ -1352,6 +1370,42 @@ def hold_pulse_landing(
     return temp_f + gain + coast, gain, coast, slope1
 
 
+def hold_on_time(
+    temp_f: float,
+    target_f: float,
+    model: ThermalModel,
+    sheath_slope: float,
+    minimum: float,
+    *,
+    limit: float = 10 * 60.0,
+) -> float:
+    """Shortest on-time at or above ``minimum`` whose crest reaches ``target_f``.
+
+    ``minimum`` is returned when that pulse already reaches or passes the
+    target, so the caller can refuse one that would go by. The search stops
+    at ``limit`` when even that long a pulse stays short.
+    """
+
+    floor = max(0.0, float(minimum))
+    cap = max(floor, float(limit))
+    landing, _, _, _ = hold_pulse_landing(temp_f, model, floor, sheath_slope)
+    if landing >= target_f or floor >= cap:
+        return floor
+    hi_landing, _, _, _ = hold_pulse_landing(temp_f, model, cap, sheath_slope)
+    if hi_landing < target_f:
+        return cap
+    lo = floor
+    hi = cap
+    for _ in range(24):
+        mid = (lo + hi) / 2.0
+        crest, _, _, _ = hold_pulse_landing(temp_f, model, mid, sheath_slope)
+        if crest >= target_f:
+            hi = mid
+        else:
+            lo = mid
+    return hi
+
+
 def hold_maintenance_plan(
     temp_f: float,
     target_f: float,
@@ -1364,14 +1418,13 @@ def hold_maintenance_plan(
     min_off_seconds: float = 0.0,
     probe_slope: float | None = None,
 ) -> dict:
-    """Landing of one minimum pulse, and whether to fire it.
+    """Landing of the next pulse, and whether to fire it.
 
-    Heaters that are already on finish the minimum and then open. A new pulse
-    waits out the minimum off time, waits while the probe is still rising
-    from the last coast, and fires only when the landing — climb plus coast —
-    is on the target and at most ``HOLD_BAND_F`` above it. A landing above
-    the band waits. A landing short of the target waits too, unless the probe
-    is already ``HOLD_BAND_F`` below the target.
+    A new pulse fires only when its crest lands on the target or short of it.
+    One that would pass the target waits until the pot has cooled enough for
+    that same minimum to land on it. A pulse that lands short stays on past
+    the minimum until opening would carry the crest past the target, then
+    opens. The hardware minimum still finishes once a pulse has started.
     """
 
     rate = max(0.0, float(model.linear_rate_f_per_sec or 0.0))
@@ -1385,13 +1438,29 @@ def hold_maintenance_plan(
     minimum_off = max(0.0, float(min_off_seconds))
     landing, gain, coast, shutoff = hold_pulse_landing(temp_f, model, minimum, sheath_slope)
     hold_wait = None
+    pulse = minimum
     if on > 0:
-        heat = minimum > 0 and on < minimum
-        remaining = max(0.0, minimum - on)
-        if heat and remaining < minimum:
-            landing, gain, coast, shutoff = hold_pulse_landing(
-                temp_f, model, remaining, sheath_slope
+        if minimum > 0 and on < minimum:
+            heat = True
+            extra = hold_on_time(
+                temp_f, target_f, model, sheath_slope, max(0.0, minimum - on)
             )
+            landing, gain, coast, shutoff = hold_pulse_landing(
+                temp_f, model, extra, sheath_slope
+            )
+            pulse = on + extra
+        else:
+            now, _, _, _ = hold_pulse_landing(temp_f, model, 0.0, sheath_slope)
+            nxt, _, _, _ = hold_pulse_landing(temp_f, model, 1.0, sheath_slope)
+            # Open before the second that would carry the crest past the target.
+            heat = now < target_f and nxt > now and nxt <= target_f
+            extra = 0.0 if not heat else hold_on_time(
+                temp_f, target_f, model, sheath_slope, 0.0
+            )
+            landing, gain, coast, shutoff = hold_pulse_landing(
+                temp_f, model, extra, sheath_slope
+            )
+            pulse = on + extra
     elif temp_f >= target_f:
         heat = False
         hold_wait = "at_target"
@@ -1401,14 +1470,18 @@ def hold_maintenance_plan(
     elif probe_slope is not None and probe_slope > HOLD_RISE_F_PER_SEC:
         heat = False
         hold_wait = "rising"
-    elif landing > target_f + HOLD_BAND_F:
+    elif landing > target_f:
         heat = False
         hold_wait = "overshoot"
-    elif landing >= target_f or temp_f <= target_f - HOLD_BAND_F:
-        heat = True
-    else:
+    elif landing <= temp_f + 1e-4:
         heat = False
         hold_wait = "short"
+    else:
+        heat = True
+        pulse = hold_on_time(temp_f, target_f, model, sheath_slope, minimum)
+        landing, gain, coast, shutoff = hold_pulse_landing(
+            temp_f, model, pulse, sheath_slope
+        )
     plan = {
         "heat": heat,
         "slope_f_per_sec": round(shutoff, 5),
@@ -1416,7 +1489,7 @@ def hold_maintenance_plan(
         "predicted_crest_f": round(landing, 2),
         "gain_f": round(gain, 2),
         "remaining_coast_f": round(coast, 2),
-        "pulse_seconds": round(minimum, 2),
+        "pulse_seconds": round(pulse, 2),
         "on_seconds": round(on, 2),
         "sheath_slope_f_per_sec": round(max(0.0, float(sheath_slope)), 5),
     }
@@ -1443,10 +1516,9 @@ def hold_should_heat(
 ) -> bool:
     """True when a hold pulse should be on.
 
-    A new pulse fires when the minimum on time, including the coast that
-    pulse stores, lands on the target without clearing it by more than one
-    degree. A pulse that has already started stays on until that minimum
-    has elapsed.
+    A new pulse fires when its crest lands on the target without passing it.
+    A pulse that has already started finishes the hardware minimum, then
+    stays on only while another second still crests at or under the target.
     """
 
     return hold_maintenance_plan(
@@ -1568,11 +1640,11 @@ def _seconds_from_fixed_crest(
             return None
         before = need - crest
         if before > 0:
-            if before / rate > horizon:
-                return None
-            # The shutoff equilibrium is the target, so the probe approaches
-            # it. Count the time to come within half a degree.
-            tail = _exponential_coast_time(max(0.0, crest - 0.5), crest, tau) or 0.0
+        if before / rate > horizon:
+            return None
+        # The shutoff equilibrium is the target, so the probe approaches it.
+        # Count the time to come within ARRIVAL_F of that crest.
+        tail = _exponential_coast_time(max(0.0, crest - ARRIVAL_F), crest, tau) or 0.0
             return min(horizon, before / rate + tail)
         return _exponential_coast_time(need, crest, tau)
     remaining = crest

@@ -147,6 +147,43 @@ export function mountDashboard(root) {
       <div class="stage" id="stage" data-probes="1" data-heaters="2" data-cabinet="on">
       <section class="probe-grid" id="temp-rows" aria-label="Temperatures"></section>
       <section class="dashboard-card console">
+        <div class="program-panel" id="program-panel">
+          <div class="program-editor">
+            <div class="program-field" id="mode-field">
+              <span class="eyebrow" id="mode-label">Mode</span>
+              <div class="mode-choice source-choice" id="mode-choice" role="radiogroup" aria-labelledby="mode-label">
+                <label>Hold
+                  <input type="radio" name="program_mode" value="hold" checked />
+                </label>
+              </div>
+            </div>
+            <div class="hold-fields" id="hold-fields">
+              <div class="program-field" id="hold-time-field">
+                <span class="eyebrow">Hold time</span>
+                <div class="hold-clock">
+                  <label class="clock-part">Hours
+                    ${numberStepper('<input id="hold-hours" type="number" min="0" max="72" step="1" inputmode="numeric" value="1" />')}
+                  </label>
+                  <span class="clock-colon" aria-hidden="true">:</span>
+                  <label class="clock-part">Minutes
+                    ${numberStepper('<input id="hold-minutes" type="number" min="0" max="59" step="1" inputmode="numeric" value="0" />')}
+                  </label>
+                  <span class="clock-colon" aria-hidden="true">:</span>
+                  <label class="clock-part">Seconds
+                    ${numberStepper('<input id="hold-seconds" type="number" min="0" max="59" step="1" inputmode="numeric" value="0" />')}
+                  </label>
+                </div>
+              </div>
+              <label class="switch continuous-field">
+                <input id="hold-continuous" type="checkbox" checked />
+                <span class="switch-track" aria-hidden="true"></span>
+                <span class="switch-text">Continuous</span>
+              </label>
+            </div>
+          </div>
+          <p class="program-readout" id="program-readout" hidden></p>
+          <p class="program-cap" id="program-cap" hidden></p>
+        </div>
         <div class="console-main">
           <div class="run-identity">
             <span class="status-badge status-idle" id="system-mode">Idle</span>
@@ -161,32 +198,6 @@ export function mountDashboard(root) {
             <p id="test-review-copy"></p>
           </div>
           <div class="console-launch">
-            <div class="program-panel" id="program-panel">
-              <div class="mode-choice source-choice" id="mode-choice" role="radiogroup" aria-label="Program mode">
-                <label>Hold
-                  <input type="radio" name="program_mode" value="hold" checked />
-                </label>
-              </div>
-              <div class="hold-fields" id="hold-fields">
-                <div class="duration-field" aria-label="Hold time">
-                  <label class="clock-part">Hours
-                    ${numberStepper('<input id="hold-hours" type="number" min="0" max="72" step="1" inputmode="numeric" value="1" />')}
-                  </label>
-                  <label class="clock-part">Minutes
-                    ${numberStepper('<input id="hold-minutes" type="number" min="0" max="59" step="1" inputmode="numeric" value="0" />')}
-                  </label>
-                  <label class="clock-part">Seconds
-                    ${numberStepper('<input id="hold-seconds" type="number" min="0" max="59" step="1" inputmode="numeric" value="0" />')}
-                  </label>
-                </div>
-                <label class="continuous-field">
-                  <input id="hold-continuous" type="checkbox" checked />
-                  Continuous
-                </label>
-              </div>
-              <p class="program-readout" id="program-readout" hidden></p>
-              <p class="program-cap" id="program-cap" hidden></p>
-            </div>
             <div class="launch-row">
             <div class="status-actions" id="actions"></div>
             <div class="run-setup" id="run-setup">
@@ -418,24 +429,30 @@ export function mountDashboard(root) {
     if (event.target.closest('#hold-fields, #mode-choice')) saveProgram()
   })
 
+  function holdReadout(program) {
+    const badge = programBadge({ program_mode: 'hold' })
+    if (program.continuous) return `${badge}<span class="program-detail">Continuous</span>`
+    const remaining = program.remaining_seconds != null
+    const clock = escapeHtml(formatDuration(remaining ? program.remaining_seconds : program.duration_seconds))
+    const detail = remaining ? 'left' : 'once it is holding'
+    return `${badge}<span class="timer-display">${clock}</span><span class="program-detail">${detail}</span>`
+  }
+
   function renderProgram(status) {
     const live = status.mode === 'running' || status.mode === 'paused'
     const program = status.program || {}
     const holdRun = live && status.run_kind !== 'calibration' && status.run_kind !== 'test'
-    document.getElementById('mode-choice').hidden = live
+    document.getElementById('mode-field').hidden = live
     document.getElementById('hold-fields').hidden = live || selectedProgramMode() !== 'hold'
     const readout = document.getElementById('program-readout')
     readout.hidden = !holdRun
-    if (holdRun) {
-      if (program.continuous) readout.textContent = 'Hold · Continuous'
-      else if (program.remaining_seconds != null) {
-        readout.textContent = `Hold · ${formatDuration(program.remaining_seconds)} left`
-      } else readout.textContent = `Hold · ${formatDuration(program.duration_seconds)} once it is holding`
-    }
+    if (holdRun) readout.innerHTML = holdReadout(program)
     const cap = document.getElementById('program-cap')
     if (live && status.max_program_remaining_seconds != null) {
       cap.hidden = false
-      cap.textContent = `${status.max_program_hours} hour limit · ${formatDuration(status.max_program_remaining_seconds)} left`
+      const hours = escapeHtml(String(status.max_program_hours))
+      const left = escapeHtml(formatDuration(status.max_program_remaining_seconds))
+      cap.innerHTML = `${hours} hour limit <span class="cap-left">${left} left</span>`
     } else {
       cap.hidden = true
     }

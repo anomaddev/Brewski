@@ -210,6 +210,16 @@ def test_idle_paused_and_cooling():
     assert "165 F" in holding[1]
     assert all(len(line) <= COLUMNS for line in holding)
 
+    # A lowered setpoint replaces the hold clock until the probe gets there.
+    step_down = _screen(
+        mode="running",
+        hold_remaining_seconds=125,
+        eta_seconds=8 * 60,
+        eta_kind="cool",
+        target_f=150,
+    )
+    assert step_down[1] == "150 F        cool 8m"
+
 
 def test_emergency_screens():
     heaters = [(True, False), (True, False)]

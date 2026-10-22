@@ -566,23 +566,25 @@ def seconds_to_cooldown(
     rate_f_per_sec: float | None,
     *,
     learned_rate_f_per_min: float | None = None,
+    floor_f: float = SAFE_TEMP_F,
 ) -> float | None:
-    """Seconds for the probe to fall under 100°F.
+    """Seconds for the probe to fall to ``floor_f``.
 
-    A live falling slope is used as a straight line. A rise is not a cooldown.
-    A flat window, or a window that is still too short, uses the learned
-    °F/min from calibration.
+    After a run, ``floor_f`` is the safe-to-handle line. While a run is
+    waiting on a lower setpoint, ``floor_f`` is that setpoint. A live falling
+    slope is a straight line. A rise is not a cooldown. A flat window, or a
+    window that is still too short, uses the learned °F/min from calibration.
     """
 
-    if temp_f <= SAFE_TEMP_F:
+    if temp_f <= floor_f:
         return 0.0
     if rate_f_per_sec is not None and rate_f_per_sec <= -PREDICT_MIN_RATE_F_PER_SEC:
-        seconds = (temp_f - SAFE_TEMP_F) / -rate_f_per_sec
+        seconds = (temp_f - floor_f) / -rate_f_per_sec
         return min(PREDICT_MAX_HORIZON_SECONDS, max(0.0, seconds))
     if rate_f_per_sec is not None and rate_f_per_sec >= PREDICT_MIN_RATE_F_PER_SEC:
         return None
     if learned_rate_f_per_min is not None and learned_rate_f_per_min > 0:
-        seconds = (temp_f - SAFE_TEMP_F) / (learned_rate_f_per_min / 60.0)
+        seconds = (temp_f - floor_f) / (learned_rate_f_per_min / 60.0)
         return min(PREDICT_MAX_HORIZON_SECONDS, max(0.0, seconds))
     return None
 
@@ -746,6 +748,13 @@ class Controller:
         # Dial target used on the previous model decision, so a raised target
         # can leave the hold.
         self._last_target: float | None = None
+        # Setpoint a run is waiting to fall to, after the operator lowers it.
+        # None while the aim has not stepped down, and again once the probe
+        # is inside the hold band. A dip in the reading does not set this.
+        self._cool_to: float | None = None
+        # Aim from the previous forecast, so a lowered setpoint can be told
+        # from that dip.
+        self._aim_seen: float | None = None
         self._heaters = [False] * SLOT_COUNT
         # (predict clock seconds, control temperature). The clock follows tick
         # time, including pause, so a test can advance it without sleeping.
@@ -2517,6 +2526,8 @@ class Controller:
         self._climb_coasting = False
         self._run_step = None
         self._last_target = None
+        self._cool_to = None
+        self._aim_seen = None
         self._coast_open_temp = None
         self._coast_open_slope = 0.0
 
@@ -2680,8 +2691,37 @@ class Controller:
             return LEARN_TEMP_F
         return float(self._target_value(settings))
 
+    def _note_aim(self, aim: float, temp: float) -> None:
+        """Remember a setpoint that stepped down, until the probe arrives.
+
+        The comparison is against the previous aim, not the previous reading.
+        A tenth of a degree of probe noise leaves the setpoint where it was.
+        """
+
+        previous = self._aim_seen
+        self._aim_seen = aim
+        if previous is not None and aim < previous - 0.5:
+            self._cool_to = aim if temp > aim + HOLD_BAND_F else None
+        elif self._cool_to is not None and aim > self._cool_to + 0.5:
+            self._cool_to = None
+        elif self._cool_to is not None and temp <= aim + HOLD_BAND_F:
+            self._cool_to = None
+
+    def _cooling_to_setpoint(self, temp: float, aim: float) -> bool:
+        """True while this run is waiting to fall to a setpoint that was lowered."""
+
+        if self._mode not in ("running", "paused"):
+            return False
+        self._note_aim(aim, temp)
+        return self._cool_to is not None and temp > aim + HOLD_BAND_F
+
     def _forecast(self, settings: Settings) -> dict[str, float | None]:
-        """Time to the target while rising, and time to cool while falling."""
+        """Time to the target while rising, and time to cool on purpose.
+
+        A falling reading at an unchanged setpoint is not a cooldown. Cooling
+        time is the safe-to-handle line after a run, or a setpoint that was
+        lowered, until the probe gets there.
+        """
 
         empty: dict[str, float | None] = {"seconds_to_target": None, "seconds_to_cooldown": None}
         if self._mode not in ("running", "paused", "cooling"):
@@ -2694,8 +2734,9 @@ class Controller:
         aim = self._aim_temperature(settings)
         heating = self._elements_on(settings)
         rising = rate is not None and rate >= PREDICT_MIN_RATE_F_PER_SEC and temp < aim
+        stepping_down = self._cooling_to_setpoint(temp, aim)
         lookahead = self._lookahead_model()
-        if lookahead is not None and (heating or rising):
+        if self._mode != "cooling" and not stepping_down and lookahead is not None and (heating or rising):
             # The heating slope picks where on the coast the shutoff starts.
             # A sheath or probe reading below that curve does not lower it.
             on_seconds = (
@@ -2722,7 +2763,7 @@ class Controller:
                 "seconds_to_target": _forecast_seconds(seconds),
                 "seconds_to_cooldown": None,
             }
-        if heating or rising:
+        if self._mode != "cooling" and not stepping_down and (heating or rising):
             if heating:
                 use_rate = rate
                 if settings.learned_coast_seconds:
@@ -2756,6 +2797,9 @@ class Controller:
                 "seconds_to_target": _forecast_seconds(seconds),
                 "seconds_to_cooldown": None,
             }
+        if self._mode != "cooling" and not stepping_down:
+            return empty
+        floor = SAFE_TEMP_F if self._mode == "cooling" else aim
         return {
             "seconds_to_target": None,
             "seconds_to_cooldown": _forecast_seconds(
@@ -2763,6 +2807,7 @@ class Controller:
                     temp,
                     rate,
                     learned_rate_f_per_min=settings.learned_cooldown_f_per_min,
+                    floor_f=floor,
                 )
             ),
         }

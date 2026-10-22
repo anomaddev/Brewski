@@ -579,7 +579,12 @@ def status_lines(
         head = "Hold:"
     else:
         head = "Idle:"
-    if hold_remaining_seconds is not None and not calibrating and mode in {"running", "paused"}:
+    if (
+        hold_remaining_seconds is not None
+        and eta_kind != "cool"
+        and not calibrating
+        and mode in {"running", "paused"}
+    ):
         target_line = _pair(_whole_temp(target_f), _eta_label(hold_remaining_seconds, "hold"))
     elif eta_seconds is None:
         target_line = _value_line("Target:", _whole_temp(target_f))

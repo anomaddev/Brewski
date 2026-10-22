@@ -78,8 +78,11 @@ function coastText(status) {
       coast: 'Coasting. The projected rise is still on its way to the target.',
       hold: `Holding ${target}°F.`,
     }
-    const line = steps[status.run_step] || 'Heating toward the target.'
-    return withEta(`${line}${crest}`)
+    const cooling = status.seconds_to_cooldown != null
+    const line = cooling
+      ? `Cooling toward ${target}°F.`
+      : steps[status.run_step] || 'Heating toward the target.'
+    return withEta(cooling ? line : `${line}${crest}`)
   }
   if (status.learned_coast_f == null) {
     return withEta('Calibrate with water in the pot. Runs stay locked until that measurement is saved.')

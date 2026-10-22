@@ -178,6 +178,31 @@ def test_start_and_model_lines_name_the_numbers_a_run_began_with():
     assert analysis_message("full", None, None, False) == "Full-run analysis was not applied."
 
 
+def test_a_lowered_setpoint_counts_down_to_that_temperature():
+    holding = format_control(
+        {
+            "path": "hold",
+            "phase": "hold",
+            "temp_f": 162,
+            "target_f": 150,
+            "heaters_on": [False, False],
+            "seconds_to_cooldown": 48,
+        }
+    )
+    assert "48s until 150°F" in holding
+    cooling = format_control(
+        {
+            "path": "cooldown",
+            "phase": "cooldown",
+            "temp_f": 150,
+            "target_f": 165,
+            "heaters_on": [False, False],
+            "seconds_to_cooldown": 200,
+        }
+    )
+    assert "200s until 100°F" in cooling
+
+
 def test_the_control_log_exports_temperature_heaters_and_the_calculation():
     text = control_log_csv(
         [

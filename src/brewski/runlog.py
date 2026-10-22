@@ -558,7 +558,13 @@ def _eta(detail: dict) -> str:
     if isinstance(target, (int, float)) and not isinstance(target, bool):
         return f" ETA {float(target):.0f}s to target."
     if isinstance(cool, (int, float)) and not isinstance(cool, bool):
-        return f" {float(cool):.0f}s until {SAFE_TEMP_F:.0f}°F."
+        phase = str(detail.get("phase") or "")
+        aimed = detail.get("target_f")
+        if path == "cooldown" or phase == "cooldown" or not isinstance(aimed, (int, float)) or isinstance(aimed, bool):
+            floor = SAFE_TEMP_F
+        else:
+            floor = float(aimed)
+        return f" {float(cool):.0f}s until {floor:.0f}°F."
     return ""
 
 

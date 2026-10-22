@@ -284,6 +284,64 @@ def test_time_to_target_includes_the_coast_and_cooldown_waits_for_a_fall():
     assert 0 < cool <= PREDICT_MAX_HORIZON_SECONDS
     assert seconds_to_cooldown(160.0, None, learned_rate_f_per_min=2.0) == pytest.approx((160 - 100) / (2 / 60))
     assert seconds_to_cooldown(160.0, 0.2) is None
+    # A lowered setpoint is measured to that setpoint, not to 100°F.
+    assert seconds_to_cooldown(160.0, -0.1, floor_f=150) == pytest.approx(100)
+    assert seconds_to_cooldown(160.0, None, learned_rate_f_per_min=2.0, floor_f=150) == pytest.approx(
+        (160 - 150) / (2 / 60)
+    )
+
+
+def test_a_dip_while_holding_is_not_a_cooldown(store):
+    # The same setpoint, a flat window, and a real downward wiggle. None of
+    # those is a cooldown. Lowering the setpoint is, until the probe arrives.
+    # After the run, the clock is the fall back under 100°F.
+    store.save_settings(
+        merge_settings(
+            store.get_settings(),
+            {"learned_cooldown_f_per_min": 2, "target_temp_f": 165},
+        )
+    )
+    source = StaticSource([165.0, 90.0])
+    controller = Controller(store, source)
+    controller._mode = "running"
+    controller._live_temps = [165.0, 90.0]
+    controller._predict_clock = 12
+    controller._predict_samples = [(0, 165.0), (4, 165.0), (8, 165.0), (12, 165.0)]
+    assert controller.status()["seconds_to_cooldown"] is None
+
+    controller._live_temps = [164.8, 90.0]
+    controller._predict_samples = [(0, 165.4), (4, 165.2), (8, 165.0), (12, 164.8)]
+    dipped = controller.status()
+    assert dipped["seconds_to_target"] is None
+    assert dipped["seconds_to_cooldown"] is None
+
+    controller._dial_target = 150
+    controller._live_temps = [162.0, 90.0]
+    controller._predict_samples = [(0, 165.0), (4, 164.0), (8, 163.0), (12, 162.0)]
+    lowered = controller.status()
+    assert lowered["target_temp_f"] == 150
+    assert lowered["seconds_to_cooldown"] == pytest.approx((162 - 150) / 0.25, abs=0.2)
+    assert lowered["seconds_to_cooldown"] < (162 - 100) / 0.25
+
+    controller._dial_target = 170
+    raised = controller.status()
+    assert raised["seconds_to_cooldown"] is None
+
+    controller._dial_target = 150
+    controller._live_temps = [162.0, 90.0]
+    waiting = controller.status()
+    assert waiting["seconds_to_cooldown"] is not None
+    controller._live_temps = [150.4, 90.0]
+    controller._predict_samples = [(0, 151.6), (4, 151.2), (8, 150.8), (12, 150.4)]
+    assert controller.status()["seconds_to_cooldown"] is None
+
+    controller._mode = "cooling"
+    controller._dial_target = None
+    controller._live_temps = [150.0, 90.0]
+    controller._predict_samples = [(0, 153.0), (4, 152.0), (8, 151.0), (12, 150.0)]
+    cooling = controller.status()
+    assert cooling["mode"] == "cooling"
+    assert cooling["seconds_to_cooldown"] == pytest.approx((150 - 100) / 0.25, abs=0.2)
 
 
 def test_heaters_stay_off_for_the_minimum_before_they_can_turn_on(store):

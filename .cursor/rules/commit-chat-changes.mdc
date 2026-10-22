@@ -1,0 +1,31 @@
+---
+description: Commit each completed chat change with a message that describes it so it can be reverted
+alwaysApply: true
+---
+
+# Commit each completed change
+
+This repository has a standing request to commit agent work. When you finish a change the user asked for, commit it before you end the turn. Each commit is one rollback unit: a bad change is undone with `git revert <sha>`.
+
+## When to commit
+
+- Commit once the change is complete. Leave a half-finished or still-broken edit uncommitted.
+- One logical change per commit. Unrelated requests in the same thread get separate commits.
+- Stage only files you changed for that request. Leave pre-existing dirty and untracked files out.
+- Skip the commit when there is nothing new to commit, the user said not to commit, or the diff contains secrets (`.env`, credentials, keys). Warn instead of committing secrets.
+
+## How to commit
+
+No git config changes, no `--no-verify`, no force push, no `git push` unless the user asks, and no amend unless the amend rules are already met.
+
+In parallel, run `git status`, `git diff` (staged and unstaged), and `git log -8 --oneline`. Then stage the files for this change and commit. The subject is one imperative line, specific enough to recognize later, in the same short style as recent history.
+
+```bash
+git commit -m "$(cat <<'EOF'
+fix hold timer resetting when continuous is checked
+
+EOF
+)"
+```
+
+Run `git status` after the commit. In your reply, include the short hash and subject so the user can revert that commit.

@@ -76,6 +76,37 @@ def test_a_hold_line_names_the_ramp_pulse_and_whether_it_fires():
     )
     assert "including 4.4°F of coast" in coasting
     assert "That would carry past the target." in coasting
+    aimed = format_control(
+        {
+            "path": "hold",
+            "temp_f": 159.5,
+            "goal_f": 160,
+            "aim_f": 160.5,
+            "predicted_crest_f": 160.5,
+            "remaining_coast_f": 0.8,
+            "pulse_seconds": 2.0,
+            "on_seconds": 0,
+            "heat": True,
+            "heaters_on": [True, True],
+        }
+    )
+    assert "Aim 160.5°F." in aimed
+    curved = format_control(
+        {
+            "path": "hold",
+            "temp_f": 159.2,
+            "goal_f": 160,
+            "predicted_crest_f": 160.0,
+            "linear_rate_f_per_sec": 0.325,
+            "gain_f": 0.8,
+            "remaining_coast_f": 0.0,
+            "pulse_seconds": 9.1,
+            "on_seconds": 0,
+            "heat": True,
+            "heaters_on": [True, True],
+        }
+    )
+    assert "A 9.1s pulse on the heating curve would land at 160.0°F" in curved
     rising = format_control(
         {
             "path": "hold",

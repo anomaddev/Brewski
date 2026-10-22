@@ -75,6 +75,7 @@ _DECISION_KEYS = (
     "pulse_seconds",
     "hold_ready",
     "hold_wait",
+    "aim_f",
     "seconds_to_target",
     "seconds_to_cooldown",
 )
@@ -359,14 +360,22 @@ def _hold_sentence(detail: dict) -> str:
     parts = ["Holding."]
     if temp:
         parts.append(f"{temp}°F.")
+    aim = _number(detail.get("aim_f"))
+    goal = _number(detail.get("goal_f"))
+    if goal is None:
+        goal = _number(detail.get("target_f"))
+    if aim is not None and goal is not None and aim > goal + 0.05:
+        parts.append(f"Aim {_deg(aim)}°F.")
     coast = _deg(detail.get("remaining_coast_f"))
     coast_f = _number(detail.get("remaining_coast_f"))
     if on_now and pulse:
         parts.append(f"On for {float(on):.1f}s of a {pulse}s pulse.")
     elif pulse and landing and coast and coast_f is not None and coast_f >= 0.05:
         parts.append(f"A {pulse}s pulse would land at {landing}°F, including {coast}°F of coast.")
-    elif pulse and rate and landing:
+    elif pulse and rate and landing and _straight_hold_pulse(detail):
         parts.append(f"A {pulse}s pulse at {rate}°F/s would land at {landing}°F.")
+    elif pulse and landing:
+        parts.append(f"A {pulse}s pulse on the heating curve would land at {landing}°F.")
     elif landing:
         parts.append(f"Landing {landing}°F.")
     parts.append("Firing." if firing else "Waiting.")
@@ -376,6 +385,22 @@ def _hold_sentence(detail: dict) -> str:
             parts.append(reason)
     parts.append(heat_phrase(detail) + ".")
     return " ".join(part for part in parts if part) + _eta(detail)
+
+
+def _straight_hold_pulse(detail: dict) -> bool:
+    """True when the pulse gain is the straight rate times the on-time.
+
+    A pulse sized on the heater-on curve gains less than that in the same
+    seconds, because the first seconds of a soak are still shallow. Lines
+    that never recorded a gain keep the straight-rate wording.
+    """
+
+    gain = _number(detail.get("gain_f"))
+    rate = _number(detail.get("linear_rate_f_per_sec"))
+    pulse = _number(detail.get("pulse_seconds"))
+    if gain is None or rate is None or pulse is None:
+        return True
+    return abs(gain - rate * pulse) <= max(0.05, 0.2 * gain)
 
 
 def _hold_wait_reason(detail: dict) -> str:

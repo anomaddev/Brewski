@@ -7,8 +7,8 @@ so the dashboard can scroll the controller clock after a reload.
 The first enabled probe is the one compared with the target. Once a
 calibration has saved a heating model, heaters turn off when the predicted
 crest reaches the target, stay off while that projected coast is still
-arriving, then hold the target with pulses that land on it, and not past
-it, until the run stops, the hold
+arriving, then hold the target with pulses sized on the heater-on curve
+so they land on it, and not past it, until the run stops, the hold
 timer ends, or the max program duration is reached.
 Until that model exists they turn off by the measured coast, and sooner
 when the pot is rising faster than that measurement, so heat still stored
@@ -738,6 +738,11 @@ class Controller:
         # Elapsed time when the last hold pulse opened. The next pulse waits
         # out that coast. None once the coast has crested or aged out.
         self._hold_released_at: float | None = None
+        # Degrees added to the setpoint when recent hold pulses crested short.
+        # The probe is what has to reach the target; this only lets the next
+        # pulse plan a higher crest when the coast model ran long.
+        self._hold_bias_f = 0.0
+        self._hold_peak_f: float | None = None
         self._hold_marked = False
         self._hold_mark_pending = False
         # The previous model decision's heat flag, so a hold pulse that just
@@ -1368,6 +1373,7 @@ class Controller:
             # from the probe and the target.
             self._hold_ready = False
             self._hold_released_at = None
+            self._hold_peak_f = None
             self._model_was_heating = False
             self._decision = {"path": "pause", "heat": False}
             self._desired = [False] * SLOT_COUNT
@@ -2522,6 +2528,8 @@ class Controller:
 
         self._hold_ready = False
         self._hold_released_at = None
+        self._hold_bias_f = 0.0
+        self._hold_peak_f = None
         self._hold_marked = False
         self._hold_mark_pending = False
         self._model_was_heating = False
@@ -2907,6 +2915,8 @@ class Controller:
         if self._hold_ready and self._hold_should_release(primary, target, model, settings):
             self._hold_ready = False
             self._hold_released_at = None
+            self._hold_bias_f = 0.0
+            self._hold_peak_f = None
         self._last_target = target
         if self._hold_ready:
             return self._hold_mask(settings, primary, model, target, on)
@@ -3025,6 +3035,28 @@ class Controller:
             return
         self._add_mark(MARK_HOLDING)
 
+    def _note_hold_peak(self, temp: float) -> None:
+        """Keep the highest probe reading since this hold pulse started."""
+
+        if self._hold_peak_f is None or temp > self._hold_peak_f:
+            self._hold_peak_f = temp
+
+    def _settle_hold_bias(self, target: float) -> None:
+        """Raise the next crest by however short this pulse finished.
+
+        The coast model on a one-second pulse runs high, so a crest planned
+        on the setpoint stops under it. The miss is added to the aim, and an
+        overshoot takes it back off. The aim never goes more than a degree
+        above the setpoint.
+        """
+
+        peak = self._hold_peak_f
+        self._hold_peak_f = None
+        if peak is None:
+            return
+        miss = float(target) - peak
+        self._hold_bias_f = min(HOLD_BAND_F, max(0.0, self._hold_bias_f + miss))
+
     def _hold_coast_arriving(self, model: ThermalModel) -> bool:
         """True after a hold pulse until its coast has crested or aged out."""
 
@@ -3048,8 +3080,21 @@ class Controller:
         target: float,
         on: float,
     ) -> list[bool]:
-        """Pulses whose crest lands on the target and does not pass it."""
+        """Pulses that bring the probe onto the target.
 
+        When a pulse's crest stops short, the next one is aimed that much
+        higher, up to one degree. The heaters still open once the probe
+        itself is on the setpoint.
+        """
+
+        was_open = self._hold_released_at is not None
+        if on > 0 or was_open:
+            self._note_hold_peak(primary)
+        arriving = False
+        if was_open and on <= 0:
+            arriving = self._hold_coast_arriving(model)
+            if self._hold_released_at is None:
+                self._settle_hold_bias(target)
         plan = hold_maintenance_plan(
             primary,
             target,
@@ -3060,12 +3105,13 @@ class Controller:
             off_seconds=self._hold_off_seconds(settings),
             min_off_seconds=settings.heater_min_off_seconds,
             probe_slope=self._probe_slope(),
+            aim_f=target + self._hold_bias_f,
         )
         waiting = plan.get("hold_wait")
         if (
             on <= 0
             and waiting not in {"at_target", "min_off"}
-            and self._hold_coast_arriving(model)
+            and arriving
         ):
             plan = dict(plan)
             plan["heat"] = False

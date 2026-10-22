@@ -4,8 +4,8 @@ Soak is an exponential lag: the slope climbs as ``R (1 - e^{-t/τ})`` until
 the rise is straight. After the SSR opens, temperature climbs as
 ``S τ (1 - e^{-t/τ})`` and levels at an equilibrium. Calibration learns those
 shapes while the probe is still under 140°F, then one predicted pulse climbs
-to 160°F. The ten-minute hold stays there with minimum pulses that include
-the coast those pulses store.
+to 160°F. The ten-minute hold trims with pulses whose width and crest come
+from that same heater-on rise, so a small adjustment lands on the setpoint.
 """
 
 from __future__ import annotations
@@ -47,6 +47,10 @@ ARRIVAL_F = 0.1
 # A new hold pulse waits while the probe is still climbing this fast.
 # That rise is the previous pulse's coast, and another pulse would stack on it.
 HOLD_RISE_F_PER_SEC = 0.02
+# A sheath still near the straight rate is holding the coast measured on a
+# long heat. A small pulse sits at a few percent of that rate, and its crest
+# is the heater-on curve instead of slope times the coast time constant.
+HOLD_HOT_SHEATH_FRACTION = 0.5
 HOLD_SLOPE_WINDOW_SECONDS = 6.0
 HOLD_SLOPE_MIN_SPAN_SECONDS = 4.0
 # Stage I must not walk the pot up to the target. Leave the cold start here.
@@ -1331,6 +1335,63 @@ def coast_sized_should_heat(
     )["heat"]
 
 
+def heating_rise_f(model: ThermalModel, on_seconds: float) -> float:
+    """Degrees the probe climbs in ``on_seconds`` of heater-on time.
+
+    Calibration and the climb record this as heater-on time against
+    temperature rise. With a soak time constant the slope is
+    ``R (1 - e^{-t/τ})`` and the rise is its integral,
+    ``R (t - τ (1 - e^{-t/τ}))``. Older runs use the cold-start parabola.
+    """
+
+    elapsed = max(0.0, float(on_seconds))
+    if elapsed == 0.0:
+        return 0.0
+    rate = model.linear_rate_f_per_sec or 0.0
+    tau = model.soak_tau_seconds or 0.0
+    if tau > 0 and rate > 0:
+        return max(0.0, rate * (elapsed - tau * (1.0 - math.exp(-elapsed / tau))))
+    return _startup_rise(model, elapsed)
+
+
+def _sheath_curve_seconds(model: ThermalModel, slope_f_per_sec: float) -> float:
+    """Heater-on time that produces ``slope_f_per_sec`` on the heating curve."""
+
+    slope = max(0.0, float(slope_f_per_sec))
+    if slope <= 0.0:
+        return 0.0
+    rate = model.linear_rate_f_per_sec or 0.0
+    tau = model.soak_tau_seconds or 0.0
+    if tau > 0 and rate > 0:
+        fraction = min(1.0 - 1e-6, slope / rate)
+        return -tau * math.log(1.0 - fraction)
+    quad = startup_quad(model)
+    if quad > 0:
+        return slope / (2.0 * quad)
+    return 0.0
+
+
+def _hot_sheath_coast_f(
+    model: ThermalModel,
+    slope_f_per_sec: float,
+    temp_f: float,
+) -> float:
+    """Coast already stored when the sheath is still near the straight rate.
+
+    A short pulse never gets there. Scoring that pulse as ``slope · τ`` opened
+    the SSR before the water moved. A sheath left hot by a long heat still
+    carries the measured coast, and a new pulse must not stack on it.
+    """
+
+    rate = model.linear_rate_f_per_sec or 0.0
+    slope = max(0.0, float(slope_f_per_sec))
+    if rate <= 0 or slope < HOLD_HOT_SHEATH_FRACTION * rate:
+        return 0.0
+    if coast_tau_of(model) <= 0:
+        return 0.0
+    return remaining_coast_f(model, slope, temp_f)
+
+
 def _hold_can_track_a_short_pulse(model: ThermalModel) -> bool:
     """True when the sheath model knows a 1 second pulse is not full heat."""
 
@@ -1345,29 +1406,26 @@ def hold_pulse_landing(
 ) -> tuple[float, float, float, float]:
     """Landing, on-pulse gain, coast after shutoff, and the slope at shutoff.
 
-    With no coast on the model, the pulse is the straight rate times the
-    minimum. Once a coast has been learned, the landing is the climb while
-    the element is on plus the coast that slope still delivers after the SSR
-    opens. Slope already stored in the sheath is part of that coast, so the
-    next pulse is not planned as if the element were cold.
+    A small pulse's crest is the rise on the heater-on curve, starting from
+    the slope already in the sheath. The coast ``slope · τ`` is not added:
+    one second of soak is still on the shallow part of that curve, and
+    treating it as a full coast opened the heaters before the probe moved.
+    With no soak and no cold start, the pulse is the straight rate times the
+    on-time.
     """
 
     rate = max(0.0, float(model.linear_rate_f_per_sec or 0.0))
     minimum = max(0.0, float(min_on_seconds))
     slope0 = max(0.0, float(sheath_slope))
-    if coast_tau_of(model) <= 0 or not _hold_can_track_a_short_pulse(model):
+    if not _hold_can_track_a_short_pulse(model):
         gain = rate * minimum
         return temp_f + gain, gain, 0.0, rate
+    started = _sheath_curve_seconds(model, slope0)
+    gain = max(0.0, heating_rise_f(model, started + minimum) - heating_rise_f(model, started))
     if minimum <= 0:
-        coast = remaining_coast_f(model, slope0, temp_f) if slope0 > 0 else 0.0
-        return temp_f + coast, 0.0, coast, slope0
+        return temp_f + gain, gain, 0.0, slope0
     slope1 = step_sheath_slope(model, slope0, heating=True, dt=minimum)
-    average = (slope0 + max(0.0, slope1)) * 0.5
-    if rate > 0:
-        average = min(average, rate)
-    gain = max(0.0, average * minimum)
-    coast = remaining_coast_f(model, slope1, temp_f + gain)
-    return temp_f + gain + coast, gain, coast, slope1
+    return temp_f + gain, gain, 0.0, slope1
 
 
 def hold_on_time(
@@ -1406,6 +1464,21 @@ def hold_on_time(
     return hi
 
 
+def _hold_aim(target_f: float, aim_f: float | None) -> float:
+    """Crest the hold is trying to land, never below the setpoint or a degree over it.
+
+    A coast model that runs high leaves the probe short when the crest is
+    planned exactly on the setpoint. ``aim_f`` is that setpoint plus the
+    amount the last pulses fell short. It stays inside one degree so a
+    correction cannot plan a real blow past the target.
+    """
+
+    aim = target_f if aim_f is None else float(aim_f)
+    if not math.isfinite(aim):
+        aim = target_f
+    return min(target_f + HOLD_BAND_F, max(target_f, aim))
+
+
 def hold_maintenance_plan(
     temp_f: float,
     target_f: float,
@@ -1417,14 +1490,19 @@ def hold_maintenance_plan(
     off_seconds: float = 0.0,
     min_off_seconds: float = 0.0,
     probe_slope: float | None = None,
+    aim_f: float | None = None,
 ) -> dict:
     """Landing of the next pulse, and whether to fire it.
 
-    A new pulse fires only when its crest lands on the target or short of it.
-    One that would pass the target waits until the pot has cooled enough for
-    that same minimum to land on it. A pulse that lands short stays on past
-    the minimum until opening would carry the crest past the target, then
-    opens. The hardware minimum still finishes once a pulse has started.
+    A new pulse fires when the heater-on curve lands on ``aim_f`` or short of
+    it. That curve is the rise recorded while the heaters were on during
+    calibration and the climb. The aim starts at the setpoint and rises when
+    a finished pulse crests short, so the probe is held on the target rather
+    than under it. A landing more than ``HOLD_BAND_F`` above the setpoint
+    waits. Once the probe itself is on the setpoint, the heaters open. A
+    pulse that has already started finishes the hardware minimum. A sheath
+    still near the straight rate keeps the measured coast, so a new pulse
+    does not stack on a long heat.
     """
 
     rate = max(0.0, float(model.linear_rate_f_per_sec or 0.0))
@@ -1436,31 +1514,57 @@ def hold_maintenance_plan(
     else:
         off = max(0.0, off)
     minimum_off = max(0.0, float(min_off_seconds))
+    aim = _hold_aim(target_f, aim_f)
     landing, gain, coast, shutoff = hold_pulse_landing(temp_f, model, minimum, sheath_slope)
+    stored = 0.0
+    if on <= 0:
+        stored = _hot_sheath_coast_f(model, sheath_slope, temp_f)
+        if stored > 0:
+            landing += stored
+            coast = stored
     hold_wait = None
     pulse = minimum
     if on > 0:
         if minimum > 0 and on < minimum:
             heat = True
             extra = hold_on_time(
-                temp_f, target_f, model, sheath_slope, max(0.0, minimum - on)
+                temp_f, aim, model, sheath_slope, max(0.0, minimum - on)
             )
             landing, gain, coast, shutoff = hold_pulse_landing(
                 temp_f, model, extra, sheath_slope
             )
             pulse = on + extra
+        elif temp_f >= target_f:
+            heat = False
+            hold_wait = "at_target"
+            landing, gain, coast, shutoff = hold_pulse_landing(
+                temp_f, model, 0.0, sheath_slope
+            )
+            pulse = on
         else:
             now, _, _, _ = hold_pulse_landing(temp_f, model, 0.0, sheath_slope)
-            nxt, _, _, _ = hold_pulse_landing(temp_f, model, 1.0, sheath_slope)
-            # Open before the second that would carry the crest past the target.
-            heat = now < target_f and nxt > now and nxt <= target_f
-            extra = 0.0 if not heat else hold_on_time(
-                temp_f, target_f, model, sheath_slope, 0.0
+            nxt, nxt_gain, nxt_coast, nxt_shutoff = hold_pulse_landing(
+                temp_f, model, 1.0, sheath_slope
             )
-            landing, gain, coast, shutoff = hold_pulse_landing(
-                temp_f, model, extra, sheath_slope
-            )
-            pulse = on + extra
+            # Open before the second that would carry the crest past the aim.
+            heat = now < aim and nxt > now and nxt <= aim
+            if heat:
+                extra = hold_on_time(temp_f, aim, model, sheath_slope, 0.0)
+                landing, gain, coast, shutoff = hold_pulse_landing(
+                    temp_f, model, extra, sheath_slope
+                )
+                pulse = on + extra
+            elif now < aim and nxt > aim:
+                heat = False
+                hold_wait = "overshoot"
+                landing, gain, coast, shutoff = nxt, nxt_gain, nxt_coast, nxt_shutoff
+                pulse = on + 1.0
+            else:
+                heat = False
+                landing, gain, coast, shutoff = hold_pulse_landing(
+                    temp_f, model, 0.0, sheath_slope
+                )
+                pulse = on
     elif temp_f >= target_f:
         heat = False
         hold_wait = "at_target"
@@ -1470,7 +1574,7 @@ def hold_maintenance_plan(
     elif probe_slope is not None and probe_slope > HOLD_RISE_F_PER_SEC:
         heat = False
         hold_wait = "rising"
-    elif landing > target_f:
+    elif landing > aim:
         heat = False
         hold_wait = "overshoot"
     elif landing <= temp_f + 1e-4:
@@ -1478,10 +1582,13 @@ def hold_maintenance_plan(
         hold_wait = "short"
     else:
         heat = True
-        pulse = hold_on_time(temp_f, target_f, model, sheath_slope, minimum)
+        pulse = hold_on_time(temp_f, aim - stored, model, sheath_slope, minimum)
         landing, gain, coast, shutoff = hold_pulse_landing(
             temp_f, model, pulse, sheath_slope
         )
+        landing += stored
+        if stored > 0:
+            coast = stored
     plan = {
         "heat": heat,
         "slope_f_per_sec": round(shutoff, 5),
@@ -1492,6 +1599,7 @@ def hold_maintenance_plan(
         "pulse_seconds": round(pulse, 2),
         "on_seconds": round(on, 2),
         "sheath_slope_f_per_sec": round(max(0.0, float(sheath_slope)), 5),
+        "aim_f": round(aim, 2),
     }
     if math.isfinite(off):
         plan["off_seconds"] = round(off, 2)
@@ -1513,12 +1621,15 @@ def hold_should_heat(
     off_seconds: float = 0.0,
     min_off_seconds: float = 0.0,
     probe_slope: float | None = None,
+    aim_f: float | None = None,
 ) -> bool:
     """True when a hold pulse should be on.
 
-    A new pulse fires when its crest lands on the target without passing it.
-    A pulse that has already started finishes the hardware minimum, then
-    stays on only while another second still crests at or under the target.
+    A new pulse fires when its crest lands on the aim without passing it.
+    The aim is the setpoint until a short crest raises it. A pulse that has
+    already started finishes the hardware minimum, then stays on only while
+    the probe is still under the setpoint and another second still crests
+    at or under the aim.
     """
 
     return hold_maintenance_plan(
@@ -1531,6 +1642,7 @@ def hold_should_heat(
         off_seconds=off_seconds,
         min_off_seconds=min_off_seconds,
         probe_slope=probe_slope,
+        aim_f=aim_f,
     )["heat"]
 
 

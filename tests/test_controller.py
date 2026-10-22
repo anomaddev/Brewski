@@ -709,8 +709,9 @@ def test_minimum_on_time_follows_the_setting(store):
 def test_a_long_tick_does_not_stack_hold_pulses(store):
     # Calibration 17 ran the target 4°F hot: the hold fired again before the
     # coast of the last pulse showed up, and a multi-second tick toggled the
-    # SSR once per simulated second.
-    # 159.5°F plus a cold one-second pulse lands on 160°F. 159.7°F would pass it.
+    # SSR once per simulated second. The pulse stays on while the heater-on
+    # curve is still short of the target, then opens once the probe reads it,
+    # and does not start another pulse while that coast is still arriving.
     source = StaticSource([159.5, 140.0])
     controller = Controller(store, source)
     controller.start({"kind": "calibration", "charge_gallons": 5})
@@ -734,6 +735,11 @@ def test_a_long_tick_does_not_stack_hold_pulses(store):
     assert edges == [[True, True]]
     assert source.heaters[:2] == [True, True]
 
+    controller.tick(1)
+    assert source.heaters[:2] == [True, True]
+    assert edges == [[True, True]]
+
+    source.temps = [160.2, 140.0]
     controller.tick(1)
     assert source.heaters[:2] == [False, False]
     assert edges == [[True, True], [False, False]]
@@ -1343,6 +1349,21 @@ def test_a_ready_model_holds_inside_the_band_until_stop(store):
     assert source.heaters[:2] == [False, False]
     assert controller.status()["mode"] == "running"
     assert controller.status()["run_step"] == "hold"
+
+
+def test_a_short_hold_crest_raises_the_next_aim(store):
+    controller = Controller(store, StaticSource([160.0, 90.0]))
+    controller._hold_peak_f = 159.5
+    controller._settle_hold_bias(160.0)
+    assert controller._hold_bias_f == pytest.approx(0.5)
+
+    controller._hold_peak_f = 160.2
+    controller._settle_hold_bias(160.0)
+    assert controller._hold_bias_f == pytest.approx(0.3)
+
+    controller._hold_peak_f = 159.0
+    controller._settle_hold_bias(160.0)
+    assert controller._hold_bias_f == pytest.approx(1.0)
 
 
 def test_a_coast_that_finishes_short_climbs_again(store):

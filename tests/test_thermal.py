@@ -24,7 +24,9 @@ from brewski.thermal import (
     fit_heating_lag,
     fit_soak_tau,
     fit_startup_quad,
+    heating_rise_f,
     heating_lag_coast,
+    hold_pulse_landing,
     coast_sized_should_heat,
     hold_maintenance_plan,
     hold_should_heat,
@@ -167,9 +169,60 @@ def test_hold_pulses_land_on_the_target_without_passing_it():
     ) is True
 
 
+def test_a_small_hold_pulse_is_sized_on_the_heating_curve():
+    # Run 24 scored one second of soak as about 0.7°F of coast and opened
+    # before the water moved. The crest of a small pulse is the rise on the
+    # heater-on curve from calibration and the climb.
+    model = ThermalModel(
+        linear_rate_f_per_sec=0.325,
+        soak_tau_seconds=13.7,
+        coast_tau_seconds=21.75,
+        coast_rise_f=8.66,
+        coast_at_f=125.52,
+    )
+    _landing, gain, coast, _slope = hold_pulse_landing(159.2, model, 1.0, 0.0)
+    assert gain == pytest.approx(heating_rise_f(model, 1.0), abs=1e-9)
+    assert gain < 0.05
+    assert coast == 0.0
+    plan = hold_maintenance_plan(159.2, 160.0, 0.0, model, 1.0)
+    assert plan["heat"] is True
+    assert plan["predicted_crest_f"] == pytest.approx(160.0, abs=0.05)
+    assert plan["remaining_coast_f"] == 0.0
+    assert plan["pulse_seconds"] == pytest.approx(9.1, abs=0.3)
+    # Several seconds in, the sheath is partway up the soak and the crest is
+    # still that curve, not slope times the coast time constant.
+    slope = 0.325 * (1.0 - math.exp(-8.0 / 13.7))
+    mid = hold_maintenance_plan(159.5, 160.0, 8.0, model, 1.0, sheath_slope=slope)
+    assert mid["heat"] is True
+    assert mid["remaining_coast_f"] == 0.0
+    assert mid["predicted_crest_f"] == pytest.approx(160.0, abs=0.05)
+
+
+def test_a_short_crest_raises_the_hold_aim_until_the_probe_is_on_target():
+    # Run 24: a 1 second pulse was planned to land on 160°F and crested near
+    # 159.5°F. The next pulse was refused because the model said it would
+    # finish just above 160°F, so the pot never reached the setpoint.
+    model = ThermalModel(linear_rate_f_per_sec=0.328)
+    # Still planning exactly on the setpoint: 159.8 + 0.328 finishes at 160.13.
+    assert hold_should_heat(159.8, 160.0, 0.0, model, 1.0) is False
+    # The aim is now 160.5°F. That same pulse fires, and the probe is still short.
+    aimed = hold_maintenance_plan(159.8, 160.0, 0.0, model, 1.0, aim_f=160.5)
+    assert aimed["heat"] is True
+    assert aimed["aim_f"] == pytest.approx(160.5)
+    assert aimed["predicted_crest_f"] == pytest.approx(160.5, abs=0.02)
+    assert aimed["pulse_seconds"] == pytest.approx((160.5 - 159.8) / 0.328, abs=0.15)
+    # Once the probe is on 160°F the higher aim does not keep the heaters closed.
+    assert hold_should_heat(160.0, 160.0, 2.0, model, 1.0, aim_f=160.5) is False
+    # A pulse that would clear the setpoint by more than a degree still waits.
+    assert hold_should_heat(159.9, 160.0, 0.0, model, 5.0, aim_f=160.5) is False
+    # The aim itself cannot be set more than a degree above the setpoint.
+    capped = hold_maintenance_plan(159.0, 160.0, 0.0, model, 1.0, aim_f=162.0)
+    assert capped["aim_f"] == pytest.approx(161.0)
+
+
 def test_a_hot_sheath_does_not_get_another_minimum_pulse():
-    # Seed coast is 14°F at the straight rate. A cold 1 second pulse stores
-    # a small slice of that. The slope left by the climb stores the whole coast.
+    # A cold sheath is sized on the heating curve and lands on the target.
+    # A sheath already at the straight rate still holds the measured coast.
     model = seed_model()
     cold = hold_maintenance_plan(159.4, 160.0, 0.0, model, 1.0, sheath_slope=0.0)
     assert cold["heat"] is True
@@ -219,14 +272,15 @@ def test_stage_three_holds_the_pulse_until_the_stored_coast_reaches_the_target()
     session = CalibrationSession()
     session.phase = "hold"
     session.guess = model
-    # A one-second pulse from here clears 160°F, so the hold waits.
+    # One second on this parabola gains 0.01°F. The hold runs the pulse until
+    # the heater-on curve has closed the gap to 160°F.
     session._set_heat(10.0, 159.7, 0.0, 1.0)
-    assert session.heat is False
-    assert session.predicted_crest == pytest.approx(160.1, abs=0.05)
-    assert session.trace.get("hold_wait") == "overshoot"
-    # The minimum on time is already done, and another second would pass the aim.
+    assert session.heat is True
+    assert session.predicted_crest == pytest.approx(160.0, abs=0.05)
+    assert session.trace["pulse_seconds"] == pytest.approx(math.sqrt(0.3 / 0.01), abs=0.2)
+    # Still short of 160°F, and another second of the curve stays under it.
     session._set_heat(11.0, 159.9, 1.0, 1.0)
-    assert session.heat is False
+    assert session.heat is True
 
 
 def test_the_next_minute_is_the_coast_from_cutting_the_heaters_off_now():

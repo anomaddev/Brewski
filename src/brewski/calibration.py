@@ -5,8 +5,9 @@ straight rate, then the heaters open while the probe is still under 140°F.
 The coast learns the negative exponential up to equilibrium. That equilibrium
 is scored against 140°F and the guess is tuned. One predicted pulse climbs to
 160°F. A shorter pulse follows only when that coast lands short. The hold
-keeps 160°F for ten minutes. Each pulse is sized to land on 160°F and not
-past it, and the next one waits until that pulse's coast has arrived.
+keeps 160°F for ten minutes. Each hold pulse is sized on the heater-on
+curve so it lands on 160°F and not past it, and the next one waits until
+that pulse's coast has arrived.
 """
 
 from __future__ import annotations

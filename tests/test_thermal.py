@@ -542,6 +542,72 @@ def test_a_warmer_shutoff_runs_further_than_the_measured_coast():
     assert remaining_coast_f(bare, 0.383, temp_f=151.2) == pytest.approx(cool, abs=0.05)
 
 
+def test_a_cold_recovery_stays_on_until_the_stored_coast_reaches_the_target():
+    # Run 26. The long heat opened at 160.6°F expecting 175°F and the pot
+    # crested at 168.9°F. Each follow-up pulse counted a full hot-sheath
+    # coast after one second and opened, so the last 6°F took about ten minutes.
+    model = ThermalModel(
+        linear_rate_f_per_sec=0.32525,
+        soak_tau_seconds=13.7,
+        coast_rise_f=8.66,
+        coast_seconds=65.25,
+        coast_tau_seconds=21.75,
+        coast_at_f=125.52,
+    )
+    # The learned rise was already the coast at about 0.40°F/s. Scaling it up
+    # from the 0.325°F/s straight rate predicted 14.7°F. The fit slope predicts
+    # about 12°F, and the warmer-pot scale stays on.
+    shutoff = remaining_coast_f(model, 0.40257, 160.55)
+    assert shutoff == pytest.approx(12.0, abs=0.2)
+    assert shutoff < 13.0
+
+    one = pulse_plan(168.8, 175.0, 1.0, model, 1.0, slope_f_per_sec=0.0, budgeted=True)
+    assert one["heat"] is True
+    assert one["predicted_crest_f"] == pytest.approx(169.5, abs=0.3)
+    assert one["predicted_crest_f"] < 172.0
+
+    opened = None
+    previous = one
+    for step in range(2, 40):
+        plan = pulse_plan(
+            168.8,
+            175.0,
+            float(step),
+            model,
+            1.0,
+            slope_f_per_sec=0.0,
+            budgeted=True,
+        )
+        if not plan["heat"]:
+            opened = plan
+            break
+        previous = plan
+    assert opened is not None
+    assert previous["heat"] is True
+    assert previous["predicted_crest_f"] < 175.0
+    assert opened["on_seconds"] > 1.0
+    assert opened["predicted_crest_f"] == pytest.approx(175.0, abs=0.4)
+    assert opened["predicted_crest_f"] < 176.0
+
+    # A sheath already at the straight rate, a few degrees short, still opens
+    # on the coast that rate has stored. It does not wait as a cold pulse would.
+    hot = pulse_plan(
+        172.0,
+        175.0,
+        60.0,
+        model,
+        1.0,
+        slope_f_per_sec=model.linear_rate_f_per_sec or 0.0,
+        budgeted=True,
+    )
+    assert hot["heat"] is False
+    assert hot["remaining_coast_f"] == pytest.approx(
+        remaining_coast_f(model, model.linear_rate_f_per_sec or 0.0, 172.0),
+        abs=0.05,
+    )
+    assert hot["predicted_crest_f"] > 180.0
+
+
 def test_the_climb_pulse_stays_on_until_the_projection_crests_at_160():
     session = CalibrationSession()
     session.phase = "pulse"

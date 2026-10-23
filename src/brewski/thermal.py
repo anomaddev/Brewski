@@ -1004,8 +1004,8 @@ def _coast_fraction(model: ThermalModel, on_seconds: float) -> float:
     return min(1.0, slope / full_slope)
 
 
-# A live rise steeper than the Stage I rate is still storing heat. Cap the
-# scale so one noisy sample cannot demand an enormous crest.
+# A live rise steeper than the slope the coast was learned at is still
+# storing heat. Cap the scale so one noisy sample cannot demand an enormous crest.
 COAST_SLOPE_SCALE_MAX = 3.0
 
 
@@ -1051,9 +1051,12 @@ def remaining_coast_f(
 ) -> float:
     """Degrees the pot still climbs if the heaters open at this slope.
 
-    The coast is ``slope · τ``. At the straight rate that is the measured
-    rise. A shallower slope has stored less, in proportion to the slope. A
-    steeper slope is still storing heat, so the rise grows with the slope.
+    The coast is ``slope · τ``. At the slope the rise was learned at, that
+    is the measured rise. A shallower slope has stored less. A steeper slope
+    is still storing heat, so the rise grows from ``coast_rise / τ`` rather
+    than from the straight rate, and it is capped so one noisy sample cannot
+    demand more than a few times the measured rise. When the coast has no
+    time constant of its own, that learned slope is the straight rate.
     A warmer pot than the one that coast was measured on runs further, in
     proportion to its temperature above freezing.
     """
@@ -1063,10 +1066,10 @@ def remaining_coast_f(
     tau = coast_tau_of(model)
     if tau <= 0:
         return 0.0
-    linear = model.linear_rate_f_per_sec or 0.0
     rise = model.coast_rise_f or 0.0
-    if linear > 0 and slope_f_per_sec > linear and rise > 0:
-        scale = min(COAST_SLOPE_SCALE_MAX, slope_f_per_sec / linear)
+    learned = rise / tau if rise > 0 else (model.linear_rate_f_per_sec or 0.0)
+    if learned > 0 and slope_f_per_sec > learned and rise > 0:
+        scale = min(COAST_SLOPE_SCALE_MAX, slope_f_per_sec / learned)
         base = rise * scale
     else:
         base = slope_f_per_sec * tau
@@ -1125,41 +1128,17 @@ def budgeted_coast_f(
     temp_f: float,
     goal_f: float,
 ) -> float:
-    """Crest to plan for if the heater stays on.
+    """Coast already stored at this slope.
 
-    The slope right now may still be low. If the element would reach linear
-    heat before the probe got to ``goal_f``, the landing is the full crest,
-    so the shutoff has to use that crest now instead of running up to the goal.
+    A sheath that is still soaking has not stored the measured rise. Counting
+    that full coast anyway opens a recovery pulse after one second, while the
+    element is still cold, and the pot then creeps the rest of the way.
+    ``goal_f`` is the aim the caller is climbing toward. It does not inflate
+    the coast. Once the slope is at the straight rate, the stored coast is
+    the measured one, so a long heat still opens with that coast in hand.
     """
 
-    rise = (model.coast_rise_f or 0.0) * coast_temperature_scale(temp_f, model.coast_at_f)
-    if rise <= 0:
-        return 0.0
-    now = remaining_coast_f(model, slope_f_per_sec, temp_f)
-    linear = model.linear_rate_f_per_sec or 0.0
-    if linear <= 0:
-        return now
-    if slope_f_per_sec >= linear * 0.98:
-        return remaining_coast_f(model, slope_f_per_sec, temp_f)
-    tau = model.soak_tau_seconds or 0.0
-    accel = 2.0 * startup_quad(model)
-    if tau > 0 and accel <= 0:
-        gap = max(0.0, linear - max(0.0, slope_f_per_sec))
-        if gap <= 0.02 * linear:
-            seconds_to_linear = 0.0
-        else:
-            seconds_to_linear = tau * math.log(gap / (0.02 * linear))
-        climb = (max(0.0, slope_f_per_sec) + linear) * 0.5 * seconds_to_linear
-        if temp_f + climb + rise >= goal_f:
-            return rise
-        return now
-    if accel <= 0:
-        return now
-    seconds_to_linear = (linear - max(0.0, slope_f_per_sec)) / accel
-    climb = (max(0.0, slope_f_per_sec) + linear) * 0.5 * seconds_to_linear
-    if temp_f + climb + rise >= goal_f:
-        return rise
-    return now
+    return remaining_coast_f(model, slope_f_per_sec, temp_f)
 
 
 def predicted_crest(
@@ -1269,10 +1248,13 @@ def pulse_plan(
 
     While the element is already on, the coast is entered at the heating
     slope for this on-time, raised when the probe is steeper. ``budgeted``
-    plans the crest that slope would store if the sheath reached linear heat
-    before the aim. The calibration pulse uses the coast already stored at
-    that same entry. A new pulse, with the element off, is the climb during
-    the minimum on time plus the coast that on time would store.
+    uses the coast that slope has stored. A sheath still soaking has not
+    stored the measured rise, so the climb stays on until this coast reaches
+    the aim, and it opens then even if the probe has not risen. Once the
+    slope is at the straight rate, that coast is the measured one. The
+    calibration pulse uses the same entry. A new pulse, with the element
+    off, is the climb during the minimum on time plus the coast that on
+    time would store.
     """
 
     if slope_f_per_sec is None:

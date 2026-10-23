@@ -17,6 +17,7 @@ from brewski.controller import (
     seconds_along_coast,
     seconds_to_cooldown,
     seconds_to_target,
+    smooth_cooldown_eta,
     sheath_soak,
     slope_f_per_sec,
     sustain_pulse_seconds,
@@ -342,6 +343,47 @@ def test_a_dip_while_holding_is_not_a_cooldown(store):
     cooling = controller.status()
     assert cooling["mode"] == "cooling"
     assert cooling["seconds_to_cooldown"] == pytest.approx((150 - 100) / 0.25, abs=0.2)
+
+
+def test_cooldown_estimate_counts_down_instead_of_following_probe_noise(store):
+    # A short window can look like a plunge, then a rise, from ordinary probe
+    # noise. The published time stays a countdown either way.
+    store.save_settings(
+        merge_settings(store.get_settings(), {"learned_cooldown_f_per_min": 1.0, "target_temp_f": 170})
+    )
+    controller = Controller(store, StaticSource([160.0]))
+    controller._mode = "cooling"
+    controller._live_temps = [160.0]
+    controller._predict_clock = 20.0
+    controller._predict_samples = [(5.0, 160.3), (10.0, 160.2), (15.0, 160.1), (20.0, 160.0)]
+    first = controller.status()["seconds_to_cooldown"]
+    assert first == pytest.approx((160.0 - 100.0) / 0.02, abs=0.2)
+
+    controller._predict_clock = 21.0
+    controller._live_temps = [158.0]
+    controller._predict_samples = [(6.0, 160.5), (11.0, 160.0), (16.0, 159.0), (21.0, 158.0)]
+    plunged = controller.status()["seconds_to_cooldown"]
+    assert plunged is not None
+    assert abs(plunged - (first - 1.0)) <= 4.0
+
+    controller._predict_clock = 22.0
+    controller._live_temps = [158.4]
+    controller._predict_samples = [(7.0, 158.0), (12.0, 158.1), (17.0, 158.3), (22.0, 158.4)]
+    bounced = controller.status()["seconds_to_cooldown"]
+    assert bounced is not None
+    assert abs(bounced - (plunged - 1.0)) <= 4.0
+
+    # The same tick must not revise the number a second time.
+    again = controller.status()["seconds_to_cooldown"]
+    assert again == pytest.approx(bounced, abs=0.05)
+
+
+def test_smooth_cooldown_eta_counts_down_and_ignores_a_missing_reading():
+    assert smooth_cooldown_eta(None, 600.0, 1.0) == pytest.approx(600.0)
+    eased = smooth_cooldown_eta(600.0, 120.0, 1.0)
+    assert eased is not None
+    assert 596.0 <= eased <= 599.0
+    assert smooth_cooldown_eta(eased, None, 1.0) == pytest.approx(eased - 1.0)
 
 
 def test_heaters_stay_off_for_the_minimum_before_they_can_turn_on(store):

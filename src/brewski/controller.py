@@ -177,6 +177,13 @@ PREDICT_MIN_SPAN_SECONDS = 8.0
 PREDICT_MIN_RATE_F_PER_SEC = 0.01
 # Both estimates stop here. A cold pot must not report a multi-day climb.
 PREDICT_MAX_HORIZON_SECONDS = 4 * 60 * 60
+# The cooldown clock is an estimate. A few minutes of the fall set its rate.
+# Until that window exists, a new reading may only ease the countdown.
+COOLDOWN_ETA_WINDOW_SECONDS = 180.0
+COOLDOWN_ETA_MIN_SPAN_SECONDS = 60.0
+COOLDOWN_ETA_TAU_SECONDS = 60.0
+# Seconds the estimate may move, beyond the countdown itself, per real second.
+COOLDOWN_ETA_MAX_REVISE_PER_SEC = 3.0
 # A fast rise may shut off sooner than the learned coast, but not by more than
 # this multiple, and never by more than EARLY_CUTOFF_MAX_F degrees.
 PREDICT_COAST_SCALE_MAX = 3.0
@@ -329,6 +336,61 @@ def slope_f_per_sec(samples: list[tuple[float, float]]) -> float | None:
     if dt < PREDICT_MIN_SPAN_SECONDS:
         return None
     return (end_v - start_v) / dt
+
+
+def fitted_slope_f_per_sec(samples: list[tuple[float, float]]) -> float | None:
+    """Least-squares °F/s. One noisy reading cannot swing a long window."""
+
+    count = len(samples)
+    if count < PREDICT_MIN_SAMPLES:
+        return None
+    origin = samples[0][0]
+    if samples[-1][0] - origin < COOLDOWN_ETA_MIN_SPAN_SECONDS:
+        return None
+    sum_t = sum_v = sum_tt = sum_tv = 0.0
+    for stamp, value in samples:
+        t = stamp - origin
+        sum_t += t
+        sum_v += value
+        sum_tt += t * t
+        sum_tv += t * value
+    denom = count * sum_tt - sum_t * sum_t
+    if denom <= 0:
+        return None
+    return (count * sum_tv - sum_t * sum_v) / denom
+
+
+def smooth_cooldown_eta(
+    previous: float | None,
+    fresh: float | None,
+    dt: float,
+    *,
+    tau: float = COOLDOWN_ETA_TAU_SECONDS,
+    max_revise_per_sec: float = COOLDOWN_ETA_MAX_REVISE_PER_SEC,
+) -> float | None:
+    """Carry a cooldown estimate forward without chasing one probe reading.
+
+    ``previous`` counts down by ``dt``. A new calculation may ease that
+    countdown. A missing calculation, such as a short window that ticked
+    upward, leaves the countdown alone.
+    """
+
+    if dt < 0:
+        dt = 0.0
+    if previous is None:
+        if fresh is None:
+            return None
+        return min(PREDICT_MAX_HORIZON_SECONDS, max(0.0, fresh))
+    counted = max(0.0, previous - dt)
+    if fresh is None or dt == 0:
+        return counted
+    revise_dt = min(dt, 5.0)
+    alpha = 1.0 - math.exp(-revise_dt / tau)
+    revised = counted + alpha * (fresh - counted)
+    limit = max_revise_per_sec * revise_dt
+    delta = min(limit, max(-limit, revised - counted))
+    shown = min(PREDICT_MAX_HORIZON_SECONDS, max(0.0, counted + delta))
+    return shown
 
 
 def predicted_coast_f(
@@ -767,6 +829,13 @@ class Controller:
         # time, including pause, so a test can advance it without sleeping.
         self._predict_clock = 0.0
         self._predict_samples: list[tuple[float, float]] = []
+        # Smoothed "time to cool". The trace is the recent control temperature
+        # used to settle the rate. The clock is the predict clock of the last
+        # published estimate, so a second read in the same tick does not move it.
+        self._cool_eta: float | None = None
+        self._cool_eta_clock: float | None = None
+        self._cool_floor: float | None = None
+        self._cool_trace: list[tuple[float, float]] = []
         # Control-probe samples for the rate shown on the dashboard. Kept apart
         # from the shutoff window so an idle screen can show it too.
         self._rate_clock = 0.0
@@ -1985,6 +2054,7 @@ class Controller:
         self._cooldown_window = []
         self._display_coast = None
         self._display_rate = None
+        self._clear_cool_eta()
         if self._mode == "cooling":
             self._mode = "idle"
 
@@ -2553,6 +2623,7 @@ class Controller:
         self._predict_clock = 0.0
         self._predict_samples.clear()
         self._coast_curve.clear()
+        self._clear_cool_eta()
 
     def _clear_rate(self) -> None:
         self._rate_clock = 0.0
@@ -2735,9 +2806,11 @@ class Controller:
 
         empty: dict[str, float | None] = {"seconds_to_target": None, "seconds_to_cooldown": None}
         if self._mode not in ("running", "paused", "cooling"):
+            self._clear_cool_eta()
             return empty
         found = self._current_control(settings)
         if found is None:
+            self._clear_cool_eta()
             return empty
         _, temp = found
         rate = slope_f_per_sec(self._predict_samples)
@@ -2769,6 +2842,7 @@ class Controller:
                 horizon=PREDICT_MAX_HORIZON_SECONDS,
                 slope_f_per_sec=slope,
             )
+            self._clear_cool_eta()
             return {
                 "seconds_to_target": _forecast_seconds(seconds),
                 "seconds_to_cooldown": None,
@@ -2803,24 +2877,88 @@ class Controller:
                     )
                 else:
                     seconds = seconds_along_coast(temp, aim, rate, tau)
+            self._clear_cool_eta()
             return {
                 "seconds_to_target": _forecast_seconds(seconds),
                 "seconds_to_cooldown": None,
             }
         if self._mode != "cooling" and not stepping_down:
+            self._clear_cool_eta()
             return empty
         floor = SAFE_TEMP_F if self._mode == "cooling" else aim
         return {
             "seconds_to_target": None,
             "seconds_to_cooldown": _forecast_seconds(
-                seconds_to_cooldown(
+                self._stable_cooldown_seconds(
                     temp,
                     rate,
-                    learned_rate_f_per_min=settings.learned_cooldown_f_per_min,
-                    floor_f=floor,
+                    settings.learned_cooldown_f_per_min,
+                    floor,
                 )
             ),
         }
+
+    def _clear_cool_eta(self) -> None:
+        self._cool_eta = None
+        self._cool_eta_clock = None
+        self._cool_floor = None
+        self._cool_trace.clear()
+
+    def _stable_cooldown_seconds(
+        self,
+        temp: float,
+        short_rate: float | None,
+        learned_rate_f_per_min: float | None,
+        floor: float,
+    ) -> float | None:
+        """Countdown to ``floor`` that does not follow each probe wiggle.
+
+        The first reading is the straight-line estimate. Later readings count
+        that time down. A settled slope from the last few minutes may ease it.
+        A short window that jumps up or down does not replace it.
+        """
+
+        if temp <= floor:
+            self._clear_cool_eta()
+            return 0.0
+        clock = self._predict_clock
+        if self._cool_eta_clock is not None and clock < self._cool_eta_clock - 0.001:
+            self._clear_cool_eta()
+        if self._cool_floor is not None and abs(floor - self._cool_floor) > 0.5:
+            self._clear_cool_eta()
+        if (
+            self._cool_eta is not None
+            and self._cool_eta_clock is not None
+            and abs(clock - self._cool_eta_clock) <= 1e-6
+        ):
+            return self._cool_eta
+
+        self._cool_trace.append((clock, temp))
+        horizon = clock - COOLDOWN_ETA_WINDOW_SECONDS
+        while len(self._cool_trace) >= 2 and self._cool_trace[1][0] <= horizon:
+            self._cool_trace.pop(0)
+
+        long_rate = fitted_slope_f_per_sec(self._cool_trace)
+        if long_rate is not None and long_rate <= -PREDICT_MIN_RATE_F_PER_SEC / 5:
+            fresh: float | None = min(
+                PREDICT_MAX_HORIZON_SECONDS,
+                max(0.0, (temp - floor) / -long_rate),
+            )
+        else:
+            fresh = seconds_to_cooldown(
+                temp,
+                short_rate,
+                learned_rate_f_per_min=learned_rate_f_per_min,
+                floor_f=floor,
+            )
+        dt = 0.0 if self._cool_eta_clock is None else max(0.0, clock - self._cool_eta_clock)
+        shown = smooth_cooldown_eta(self._cool_eta, fresh, dt)
+        if shown is None:
+            return None
+        self._cool_eta = shown
+        self._cool_eta_clock = clock
+        self._cool_floor = floor
+        return shown
 
     def _log_forecast(self, settings: Settings) -> None:
         forecast = self._forecast(settings)

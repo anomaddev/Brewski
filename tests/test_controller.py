@@ -709,9 +709,10 @@ def test_minimum_on_time_follows_the_setting(store):
 def test_a_long_tick_does_not_stack_hold_pulses(store):
     # Calibration 17 ran the target 4°F hot: the hold fired again before the
     # coast of the last pulse showed up, and a multi-second tick toggled the
-    # SSR once per simulated second. The pulse stays on while the heater-on
-    # curve is still short of the target, then opens once the probe reads it,
-    # and does not start another pulse while that coast is still arriving.
+    # SSR once per simulated second. A long tick still changes the heaters
+    # once. The pulse opens when the coast already stored reaches the target,
+    # before the probe reads it, and does not start another while that coast
+    # is still arriving.
     source = StaticSource([159.5, 140.0])
     controller = Controller(store, source)
     controller.start({"kind": "calibration", "charge_gallons": 5})
@@ -736,8 +737,8 @@ def test_a_long_tick_does_not_stack_hold_pulses(store):
     assert source.heaters[:2] == [True, True]
 
     controller.tick(1)
-    assert source.heaters[:2] == [True, True]
-    assert edges == [[True, True]]
+    assert source.heaters[:2] == [False, False]
+    assert edges == [[True, True], [False, False]]
 
     source.temps = [160.2, 140.0]
     controller.tick(1)

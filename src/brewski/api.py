@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from flask import Flask, abort, jsonify, request, send_from_directory
+from flask import Flask, Response, abort, jsonify, request, send_from_directory
 
 from brewski import __version__
 from brewski.controller import Controller, ControllerError
 from brewski.paths import web_dist_dir
+from brewski.updates import about_identity, installed_revision
 
 
 def create_app(controller: Controller) -> Flask:
@@ -27,7 +28,14 @@ def create_app(controller: Controller) -> Flask:
     @app.get("/api/status")
     def status():
         payload = controller.status()
+        label, value = about_identity(
+            str(payload.get("update_source") or "main"),
+            __version__,
+            installed_revision(),
+        )
         payload["version"] = __version__
+        payload["about_label"] = label
+        payload["about_value"] = value
         return jsonify(payload)
 
     @app.get("/api/settings")
@@ -44,11 +52,22 @@ def create_app(controller: Controller) -> Flask:
 
     @app.get("/api/update")
     def get_update():
-        return jsonify(controller.update_status())
+        fresh = request.args.get("fresh", "").lower() in {"1", "true", "yes"}
+        return jsonify(controller.update_status(fresh=fresh))
 
     @app.post("/api/update")
     def post_update():
         return jsonify(controller.start_update()), 202
+
+    @app.post("/api/reboot")
+    def post_reboot():
+        return jsonify(controller.reboot()), 202
+
+    @app.get("/api/timeline")
+    def timeline():
+        return jsonify(
+            controller.timeline(_timeline_ms("from"), _timeline_ms("to"), _timeline_max())
+        )
 
     @app.get("/api/runs")
     def runs():
@@ -56,7 +75,45 @@ def create_app(controller: Controller) -> Flask:
 
     @app.get("/api/runs/<int:run_id>")
     def run(run_id: int):
-        return jsonify(controller.run(run_id))
+        include_logs = request.args.get("logs", "1").lower() not in {"0", "false", "no"}
+        include_samples = request.args.get("samples", "1").lower() not in {"0", "false", "no"}
+        return jsonify(
+            controller.run(run_id, include_logs=include_logs, include_samples=include_samples)
+        )
+
+    @app.get("/api/runs/<int:run_id>/chart")
+    def run_chart(run_id: int):
+        return jsonify(controller.chart_samples(run_id, _logs_after()))
+
+    @app.get("/api/runs/<int:run_id>/review")
+    def run_review(run_id: int):
+        return jsonify(controller.review_window(run_id, **_review_query()))
+
+    @app.get("/api/runs/<int:run_id>/logs")
+    def run_logs(run_id: int):
+        return jsonify(controller.run_logs(run_id, _logs_after()))
+
+    @app.get("/api/runs/<int:run_id>/log.csv")
+    def run_log_csv(run_id: int):
+        text, filename = controller.control_log_export(run_id)
+        return Response(
+            text,
+            mimetype="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @app.get("/api/runs/<int:run_id>/export.zip")
+    def run_export(run_id: int):
+        payload, filename = controller.run_export(run_id)
+        return Response(
+            payload,
+            mimetype="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @app.post("/api/calibration/clean")
+    def clean_calibration():
+        return jsonify(controller.clear_calibration())
 
     @app.post("/api/runs/start")
     def start_run():
@@ -73,6 +130,10 @@ def create_app(controller: Controller) -> Flask:
     @app.post("/api/runs/stop")
     def stop_run():
         return jsonify(controller.stop())
+
+    @app.post("/api/tests/end")
+    def end_test():
+        return jsonify(controller.end_test())
 
     @app.post("/api/heaters/<int:slot>/replace")
     def replace_heater(slot: int):
@@ -98,6 +159,84 @@ def create_app(controller: Controller) -> Flask:
         return send_from_directory(dist, "index.html")
 
     return app
+
+
+def _timeline_ms(name: str) -> int:
+    raw = request.args.get(name)
+    if raw is None or raw == "":
+        raise ControllerError(f"Missing {name}", 400)
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ControllerError(f"{name} must be a timestamp in milliseconds", 400) from exc
+
+
+def _timeline_max() -> int:
+    raw = request.args.get("max")
+    if raw is None or raw == "":
+        return 1600
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ControllerError("max must be an integer", 400) from exc
+
+
+def _review_query() -> dict:
+    raw_limit = request.args.get("limit", "25")
+    try:
+        limit = int(raw_limit)
+    except ValueError as exc:
+        raise ControllerError("Page size must be 10, 25, 50, or 100", 400) from exc
+    start = _optional_elapsed("from")
+    end = _optional_elapsed("to")
+    events_raw = request.args.get("events", "")
+    events = [part.strip() for part in events_raw.split(",") if part.strip()] if events_raw else []
+    phase = request.args.get("phase", "").strip() or None
+    return {
+        "limit": limit,
+        "log_offset": _query_int("log_offset"),
+        "sample_offset": _query_int("sample_offset"),
+        "from_elapsed": start,
+        "to_elapsed": end,
+        "clock": request.args.get("clock", "run") or "run",
+        "events": events,
+        "phase": phase,
+        "tail": request.args.get("tail", "").lower() in {"1", "true", "yes"},
+    }
+
+
+def _optional_elapsed(name: str) -> float | None:
+    raw = request.args.get(name)
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ControllerError(f"{name} must be seconds", 400) from exc
+
+
+def _query_int(name: str, default: int = 0) -> int:
+    raw = request.args.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ControllerError(f"{name} must be an integer", 400) from exc
+    if value < 0:
+        raise ControllerError(f"{name} must be an integer", 400)
+    return value
+
+
+def _logs_after() -> int:
+    raw = request.args.get("after", "0")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ControllerError("after must be a log id", 400) from exc
+    if value < 0:
+        raise ControllerError("after must be a log id", 400)
+    return value
 
 
 def _json_object() -> dict:

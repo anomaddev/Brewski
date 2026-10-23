@@ -1,6 +1,7 @@
 import { api } from './api.js'
+import { numberStepper } from './controls.js'
 import { aboveBoiling, escapeHtml } from './format.js'
-import { busFields, panelFields, readGpio, syncI2cLabels, validatePins } from './gpio.js'
+import { busFields, markPinClashes, panelFields, pinSelect, readGpio, syncI2cLabels, validatePins } from './gpio.js'
 import { openPath } from './router.js'
 
 const STEPS = ['intro', 'heaters', 'probes', 'panel', 'bus', 'target']
@@ -55,13 +56,13 @@ function openSetup(host, settings) {
             ${busFields(settings.gpio)}
           </section>
           <section class="setup-panel" data-step="target">
-            <p class="setup-lead">Calibration heats water to this temperature and measures how far it keeps climbing after the element turns off. That climb becomes the early cutoff.</p>
+            <p class="setup-lead">This is the setpoint for a later run. Calibration learns the soak, the straight heating rate, and the coast while the pot is still under 140°F, then pulses to 160°F and holds it for ten minutes.</p>
             <label class="field">Temperature (°F)
-              <input name="target_temp_f" id="setup-target" type="number" min="90" max="240" step="1" inputmode="numeric" required value="${Math.round(Number(settings.target_temp_f))}" />
+              ${numberStepper(`<input name="target_temp_f" id="setup-target" type="number" min="90" max="240" step="1" inputmode="numeric" required value="${Math.round(Number(settings.target_temp_f))}" />`)}
             </label>
             <p class="boil-warning" id="setup-boil" hidden>Above water's boiling point (212°F).</p>
             <label class="field">Still size (gal)
-              <input name="charge_gallons" id="setup-charge" type="number" min="0.25" max="100" step="0.25" inputmode="decimal" required value="${settings.charge_gallons == null ? '' : settings.charge_gallons}" />
+              ${numberStepper(`<input name="charge_gallons" id="setup-charge" type="number" min="0.25" max="100" step="0.25" inputmode="decimal" required value="${settings.charge_gallons == null ? '' : settings.charge_gallons}" />`)}
             </label>
             <p class="help">Gallons the pot holds. Calibration uses this size. A later calibration scales the learned coast when the size changes. Start stays off until the calibration is saved.</p>
           </section>
@@ -92,8 +93,10 @@ function openSetup(host, settings) {
   }
   syncDevices()
   syncI2cLabels(form)
+  markPinClashes(form)
 
   form.addEventListener('change', (event) => {
+    if (event.target.closest('.gpio-field')) markPinClashes(form)
     if ((event.target.name || '').startsWith('i2c_') && event.target.type === 'checkbox') syncI2cLabels(form)
     const rtd = (event.target.name || '').match(/^sensor_rtd_(\d+)$/)
     if (rtd) applyStockReference(form, Number(rtd[1]))
@@ -218,9 +221,11 @@ function openSetup(host, settings) {
       apply.disabled = true
       host.querySelector('#update-skip').disabled = true
       errorEl.hidden = true
+      window.dispatchEvent(new CustomEvent('brewski-updating'))
       try {
         await api.applyUpdate()
       } catch (error) {
+        window.dispatchEvent(new CustomEvent('brewski-update-cancel'))
         errorEl.hidden = false
         errorEl.textContent = error.message
         apply.disabled = false
@@ -232,9 +237,11 @@ function openSetup(host, settings) {
   }
 
   async function watchUpdate(latest, phaseEl, errorEl) {
+    let seen = ''
     while (!left) {
       try {
         const [update, status] = await Promise.all([api.updateStatus(), api.status()])
+        seen = update.phase
         phaseEl.textContent = phaseText(update.phase)
         if (update.phase === 'failed') {
           errorEl.hidden = false
@@ -250,7 +257,7 @@ function openSetup(host, settings) {
           return
         }
       } catch {
-        phaseEl.textContent = 'Reconnecting'
+        phaseEl.textContent = seen === 'complete' ? 'Waiting for restart' : 'Reconnecting'
       }
       await delay(1000)
     }
@@ -282,9 +289,9 @@ function sameVersion(running, latest) {
 
 function phaseText(phase) {
   if (phase === 'downloading') return 'Downloading'
-  if (phase === 'building') return 'Building the dashboard'
+  if (phase === 'building') return 'Building Brewski'
   if (phase === 'installing') return 'Installing'
-  if (phase === 'complete') return 'Starting'
+  if (phase === 'complete') return 'Waiting for restart'
   if (phase === 'failed') return 'Update failed'
   return 'Starting the update'
 }
@@ -322,7 +329,7 @@ function deviceFields(kind, label, channels) {
               <input name="${kind}_name_${index}" maxlength="${kind === 'sensor' ? 11 : 40}" required value="${escapeHtml(channel.name)}" />
             </label>
             <label class="field gpio-field">${kind === 'sensor' ? 'Chip select' : 'BCM GPIO'}
-              <input name="${kind}_gpio_${index}" type="number" min="2" max="27" step="1" inputmode="numeric" required value="${channel.gpio ?? ''}" />
+              ${pinSelect(`${kind}_gpio_${index}`, channel.gpio)}
             </label>
           </div>
           ${kind === 'sensor' ? probeConfig(index, channel) : ''}
@@ -350,7 +357,7 @@ function probeConfig(index, channel) {
         <select name="sensor_wires_${index}">${wireOptions}</select>
       </label>
       <label class="field ref-field">Reference (Ω)
-        <input name="sensor_ref_${index}" type="number" min="100" max="10000" step="0.01" inputmode="decimal" required value="${ref}" />
+        ${numberStepper(`<input name="sensor_ref_${index}" type="number" min="100" max="10000" step="0.01" inputmode="decimal" required value="${ref}" />`)}
       </label>
     </div>`
 }

@@ -188,8 +188,9 @@ def test_installed_service_uses_the_pi_source(monkeypatch, tmp_path):
     class FakePi:
         name = "pi"
 
-        def __init__(self, store):
+        def __init__(self, store, status=None):
             self.store = store
+            self.status = status
 
         def read_temperatures(self, count):
             return [70.0, 62.0][:count]
@@ -207,6 +208,7 @@ def test_installed_service_uses_the_pi_source(monkeypatch, tmp_path):
     controller, _app = _build_runtime(False)
     assert isinstance(controller.source, FakePi)
     assert controller.source.name == "pi"
+    assert callable(controller.source.status)
     controller.shutdown()
 
 
@@ -221,10 +223,10 @@ def test_stop_hold_opens_the_software_menu_without_changing_the_target(controlle
     controller._panel = _Panel((0, 0, 1, 1))
     assert controller._apply_panel() is True
     assert controller._display.lines == [
-        "Software Menu",
-        "> About",
-        "  Check for Update",
-        "  Reboot",
+        "Software Menu      v",
+        "> Program",
+        "  About",
+        "  Networking",
     ]
     assert store.get_settings().target_temp_f == 165
     assert controller.status()["target_temp_f"] == 165
@@ -235,27 +237,45 @@ def test_stop_hold_opens_the_software_menu_without_changing_the_target(controlle
     assert store.get_settings().target_temp_f == 165
     assert controller.status()["target_temp_f"] == 165
 
-    controller._panel = _Panel((0, 0, 0, -2))
+    controller._panel = _Panel((0, 0, 0, -5))
     controller._apply_panel()
-    assert controller._display.lines[1] == "> About"
+    assert controller._display.lines[1] == "> Program"
 
+    controller._panel = _Panel((0, 0, 0, 1))
+    controller._apply_panel()
+    assert controller._display.lines[2] == "> About"
     controller._panel = _Panel((1, 0, 0, 0))
     controller._apply_panel()
-    assert controller._display.lines == ["About", "Brewski", __version__, "STOP back"]
+    assert controller._display.lines == ["About", "Brewski", f"Release {__version__}", "STOP back"]
 
     controller._panel = _Panel((0, 1, 0, 0))
     controller._apply_panel()
-    assert controller._display.lines[0] == "Software Menu"
+    assert controller._display.lines[0].startswith("Software Menu")
 
     controller._panel = _Panel((0, 1, 0, 0))
     controller._apply_panel()
     assert controller._menu is None
-    assert controller._display.lines[0] == "Idle:"
+    assert controller._display.lines[0] == "Hold:"
 
     controller._panel = _Panel((0, 0, 1, 0))
     controller._apply_panel()
     assert controller._menu is not None
-    assert controller._display.lines[0] == "Software Menu"
+    assert controller._display.lines[0].startswith("Software Menu")
+
+
+def test_about_shows_the_commit_when_beta_is_installed(controller, store, monkeypatch):
+    store.save_settings(merge_settings(store.get_settings(), {"update_source": "beta"}))
+    monkeypatch.setattr(
+        "brewski.controller.installed_revision",
+        lambda: "abc1234" + "d" * 33,
+    )
+    controller._panel = _Panel((0, 0, 1, 0))
+    controller._apply_panel()
+    controller._panel = _Panel((0, 0, 0, 1))
+    controller._apply_panel()
+    controller._panel = _Panel((1, 0, 0, 0))
+    controller._apply_panel()
+    assert controller._display.lines == ["About", "Brewski", "Commit abc1234", "STOP back"]
 
 
 def test_stop_hold_during_a_run_does_not_stop_or_open_the_menu(controller):
@@ -275,7 +295,7 @@ def test_stop_hold_during_an_emergency_opens_the_software_menu(controller):
     controller._emergency = ["E01"]
     controller._panel = _Panel((0, 0, 1, 0))
     assert controller._apply_panel() is True
-    assert controller._display.lines[0] == "Software Menu"
+    assert controller._display.lines[0].startswith("Software Menu")
 
     controller._panel = _Panel((0, 1, 0, 0))
     controller._apply_panel()
@@ -290,14 +310,14 @@ def test_an_emergency_does_not_close_an_open_software_menu(controller):
     controller._panel = _Panel((0, 0, 0, 0))
     controller._apply_panel()
     assert controller._menu is not None
-    assert controller._display.lines[0] == "Software Menu"
+    assert controller._display.lines[0].startswith("Software Menu")
 
 
 def test_cooling_hold_opens_the_software_menu(controller):
     controller._mode = "cooling"
     controller._panel = _Panel((0, 0, 1, 0))
     assert controller._apply_panel() is True
-    assert controller._display.lines[0] == "Software Menu"
+    assert controller._display.lines[0].startswith("Software Menu")
 
 
 def test_software_menu_closes_when_a_run_starts(controller):
@@ -313,7 +333,7 @@ def test_software_menu_closes_when_a_run_starts(controller):
 def _open_update_item(controller):
     controller._panel = _Panel((0, 0, 1, 0))
     controller._apply_panel()
-    controller._panel = _Panel((0, 0, 0, 1))
+    controller._panel = _Panel((0, 0, 0, 4))
     controller._apply_panel()
     controller._panel = _Panel((1, 0, 0, 0))
     controller._apply_panel()
@@ -321,7 +341,7 @@ def _open_update_item(controller):
 
 def test_menu_check_shows_an_update_and_start_installs_it(controller, monkeypatch):
     info = ReleaseInfo(current="0.6.5", latest="0.6.6", available=True, reachable=True)
-    monkeypatch.setattr("brewski.controller.check_release", lambda: info)
+    monkeypatch.setattr("brewski.controller.check_release", lambda **_kwargs: info)
     monkeypatch.setattr("brewski.controller.apply_supported", lambda: True)
     started = []
     monkeypatch.setattr(controller, "start_update", lambda: started.append(True) or {})
@@ -338,7 +358,7 @@ def test_menu_check_shows_an_update_and_start_installs_it(controller, monkeypatc
 
 def test_menu_check_on_a_mac_does_not_offer_install(controller, monkeypatch):
     info = ReleaseInfo(current="0.6.5", latest="0.6.6", available=True, reachable=True)
-    monkeypatch.setattr("brewski.controller.check_release", lambda: info)
+    monkeypatch.setattr("brewski.controller.check_release", lambda **_kwargs: info)
     monkeypatch.setattr("brewski.controller.apply_supported", lambda: False)
     _open_update_item(controller)
     controller._menu_check_thread.join(2)
@@ -356,7 +376,7 @@ def test_menu_check_cancel_drops_a_late_result(controller, monkeypatch):
     gate = threading.Event()
     info = ReleaseInfo(current="0.6.5", latest=None, available=False, reachable=False)
 
-    def blocked():
+    def blocked(**_kwargs):
         started.set()
         assert gate.wait(2)
         return info
@@ -370,7 +390,26 @@ def test_menu_check_cancel_drops_a_late_result(controller, monkeypatch):
     controller._apply_panel()
     gate.set()
     controller._menu_check_thread.join(2)
-    assert controller._display.lines[0] == "Software Menu"
+    assert controller._display.lines[0].startswith("Software Menu")
+
+
+def test_networking_screen_shows_how_to_open_the_dashboard(controller, monkeypatch):
+    monkeypatch.setattr(
+        "brewski.controller.display_identity",
+        lambda: ("192.168.1.42:8080", "stillpi"),
+    )
+    controller._panel = _Panel((0, 0, 1, 0))
+    controller._apply_panel()
+    controller._panel = _Panel((0, 0, 0, 2))
+    controller._apply_panel()
+    controller._panel = _Panel((1, 0, 0, 0))
+    controller._apply_panel()
+    assert controller._display.lines == [
+        "Networking",
+        "192.168.1.42:8080",
+        "Host:        stillpi",
+        "STOP back",
+    ]
 
 
 def test_menu_reboot_confirms_then_reports_a_refusal(controller, monkeypatch):
@@ -380,7 +419,7 @@ def test_menu_reboot_confirms_then_reports_a_refusal(controller, monkeypatch):
     monkeypatch.setattr("brewski.controller.request_reboot", refuse)
     controller._panel = _Panel((0, 0, 1, 0))
     controller._apply_panel()
-    controller._panel = _Panel((0, 0, 0, -1))
+    controller._panel = _Panel((0, 0, 0, 5))
     controller._apply_panel()
     assert controller._display.lines[3] == "> Reboot"
     controller._panel = _Panel((1, 0, 0, 0))
@@ -392,4 +431,4 @@ def test_menu_reboot_confirms_then_reports_a_refusal(controller, monkeypatch):
     assert controller._display.lines[1] == "No permission"
     controller._panel = _Panel((0, 1, 0, 0))
     controller._apply_panel()
-    assert controller._display.lines[0] == "Software Menu"
+    assert controller._display.lines[0].startswith("Software Menu")

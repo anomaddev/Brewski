@@ -1,3 +1,8 @@
+import io
+import logging
+import time
+import zipfile
+
 import pytest
 
 from brewski import __version__
@@ -13,6 +18,9 @@ def test_status_starts_idle(client):
     assert status["mode"] == "idle"
     assert status["source"] == "dummy"
     assert status["version"] == __version__
+    assert status["update_source"] == "main"
+    assert status["about_label"] == "Release"
+    assert status["about_value"] == __version__
     assert status["heater_count"] == 2
     assert status["sensor_count"] == 1
     assert status["heaters_on"] == [False, False]
@@ -21,6 +29,116 @@ def test_status_starts_idle(client):
     assert status["settings_locked"] is False
     assert status["temps_f"][0] == 70
     assert status["cabinet_enabled"] is True
+    assert status["now_ms"] == pytest.approx(time.time() * 1000, abs=5000)
+
+
+def test_status_names_the_installed_commit_when_beta_is_selected(client, controller, monkeypatch):
+    sha = "abc1234" + "d" * 33
+    monkeypatch.setattr("brewski.api.installed_revision", lambda: sha)
+    controller.update_settings({"update_source": "beta"})
+    status = client.get("/api/status").get_json()
+    assert status["update_source"] == "beta"
+    assert status["about_label"] == "Commit"
+    assert status["about_value"] == "abc1234"
+    assert status["version"] == __version__
+
+
+def test_a_run_log_can_be_read_in_pages_and_exported(client, controller):
+    logging.getLogger("brewski.controller").warning("before the run")
+    run_id = client.post("/api/runs/start").get_json()["run_id"]
+    logging.getLogger("brewski.controller").warning("probe glitch")
+    logging.getLogger("other").warning("not brewski")
+    controller.tick(1)
+    controller.tick(1)
+    slim = client.get(f"/api/runs/{run_id}?logs=0")
+    assert slim.status_code == 200
+    assert "logs" not in slim.get_json()
+
+    page = client.get(f"/api/runs/{run_id}/logs").get_json()["logs"]
+    assert [item["elapsed_seconds"] for item in page if item["event"] == "sample"] == [0, 1, 2]
+    after = page[0]["id"]
+    newer = client.get(f"/api/runs/{run_id}/logs?after={after}").get_json()["logs"]
+    assert newer[0]["id"] == page[1]["id"]
+    assert client.get(f"/api/runs/{run_id}/logs?after=nope").status_code == 400
+
+    exported = client.get(f"/api/runs/{run_id}/log.csv")
+    assert exported.status_code == 200
+    assert exported.mimetype == "text/csv"
+    assert exported.headers["Content-Disposition"] == f'attachment; filename="brewski-run-{run_id}-log.csv"'
+    assert "temp_f" in exported.data.decode("utf-8")
+    assert client.get("/api/runs/999/log.csv").status_code == 404
+
+    client.post("/api/runs/stop")
+    logging.getLogger("brewski.controller").warning("after the run")
+    bundle = client.get(f"/api/runs/{run_id}/export.zip")
+    assert bundle.status_code == 200
+    assert bundle.mimetype == "application/zip"
+    assert bundle.headers["Content-Disposition"] == f'attachment; filename="brewski-run-{run_id}.zip"'
+    with zipfile.ZipFile(io.BytesIO(bundle.data)) as archive:
+        assert archive.namelist() == [
+            f"brewski-run-{run_id}-log.csv",
+            f"brewski-run-{run_id}-console.log",
+        ]
+        csv_text = archive.read(f"brewski-run-{run_id}-log.csv").decode("utf-8-sig")
+        console = archive.read(f"brewski-run-{run_id}-console.log").decode("utf-8")
+    assert "temp_f" in csv_text
+    assert "probe glitch" in console
+    assert "Run started" in console
+    assert "before the run" not in console
+    assert "after the run" not in console
+    assert "not brewski" not in console
+    assert client.get("/api/runs/999/export.zip").status_code == 404
+
+
+def test_a_run_review_pages_both_logs_and_leaves_the_chart_incremental(client, controller):
+    run_id = client.post("/api/runs/start").get_json()["run_id"]
+    controller.tick(1)
+    controller.tick(1)
+    slim = client.get(f"/api/runs/{run_id}?logs=0&samples=0").get_json()
+    assert "logs" not in slim
+    assert "samples" not in slim
+    assert "heater_on_seconds" in slim
+
+    chart = client.get(f"/api/runs/{run_id}/chart").get_json()["samples"]
+    assert chart
+    assert "heaters_on" not in chart[0]
+    assert client.get(f"/api/runs/{run_id}/chart?after={chart[-1]['id']}").get_json()["samples"] == []
+
+    page = client.get(f"/api/runs/{run_id}/review?limit=10").get_json()
+    assert page["limit"] == 10
+    assert page["mode"] == "page"
+    assert page["logs"]["rows"]
+    assert page["window"]["from"] is not None
+    assert client.get(f"/api/runs/{run_id}/review?limit=15").status_code == 400
+    assert client.get(f"/api/runs/{run_id}/review?from=5&to=1").status_code == 400
+    assert client.get(f"/api/runs/{run_id}/review?events=nope").status_code == 400
+    assert client.get(f"/api/runs/{run_id}/review?phase=nope").status_code == 400
+    assert client.get("/api/runs/999/review").status_code == 404
+    assert client.get("/api/runs/999/chart").status_code == 404
+
+    custom = client.get(f"/api/runs/{run_id}/review?from=0&to=1&clock=run").get_json()
+    assert custom["mode"] == "custom"
+    assert custom["window"]["from"] == 0
+    assert custom["window"]["to"] == 1
+    assert all(0 <= row["elapsed_seconds"] <= 1 for row in custom["logs"]["rows"])
+
+
+def test_console_output_stays_on_a_run_after_it_closes_and_while_it_cools(controller):
+    run_id = controller.start()["run_id"]
+    controller.source.temps = [140.0, 110.0]
+    assert controller.stop()["mode"] == "cooling"
+    logging.getLogger("brewski.controller").warning("still cooling")
+    logging.getLogger("brewski.analysis").info(
+        "late note",
+        extra={"brewski_run_id": run_id, "brewski_elapsed": 4},
+    )
+    payload, filename = controller.run_export(run_id)
+    assert filename == f"brewski-run-{run_id}.zip"
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        console = archive.read(f"brewski-run-{run_id}-console.log").decode("utf-8")
+    assert "still cooling" in console
+    assert "4.00s " in console
+    assert "late note" in console
 
 
 def test_run_start_pause_resume_stop(client, controller):
@@ -155,7 +273,7 @@ def test_reset_clears_runs_and_restores_defaults(client, controller):
     assert reset.get_json()["target_temp_f"] == 165
     assert reset.get_json()["heater_min_on_seconds"] == 1.0
     assert reset.get_json()["heater_min_off_seconds"] == 1.0
-    assert reset.get_json()["early_cutoff_f"] == 3.0
+    assert "early_cutoff_f" not in reset.get_json()
     assert reset.get_json()["update_source"] == "main"
     assert reset.get_json()["heater_names"] == ["Heater 1", "Heater 2"]
     assert reset.get_json()["sensor_names"] == ["Boiler", "Column"]
@@ -244,8 +362,7 @@ def test_invalid_settings_and_transitions(client):
     assert client.put("/api/settings", json={"target_temp_f": 10}).status_code == 400
     assert client.put("/api/settings", json={"heater_min_on_seconds": 0.4}).status_code == 400
     assert client.put("/api/settings", json={"heater_min_off_seconds": 0.4}).status_code == 400
-    assert client.put("/api/settings", json={"early_cutoff_f": 21}).status_code == 400
-    assert client.put("/api/settings", json={"early_cutoff_f": 2.5}).get_json()["early_cutoff_f"] == 2.5
+    assert client.put("/api/settings", json={"early_cutoff_f": 2.5}).status_code == 400
     saved = client.put("/api/settings", json={"heater_min_on_seconds": 0.5})
     assert saved.status_code == 200
     assert saved.get_json()["heater_min_on_seconds"] == 0.5
@@ -337,3 +454,48 @@ def test_apply_is_refused_when_nothing_is_newer(client, monkeypatch):
     )
     refused = client.post("/api/update")
     assert refused.status_code == 409
+
+
+def test_apply_is_refused_while_a_run_is_open(client, monkeypatch):
+    monkeypatch.setattr("brewski.updates.apply_supported", lambda: True)
+    monkeypatch.setattr(
+        "brewski.updates.check_release",
+        lambda **_kwargs: ReleaseInfo(
+            current="0.2.0",
+            latest="v0.3.0",
+            available=True,
+            reachable=True,
+        ),
+    )
+    assert client.post("/api/runs/start", json={}).status_code == 200
+    refused = client.post("/api/update")
+    assert refused.status_code == 409
+    assert "Stop the run" in refused.get_json()["error"]
+
+
+def test_reboot_asks_the_pi_to_restart(client, monkeypatch):
+    called = []
+    monkeypatch.setattr("brewski.controller.request_reboot", lambda: called.append(True))
+    response = client.post("/api/reboot")
+    assert response.status_code == 202
+    assert response.get_json()["rebooting"] is True
+    assert called == [True]
+
+
+def test_reboot_is_refused_while_a_run_is_open(client, monkeypatch):
+    called = []
+    monkeypatch.setattr("brewski.controller.request_reboot", lambda: called.append(True))
+    assert client.post("/api/runs/start", json={}).status_code == 200
+    refused = client.post("/api/reboot")
+    assert refused.status_code == 409
+    assert called == []
+
+
+def test_reboot_reports_when_the_machine_cannot(client, monkeypatch):
+    def refuse():
+        raise OSError("nope")
+
+    monkeypatch.setattr("brewski.controller.request_reboot", refuse)
+    response = client.post("/api/reboot")
+    assert response.status_code == 500
+    assert "reboot" in response.get_json()["error"].lower()

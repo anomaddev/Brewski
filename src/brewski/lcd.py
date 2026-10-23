@@ -61,7 +61,7 @@ class Display(Protocol):
 
     def clear(self) -> None: ...
 
-    def close(self) -> None: ...
+    def close(self, *, clear: bool = True) -> None: ...
 
 
 class NullDisplay:
@@ -84,8 +84,9 @@ class NullDisplay:
         self.lines = [""] * ROWS
         self.cleared = True
 
-    def close(self) -> None:
+    def close(self, *, clear: bool = True) -> None:
         self.closed = True
+        self.closed_clear = clear
 
 
 class HardwareDisplay:
@@ -93,6 +94,7 @@ class HardwareDisplay:
         self._lcd = lcd
         self._last: list[str] | None = None
         self._closed = False
+        self._hide_cursor()
 
     @property
     def hardware(self) -> bool:
@@ -110,9 +112,54 @@ class HardwareDisplay:
         for row, line in enumerate(framed):
             if previous is not None and previous[row] == line:
                 continue
-            self._lcd.cursor_pos = (row, 0)  # type: ignore[attr-defined]
-            self._lcd.write_string(f"{line:<{COLUMNS}}")  # type: ignore[attr-defined]
+            self._paint_row(row, line)
         self._last = framed
+
+    def _paint_row(self, row: int, line: str) -> None:
+        """Paint one row and leave the cursor on its last cell.
+
+        The rows of a 20×4 module are not stored in order. Column 20 of the
+        first row is the first cell of the third row, and column 20 of the
+        second row is the first cell of the fourth. RPLCD steps the cursor
+        onto that cell after the twentieth character, so the next reading is
+        drawn on the wrong line.
+        """
+
+        padded = f"{line:<{COLUMNS}}"
+        try:
+            self._lcd.cursor_pos = (row, 0)  # type: ignore[attr-defined]
+        except ValueError:
+            return
+        try:
+            self._lcd.write_string(padded[:-1])  # type: ignore[attr-defined]
+        except ValueError:
+            pass
+        self._write_last_cell(row, padded[-1])
+
+    def _write_last_cell(self, row: int, char: str) -> None:
+        col = COLUMNS - 1
+        try:
+            self._lcd.cursor_pos = (row, col)  # type: ignore[attr-defined]
+        except ValueError:
+            return
+        try:
+            self._lcd.write_string(char)  # type: ignore[attr-defined]
+        except ValueError:
+            pass
+        # The character above steps the cursor to column 20. Put it back on
+        # this cell so the address counter stays on this row.
+        try:
+            self._lcd.cursor_pos = (row, col)  # type: ignore[attr-defined]
+        except ValueError:
+            pass
+
+    def _hide_cursor(self) -> None:
+        if not hasattr(self._lcd, "cursor_mode"):
+            return
+        try:
+            self._lcd.cursor_mode = "hide"  # type: ignore[attr-defined]
+        except Exception:
+            logger.exception("Could not hide the LCD cursor")
 
     def clear(self) -> None:
         if self._closed:
@@ -120,12 +167,12 @@ class HardwareDisplay:
         self._lcd.clear()  # type: ignore[attr-defined]
         self._last = [""] * ROWS
 
-    def close(self) -> None:
+    def close(self, *, clear: bool = True) -> None:
         if self._closed:
             return
         self._closed = True
         try:
-            self._lcd.close(clear=True)  # type: ignore[attr-defined]
+            self._lcd.close(clear=clear)  # type: ignore[attr-defined]
         except TypeError:
             self._lcd.close()  # type: ignore[attr-defined]
         except Exception:
@@ -479,6 +526,10 @@ def status_lines(
     calibration_rise_f: float | None = None,
     calibration_peak_f: float | None = None,
     calibration_rate_f: float | None = None,
+    eta_seconds: float | None = None,
+    eta_kind: str | None = None,
+    program_mode: str | None = None,
+    hold_remaining_seconds: float | None = None,
 ) -> list[str]:
     """Four 20-column lines. Labels sit on the left and values on the right."""
 
@@ -524,18 +575,46 @@ def status_lines(
     elif mode in {"running", "paused", "cooling"}:
         label = _mode_label(mode, calibrating)
         head = _pair(label, clock)
+    elif mode == "idle" and program_mode == "hold":
+        head = "Hold:"
     else:
         head = "Idle:"
+    if (
+        hold_remaining_seconds is not None
+        and eta_kind != "cool"
+        and not calibrating
+        and mode in {"running", "paused"}
+    ):
+        target_line = _pair(_whole_temp(target_f), _eta_label(hold_remaining_seconds, "hold"))
+    elif eta_seconds is None:
+        target_line = _value_line("Target:", _whole_temp(target_f))
+    else:
+        target_line = _pair(_whole_temp(target_f), _eta_label(eta_seconds, eta_kind))
     return [
         head,
-        _value_line("Target:", _whole_temp(target_f)),
+        target_line,
         probe_row,
         heater_row,
     ]
 
 
 def _calibration_step_name(step: str | None) -> str:
-    return {"coasting": "Coasting", "falling": "Falling"}.get(step or "", "Heating")
+    return {
+        "settle": "Settle",
+        "initial": "Initial heating",
+        "cold_start": "Initial heating",
+        "linear": "Linear heating",
+        "heating": "Heating",
+        "coast": "Coasting",
+        "coasting": "Coast",
+        "adjust": "Adjusted",
+        "momentum": "Adjusted",
+        "falling": "Momentum",
+        "approach": "Pulse",
+        "pulse": "Pulse",
+        "pulses": "Pulse",
+        "hold": "Holding",
+    }.get(step or "", "Heating")
 
 
 def _calibration_head(
@@ -546,15 +625,30 @@ def _calibration_head(
     peak_f: float | None,
     rate_f: float | None,
 ) -> list[str]:
-    if step == "coasting":
-        return [_pair("Coasting:", clock), _pair("Rise:", _signed_degrees(rise_f))]
-    if step == "falling":
+    name = _calibration_step_name(step)
+    if step in {"coast", "coasting"}:
+        return [_pair("Coast:", clock), _pair("Rise:", _signed_degrees(rise_f))]
+    if step in {"momentum", "falling"}:
         if rate_f is None:
             detail = _pair("Peak:", _signed_degrees(peak_f))
         else:
             detail = _pair("Rate:", _degrees_per_min(rate_f))
-        return [_pair("Falling:", clock), detail]
-    return [_pair("Heating:", clock), _value_line("Target:", _whole_temp(target_f))]
+        return [_pair("Momentum:", clock), detail]
+    if step in {"initial", "cold_start"}:
+        return [_pair("Initial:", clock), _value_line("Target:", _whole_temp(target_f))]
+    label = {
+        "settle": "Settle:",
+        "linear": "Linear:",
+        "heating": "Heating:",
+        "adjust": "Adjust:",
+        "approach": "Pulse:",
+        "pulse": "Pulse:",
+        "pulses": "Pulse:",
+        "hold": "Holding:",
+    }.get(step or "", "Heating:")
+    if name and step in {"settle", "linear", "approach", "pulses", "hold", "heating", None}:
+        return [_pair(label, clock), _value_line("Target:", _whole_temp(target_f))]
+    return [_pair(label, clock), _value_line("Target:", _whole_temp(target_f))]
 
 
 def _signed_degrees(value: float | None) -> str:
@@ -565,6 +659,53 @@ def _signed_degrees(value: float | None) -> str:
 
 def _degrees_per_min(value: float) -> str:
     return f"{float(value):.1f} F/min"
+
+
+def suite_run_lines(
+    phase: str,
+    elapsed_seconds: float,
+    probes: list[tuple[str, float | None]],
+    heaters: list[tuple[bool, bool]],
+) -> list[str]:
+    """The phase clock, what the heaters are doing, the probe, and the heaters."""
+
+    if phase == "coast":
+        label, state = "Heat off:", "Off for 3:00"
+    elif phase == "heating":
+        label, state = "Heat on:", "On for 3:00"
+    else:
+        label, state = "Settle:", "Heaters off"
+    return frame(
+        [
+            _pair(label, format_clock(elapsed_seconds)),
+            state,
+            _probe_line(probes),
+            _heater_line(heaters),
+        ]
+    )
+
+
+def suite_result_lines(result: dict) -> list[str]:
+    """Hold the Initial Heating recording until Stop. The curve is the result."""
+
+    rows = ["Stopped early" if result.get("stopped") else "Recording saved"]
+    on_seconds = result.get("on_seconds")
+    off_seconds = result.get("off_seconds")
+    if on_seconds is not None:
+        rows.append(_pair("On:", _minute_clock(float(on_seconds))))
+    if off_seconds is not None:
+        rows.append(_pair("Off:", _minute_clock(float(off_seconds))))
+    rows = rows[:3]
+    while len(rows) < 3:
+        rows.append("")
+    rows.append("STOP end")
+    return frame(rows)
+
+
+def _minute_clock(seconds: float) -> str:
+    total = max(0, int(round(float(seconds))))
+    minutes, secs = divmod(total, 60)
+    return f"{minutes}:{secs:02d}"
 
 
 def _mode_label(mode: str, calibrating: bool) -> str:
@@ -630,6 +771,30 @@ def _heater_token(index: int, enabled: bool, on: bool) -> str:
 
 def _whole_temp(value: float) -> str:
     return f"{int(round(float(value)))} F"
+
+
+def _eta_label(seconds: float, kind: str | None) -> str:
+    """Short clock for a 20-column line. ``cool 8m`` is a fall; ``~12m`` is a rise."""
+
+    total = max(0, int(round(float(seconds))))
+    if total >= 3600:
+        hours, minutes = divmod(total // 60, 60)
+        clock = f"{hours}h" if minutes == 0 else f"{hours}h{minutes}m"
+    elif total >= 60:
+        clock = f"{total // 60}m"
+    else:
+        clock = f"{total}s"
+    if kind == "cool":
+        return f"cool {clock}"
+    if kind == "hold":
+        return f"hold {clock}"
+    return f"~{clock}"
+
+
+def startup_lines(step: str) -> list[str]:
+    """Boot status. The step sits under the name until the live screen takes over."""
+
+    return frame(["Brewski", step, "", ""])
 
 
 def prompt_lines(current: str, latest: str, seconds_left: int) -> list[str]:

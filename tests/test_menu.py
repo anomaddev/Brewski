@@ -1,6 +1,6 @@
 """Software menu screens, and a Stop hold versus a short press."""
 
-from brewski.menu import SoftwareMenu
+from brewski.menu import ITEMS, VISIBLE, SoftwareMenu, menu_title, scroll_hint
 from brewski.panel import HOLD_RELEASE_OFF_SECONDS, STOP_HOLD_SECONDS, Panel
 from brewski.updates import ReleaseInfo
 
@@ -255,31 +255,51 @@ def test_a_short_release_does_not_leave_a_hold_behind(monkeypatch):
 def test_software_menu_lines_and_leds():
     menu = SoftwareMenu()
     assert menu.lines("0.6.5") == [
-        "Software Menu",
-        "> About",
-        "  Check for Update",
-        "  Reboot",
+        menu_title("v"),
+        "> Program",
+        "  About",
+        "  Networking",
     ]
+    assert len(menu.lines("0.6.5")[0]) == 20
     assert menu.leds() == (True, True)
-    assert menu.move(4) is True
-    assert menu.lines("0.6.5")[2] == "> Check for Update"
+    assert menu.move(2) is True
+    assert menu.lines("0.6.5")[3] == "> Networking"
     menu.index = 0
-    assert menu.move(-1) is True
+    menu.top = 0
+    assert menu.move(-1) is False
+    assert menu.lines("0.6.5")[1] == "> Program"
+    menu.index = len(ITEMS) - 1
+    menu.top = len(ITEMS) - VISIBLE
+    assert menu.move(1) is False
     assert menu.lines("0.6.5")[3] == "> Reboot"
+    assert menu.lines("0.6.5")[0] == menu_title("^")
     menu.select()
     assert menu.lines("0.6.5") == ["Reboot the Pi?", "START reboot", "STOP cancel", ""]
     assert menu.leds() == (True, True)
     assert menu.back() is True
-    assert menu.lines("0.6.5")[0] == "Software Menu"
+    assert menu.lines("0.6.5")[0].startswith("Software Menu")
 
-    menu.index = 0
+    menu.index = 1
     menu.select()
-    assert menu.lines("9.9.9") == ["About", "Brewski", "9.9.9", "STOP back"]
+    assert menu.lines("9.9.9") == ["About", "Brewski", "Release 9.9.9", "STOP back"]
+    installed = "abc1234" + "a" * 33
+    assert menu.lines("9.9.9", update_source="beta", revision=installed) == [
+        "About",
+        "Brewski",
+        "Commit abc1234",
+        "STOP back",
+    ]
+    assert menu.lines("9.9.9", update_source="beta", revision="v9.9.9") == [
+        "About",
+        "Brewski",
+        "Release 9.9.9",
+        "STOP back",
+    ]
     assert menu.leds() == (False, True)
     assert menu.select() is None
 
     menu.back()
-    menu.index = 1
+    menu.index = 4
     assert menu.select() == "check"
     assert menu.lines("0.6.5")[1] == "Checking..."
     menu.show_release(
@@ -319,3 +339,102 @@ def test_software_menu_lines_and_leds():
     assert menu.lines("0.6.5")[0] == "Reboot failed"
     assert menu.lines("0.6.5")[1] == "No permission"
     assert menu.leds() == (False, True)
+
+
+def test_the_menu_scrolls_when_the_highlight_leaves_the_window():
+    menu = SoftwareMenu()
+    menu.move(5)
+    assert menu.lines("0.6.5") == [
+        menu_title("^"),
+        "  Test Suite",
+        "  Check for Update",
+        "> Reboot",
+    ]
+    assert menu.move(1) is False
+    opened = menu.lines("0.6.5")
+    assert opened[3] == "> Reboot"
+    assert opened[0] == menu_title("^")
+    assert "About" not in opened[1:]
+    assert scroll_hint(1, 3, 5) == "^v"
+    assert scroll_hint(0, 3, 3) == ""
+
+
+def test_networking_screen_shows_the_address_and_hostname():
+    menu = SoftwareMenu()
+    menu.index = 2
+    assert menu.select() is None
+    assert menu.screen == "networking"
+    assert menu.leds() == (False, True)
+    assert menu.lines("0.6.5", address="192.168.1.42:8080", hostname="stillpi") == [
+        "Networking",
+        "192.168.1.42:8080",
+        "Host:        stillpi",
+        "STOP back",
+    ]
+    clipped = menu.lines("0.6.5", address="", hostname="this-hostname-is-way-too-long")
+    assert clipped[1] == "No address"
+    assert clipped[2] == "Host: this-hostname-"
+    assert all(len(line) <= 20 for line in clipped)
+    assert menu.select() is None
+    assert menu.back() is True
+    assert menu.screen == "list"
+
+
+def test_test_suite_confirms_before_initial_heating():
+    menu = SoftwareMenu()
+    menu.index = 3
+    assert menu.select() is None
+    assert menu.screen == "suite"
+    assert menu.lines("0.6.5") == [
+        "Test Suite",
+        "> Initial Heating",
+        "",
+        "",
+    ]
+    assert menu.leds() == (True, True)
+    assert menu.select() is None
+    assert menu.screen == "suite-confirm"
+    assert menu.lines("0.6.5") == [
+        "Initial Heating?",
+        "On 3 min, off 3 min",
+        "START begin",
+        "STOP cancel",
+    ]
+    assert menu.back() is True
+    assert menu.screen == "suite"
+    menu.select()
+    assert menu.select() == "test"
+    assert menu.chosen_test == "initial_heating"
+    menu.show_notice("Result still up", "End it first")
+    assert menu.lines("0.6.5")[0] == "Result still up"
+    assert menu.leds() == (False, True)
+    assert menu.back() is True
+    assert menu.screen == "list"
+
+
+def test_hold_editor_changes_one_field_and_toggles_continuous():
+    menu = SoftwareMenu()
+    menu.load_program(165, True, 3600)
+    menu.index = 0
+    assert menu.select() is None
+    assert menu.screen == "program"
+    assert menu.lines("0.6.5")[1] == "> Hold"
+    assert menu.select() is None
+    assert menu.screen == "hold"
+    assert menu.lines("0.6.5")[1].startswith("> Target")
+    assert menu.lines("0.6.5")[1].endswith("165 F")
+    assert menu.select() is None
+    assert menu.editing is True
+    assert menu.lines("0.6.5")[0].startswith("Editing")
+    assert menu.nudge(2) is True
+    assert menu.lines("0.6.5")[1].endswith("167 F")
+    assert menu.select() == "program-save"
+    assert menu.editing is False
+    assert menu.target == 167
+    menu.move(4)
+    assert "Continuous" in menu.lines("0.6.5")[3]
+    assert menu.select() == "program-save"
+    assert menu.continuous is False
+    assert menu.back() is True
+    assert menu.screen == "program"
+    assert all(len(line) <= 20 for line in menu.lines("0.6.5"))

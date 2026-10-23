@@ -18,8 +18,51 @@ const PIN_FIELDS = [
   ['button_stop', 'stop button', 'panel'],
 ]
 
+const BCM_MIN = 2
+const BCM_MAX = 27
+
 function pinValue(form, name) {
   return Math.round(Number(form.elements[name].value))
+}
+
+export function pinOptions(value) {
+  const selected = Number(value)
+  const options = []
+  for (let pin = BCM_MIN; pin <= BCM_MAX; pin += 1) {
+    options.push(`<option value="${pin}"${pin === selected ? ' selected' : ''}>${pin}</option>`)
+  }
+  return options.join('')
+}
+
+export function pinSelect(name, value = '') {
+  return `<select name="${name}" required>${pinOptions(value)}</select><span class="pin-warning" hidden></span>`
+}
+
+export function markPinClashes(form) {
+  const pins = PIN_FIELDS.map(([name, label, group]) => ({
+    name,
+    label,
+    group,
+    value: pinValue(form, name),
+  })).filter((pin) => form.elements[pin.name])
+  const byValue = new Map()
+  for (const pin of pins) {
+    if (!Number.isInteger(pin.value)) continue
+    const list = byValue.get(pin.value) || []
+    list.push(pin)
+    byValue.set(pin.value, list)
+  }
+  for (const pin of pins) {
+    const field = form.elements[pin.name]
+    const wrap = field.closest('.gpio-field')
+    const warning = wrap?.querySelector('.pin-warning')
+    if (!warning) continue
+    const others = (byValue.get(pin.value) || []).filter((other) => other.name !== pin.name)
+    const clash = others.length > 0
+    wrap.classList.toggle('is-clash', clash)
+    warning.hidden = !clash
+    warning.textContent = clash ? `Used by ${bcmList(others.map((other) => other.label))}` : ''
+  }
 }
 
 function bcmList(pins) {
@@ -144,11 +187,19 @@ export function syncI2cLabels(form) {
   }
 }
 
-export function pinField(name, label, value = '') {
-  const shown = value === '' || value == null ? '' : escapeHtml(value)
+let componentTipId = 0
+
+function componentTip(text) {
+  const id = `component-tip-${componentTipId += 1}`
+  return `<button type="button" class="tip" aria-label="Details" aria-describedby="${id}" aria-expanded="false"><span aria-hidden="true">i</span><span class="tip-bubble" id="${id}" role="tooltip"><span class="tip-lead">${escapeHtml(text)}</span></span></button>`
+}
+
+export function pinField(name, label, value = '', help = '') {
+  const note = help ? componentTip(help) : ''
   return `
-    <label class="field gpio-field">${label}
-      <input name="${name}" type="number" min="2" max="27" step="1" inputmode="numeric" required value="${shown}" />
+    <label class="field gpio-field">
+      <span class="field-name">${label}${note}</span>
+      ${pinSelect(name, value)}
     </label>`
 }
 
@@ -157,13 +208,13 @@ export function panelFields(gpio) {
   const buttons = gpio?.buttons || {}
   const leds = gpio?.leds || {}
   return `
-    <div class="pin-grid">
-      ${pinField('encoder_a', 'Encoder A', encoder.a)}
-      ${pinField('encoder_b', 'Encoder B', encoder.b)}
-      ${pinField('button_start', 'Start button', buttons.start)}
-      ${pinField('button_stop', 'Stop button', buttons.stop)}
-      ${pinField('led_start', 'Start LED relay', leds.start)}
-      ${pinField('led_stop', 'Stop LED relay', leds.stop)}
+    <div class="pin-grid panel-pins">
+      ${pinField('encoder_a', 'Encoder A', encoder.a, 'A channel of the dial that changes the target.')}
+      ${pinField('encoder_b', 'Encoder B', encoder.b, 'The other channel of that dial.')}
+      ${pinField('button_start', 'Start button', buttons.start, 'Starts a run from the panel.')}
+      ${pinField('button_stop', 'Stop button', buttons.stop, 'Stops a run. Hold it for the software menu.')}
+      ${pinField('led_start', 'Start LED relay', leds.start, 'Turns on the start lamp while Start will do something.')}
+      ${pinField('led_stop', 'Stop LED relay', leds.stop, 'Turns on the stop lamp while Stop will do something.')}
     </div>`
 }
 
@@ -181,6 +232,11 @@ export function busFields(gpio) {
     <div class="setup-devices">${i2cSwitches(gpio)}</div>`
 }
 
+const DEVICE_HELP = {
+  hts221: 'Cabinet temperature and humidity. Heaters stop above the limit.',
+  lcd: '20×4 display of the mode, target, probes, and heaters.',
+}
+
 function i2cSwitches(gpio) {
   const devices = gpio?.i2c_devices || [
     { id: 'hts221', name: 'HTS221', enabled: true },
@@ -192,7 +248,10 @@ function i2cSwitches(gpio) {
       return `
         <section class="device${device.enabled ? '' : ' is-off'}" data-i2c="${device.id}">
           <div class="device-head">
-            <p class="device-title" data-i2c-title="${device.id}">${title}</p>
+            <div class="device-name">
+              <p class="device-title" data-i2c-title="${device.id}">${title}</p>
+              ${DEVICE_HELP[device.id] ? componentTip(DEVICE_HELP[device.id]) : ''}
+            </div>
             <label class="switch">
               <input type="checkbox" role="switch" name="i2c_${device.id}_enabled" aria-label="${title}" ${device.enabled ? 'checked' : ''} />
               <span class="switch-track" aria-hidden="true"></span>

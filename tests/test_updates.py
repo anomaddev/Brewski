@@ -2,17 +2,20 @@ import json
 import urllib.error
 
 from brewski import __version__
-from brewski.lcd import NullDisplay
+from brewski.lcd import NullDisplay, startup_lines
 from brewski.store import Store, merge_settings
 from brewski.menu import SoftwareMenu
 from brewski.updates import (
     ReleaseInfo,
+    about_identity,
     check_release,
     is_newer,
     offer_ends,
     progress_label,
+    report,
     run_boot_update,
     wait_for_choice,
+    write_status,
 )
 
 
@@ -43,6 +46,21 @@ def _opener(status, payload):
         return _Response(status, body)
 
     return opener
+
+
+def test_a_fresh_check_asks_github_again(monkeypatch):
+    calls = []
+
+    def fake(**kwargs):
+        calls.append(kwargs["source"])
+        return ReleaseInfo(current="0.1.0", latest="v0.1.0", available=False, reachable=True, source=kwargs["source"])
+
+    monkeypatch.setattr("brewski.updates._cache", {})
+    monkeypatch.setattr("brewski.updates._check_release", fake)
+    check_release(source="beta")
+    check_release(source="beta")
+    check_release(source="beta", fresh=True)
+    assert calls == ["beta", "beta"]
 
 
 def test_version_compare():
@@ -137,6 +155,15 @@ def test_beta_offers_a_new_commit_and_stays_quiet_when_it_is_installed(tmp_path)
     assert offline.available is False
 
 
+def test_about_names_the_commit_on_beta_and_the_release_on_main():
+    installed = "abc1234" + "a" * 33
+    assert about_identity("main", "0.6.25", installed) == ("Release", "0.6.25")
+    assert about_identity("main", "v0.6.25", None) == ("Release", "0.6.25")
+    assert about_identity("beta", "0.6.25", installed) == ("Commit", "abc1234")
+    assert about_identity("beta", "0.6.25", "v0.6.25") == ("Release", "0.6.25")
+    assert about_identity("beta", "0.6.25", None) == ("Release", "0.6.25")
+
+
 def test_beta_menu_shows_the_commit_arrow():
     menu = SoftwareMenu()
     installed = "abc1234" + "a" * 33
@@ -154,6 +181,18 @@ def test_beta_menu_shows_the_commit_arrow():
         True,
     )
     assert menu.lines("0.6.23")[1] == "abc1234 -> def5678"
+    menu.show_release(
+        ReleaseInfo(
+            current="0.6.23",
+            latest=installed[:7],
+            available=False,
+            reachable=True,
+            revision=installed,
+            source="beta",
+        ),
+        False,
+    )
+    assert menu.lines("0.6.23") == ["Check for Update", "Up to date", "abc1234", "STOP back"]
 
 
 def test_boot_does_not_check_before_setup(tmp_path, monkeypatch):
@@ -234,6 +273,7 @@ def test_boot_installs_when_start_is_pressed(tmp_path, monkeypatch):
             flashes.append("closed")
 
     monkeypatch.setattr("brewski.updates.open_display", lambda _settings: Panel())
+    monkeypatch.setattr("brewski.updates.has_default_route", lambda: True)
     monkeypatch.setattr("brewski.updates.open_buttons", lambda _settings: Buttons())
     monkeypatch.setattr(
         "brewski.updates.open_prompt_leds",
@@ -293,18 +333,95 @@ def test_boot_waits_on_the_prompt_when_buttons_cannot_open(tmp_path, monkeypatch
     panel = Panel()
     leds = Leds()
     monkeypatch.setattr("brewski.updates.open_display", lambda _settings: panel)
+    monkeypatch.setattr("brewski.updates.has_default_route", lambda: True)
     monkeypatch.setattr("brewski.updates.open_buttons", lambda _settings: None)
     monkeypatch.setattr("brewski.updates.open_prompt_leds", lambda _settings: leds)
     installed = []
     monkeypatch.setattr("brewski.updates.run_installer", lambda *_args: installed.append(True))
     assert run_boot_update() == 0
     assert installed == []
-    assert panel.history[0][0] == "Update available"
-    assert panel.history[0][2] == "START update"
-    assert panel.history[0][3] == "STOP keep 60s"
+    assert panel.history[0] == startup_lines("Starting")
+    prompt = next(lines for lines in panel.history if lines[0] == "Update available")
+    assert prompt[2] == "START update"
+    assert prompt[3] == "STOP keep 60s"
     assert panel.lines[0] == "Keeping this copy"
     assert clock["now"] >= 60
     assert leds.closed
+
+
+def test_boot_shows_starting_before_it_checks_for_a_release(tmp_path, monkeypatch):
+    store = Store(tmp_path)
+    store.save_settings(merge_settings(store.get_settings(), {"setup_complete": True}))
+    monkeypatch.setenv("BREWSKI_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr("brewski.updates.has_default_route", lambda: True)
+    seen: list[list[str]] = []
+
+    def check_later(**_kwargs):
+        seen.append(["check"])
+        return ReleaseInfo(current="0.2.0", latest="0.2.0", available=False, reachable=True)
+
+    class Panel(NullDisplay):
+        def __init__(self):
+            super().__init__()
+            self.history: list[list[str]] = []
+
+        @property
+        def hardware(self):
+            return True
+
+        def write(self, lines):
+            super().write(lines)
+            self.history.append(list(self.lines))
+            seen.append(list(self.lines))
+
+    panel = Panel()
+    monkeypatch.setattr("brewski.updates.open_display", lambda _settings: panel)
+    monkeypatch.setattr("brewski.updates.check_release", check_later)
+    assert run_boot_update() == 0
+    assert panel.history[0] == startup_lines("Starting")
+    assert startup_lines("Checking for updates") in panel.history
+    assert seen.index(startup_lines("Starting")) < seen.index(["check"])
+    assert seen.index(startup_lines("Checking for updates")) < seen.index(["check"])
+    assert panel.closed_clear is False
+
+
+def test_boot_skips_github_when_the_network_never_arrives(tmp_path, monkeypatch):
+    store = Store(tmp_path)
+    store.save_settings(merge_settings(store.get_settings(), {"setup_complete": True}))
+    monkeypatch.setenv("BREWSKI_DATA_DIR", str(tmp_path))
+    clock = {"now": 0.0}
+
+    def sleep(seconds):
+        clock["now"] += seconds
+
+    monkeypatch.setattr("brewski.updates.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr("brewski.updates.time.sleep", sleep)
+    monkeypatch.setattr("brewski.updates.has_default_route", lambda: False)
+
+    def explode(**_kwargs):
+        raise AssertionError("GitHub was contacted with no route")
+
+    class Panel(NullDisplay):
+        def __init__(self):
+            super().__init__()
+            self.history: list[list[str]] = []
+
+        @property
+        def hardware(self):
+            return True
+
+        def write(self, lines):
+            super().write(lines)
+            self.history.append(list(self.lines))
+
+    panel = Panel()
+    monkeypatch.setattr("brewski.updates.check_release", explode)
+    monkeypatch.setattr("brewski.updates.open_display", lambda _settings: panel)
+    assert run_boot_update() == 0
+    assert panel.history[0] == startup_lines("Starting")
+    assert startup_lines("Waiting for network") in panel.history
+    assert panel.closed_clear is False
+    assert clock["now"] >= 20
 
 
 def test_prompt_times_out_as_a_decline():
@@ -331,6 +448,24 @@ def test_prompt_times_out_as_a_decline():
     )
     assert display.lines[2] == "START update"
     assert display.lines[0] == "Update available"
+
+
+def test_an_install_in_progress_does_not_ask_github_again(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr("brewski.updates.check_release", lambda **_kwargs: calls.append(True))
+    write_status(
+        phase="downloading",
+        current="0.6.25",
+        latest="abc1234",
+        error=None,
+        ref="abc1234deadbeef",
+        directory=tmp_path,
+    )
+    body = report(tmp_path)
+    assert calls == []
+    assert body["phase"] == "downloading"
+    assert body["latest"] == "abc1234"
+    assert body["ref"] == "abc1234deadbeef"
 
 
 def test_prompt_accepts_stop():

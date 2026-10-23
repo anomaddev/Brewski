@@ -1,7 +1,7 @@
 """GitHub release checks and the prompted installer.
 
-A fresh boot does not contact GitHub. The I2C pins are whatever setup saved,
-and the panel prompt cannot open the bus before that.
+A fresh boot does not contact GitHub until setup has saved the I2C pins.
+Once those pins are saved, the LCD comes on before the network wait.
 """
 
 from __future__ import annotations
@@ -26,7 +26,9 @@ from brewski.lcd import (
     open_prompt_leds,
     progress_lines,
     prompt_lines,
+    startup_lines,
 )
+from brewski.network import has_default_route
 from brewski.paths import data_directory
 from brewski.store import DEFAULT_UPDATE_SOURCE, load_settings
 
@@ -37,7 +39,8 @@ REVISION_PATH = Path("/opt/brewski/revision")
 INSTALL_SCRIPT = Path("/opt/brewski/install.sh")
 APPLY_UNIT = "brewski-apply-update.service"
 PROMPT_SECONDS = 60
-_CACHE_SECONDS = 20.0
+NETWORK_WAIT_SECONDS = 20
+_CACHE_SECONDS = 300.0
 _cache_lock = threading.Lock()
 _cache: dict[str, tuple[float, ReleaseInfo]] = {}
 
@@ -81,12 +84,14 @@ def check_release(
     revision_path: Path | None = None,
     timeout: float = 30,
     source: str | None = None,
+    fresh: bool = False,
 ) -> ReleaseInfo:
     """Compare this install with the update selected in Settings.
 
     Main uses the latest GitHub release. Beta uses the tip of the beta branch.
     An explicit opener or revision path skips the short cache so tests stay isolated.
     The cache is kept per source, so switching Main to Beta does not reuse the other answer.
+    A fresh check asks GitHub even when a recent answer is saved, then replaces that answer.
     """
 
     chosen = source if source in {"main", "beta"} else None
@@ -99,10 +104,11 @@ def check_release(
         )
     chosen = chosen or _saved_update_source()
     now = time.monotonic()
-    with _cache_lock:
-        cached = _cache.get(chosen)
-    if cached is not None and now - cached[0] < _CACHE_SECONDS:
-        return cached[1]
+    if not fresh:
+        with _cache_lock:
+            cached = _cache.get(chosen)
+        if cached is not None and now - cached[0] < _CACHE_SECONDS:
+            return cached[1]
     info = _check_release(opener=None, revision_path=None, timeout=timeout, source=chosen)
     with _cache_lock:
         _cache[chosen] = (time.monotonic(), info)
@@ -157,9 +163,21 @@ def write_status(
         logger.warning("Could not write %s", path)
 
 
-def report(directory: Path | None = None) -> dict:
-    release = check_release()
+def report(directory: Path | None = None, *, fresh: bool = False) -> dict:
     status = read_status(directory)
+    if status["phase"] in {"downloading", "building", "installing"}:
+        return {
+            "current": status["current"] or __version__,
+            "latest": status["latest"] or None,
+            "available": True,
+            "reachable": True,
+            "apply_supported": apply_supported(),
+            "phase": status["phase"],
+            "error": status["error"],
+            "source": _saved_update_source(),
+            "ref": status.get("ref"),
+        }
+    release = check_release(fresh=fresh)
     return {
         "current": release.current,
         "latest": release.latest,
@@ -188,6 +206,7 @@ def run_boot_update() -> int:
 
     Always returns 0. A declined, skipped, or failed update keeps the
     installed version, and the service that runs after this oneshot starts it.
+    The display opens before the network wait so the panel can show startup.
     """
 
     directory = data_directory(False)
@@ -195,17 +214,28 @@ def run_boot_update() -> int:
     if settings is None or not settings.setup_complete:
         logger.info("Brewski setup has not saved the I2C pins. Skipping the update check.")
         return 0
+    display = open_display(settings)
+    if display.hardware:
+        display.write(startup_lines("Starting"))
+        if not _wait_for_route(display):
+            logger.info("No network route. Starting the installed version.")
+            display.close(clear=False)
+            return 0
+        display.write(startup_lines("Checking for updates"))
     release = check_release()
     if not release.available:
         if release.reachable:
             logger.info("Brewski %s is current.", release.current)
         else:
             logger.info("GitHub could not be reached. Starting the installed version.")
+        if display.hardware:
+            display.close(clear=False)
         return 0
     if settings.gpio is None or not settings.gpio.lcd_enabled():
         logger.info("An update is available and the LCD is turned off. Keeping this version.")
+        if display.hardware:
+            display.close(clear=False)
         return 0
-    display = open_display(settings)
     if not display.hardware:
         logger.warning("An update is available and the LCD could not be opened. Keeping this version.")
         display.close()
@@ -243,6 +273,21 @@ def run_boot_update() -> int:
     time.sleep(2)
     display.close()
     return 0
+
+
+def _wait_for_route(display: Display, seconds: int = NETWORK_WAIT_SECONDS) -> bool:
+    """Give the network a short head start, and say so on the panel."""
+
+    if has_default_route():
+        return True
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        display.write(startup_lines("Waiting for network"))
+        time.sleep(1)
+        if has_default_route():
+            return True
+    display.write(startup_lines("Waiting for network"))
+    return False
 
 
 def run_apply_update() -> int:
@@ -385,13 +430,33 @@ def request_reboot() -> None:
     subprocess.run(["sudo", "-n", systemctl, "reboot"], check=True)
 
 
+def installed_revision(path: Path | None = None) -> str | None:
+    """Release tag or commit the installer recorded. A dev checkout has neither."""
+
+    return _read_revision(REVISION_PATH if path is None else path)
+
+
+def about_identity(source: str, version: str, revision: str | None = None) -> tuple[str, str]:
+    """Label and value for About.
+
+    Beta names the installed commit. Main names the release. A beta setting
+    with no commit recorded, such as a checkout that has not updated yet,
+    still names the release.
+    """
+
+    if source == "beta" and revision is not None and _is_commit_sha(revision):
+        return "Commit", revision[:7]
+    text = (version or "").strip()
+    if text[:1] in {"v", "V"}:
+        text = text[1:]
+    return "Release", text
+
+
 def offer_ends(release: ReleaseInfo) -> tuple[str, str]:
     """Installed identity, then the offered release or commit, for one LCD line."""
 
-    left = release.current
-    if release.source == "beta" and _is_commit_sha(release.revision):
-        left = release.revision[:7]
-    return left, release.latest or ""
+    _label, value = about_identity(release.source, release.current, release.revision)
+    return value, release.latest or ""
 
 
 def progress_label(release: ReleaseInfo) -> str:
@@ -461,6 +526,49 @@ def _is_commit_sha(value: str | None) -> bool:
     return all(character in "0123456789abcdefABCDEF" for character in value)
 
 
+def _github_headers() -> dict[str, str]:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "brewski",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    token = _github_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _github_token() -> str:
+    """Fine-grained or classic token. Never logged.
+
+    The Pi keeps it in the data directory. A dev checkout can set
+    BREWSKI_GITHUB_TOKEN, or the same name in a gitignored .env file.
+    """
+
+    for key in ("BREWSKI_GITHUB_TOKEN", "GITHUB_TOKEN"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    for path in (Path("/var/lib/brewski/github-token"), Path(".env")):
+        token = _token_from_file(path)
+        if token:
+            return token
+    return ""
+
+
+def _token_from_file(path: Path) -> str:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    if path.name != ".env":
+        return text.strip()
+    for line in text.splitlines():
+        if line.startswith("BREWSKI_GITHUB_TOKEN="):
+            return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
+
+
 def _fetch_commit(opener, timeout: float) -> tuple[str | None, bool]:
     """Full SHA at the tip of the beta branch.
 
@@ -470,11 +578,7 @@ def _fetch_commit(opener, timeout: float) -> tuple[str | None, bool]:
 
     request = urllib.request.Request(
         f"https://api.github.com/repos/{GITHUB_REPO}/commits/beta",
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "brewski",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
+        headers=_github_headers(),
     )
     open_url = opener or urllib.request.urlopen
     try:
@@ -505,11 +609,7 @@ def _fetch_commit(opener, timeout: float) -> tuple[str | None, bool]:
 def _fetch_latest(opener, timeout: float) -> tuple[str | None, bool]:
     request = urllib.request.Request(
         f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "brewski",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
+        headers=_github_headers(),
     )
     open_url = opener or urllib.request.urlopen
     try:

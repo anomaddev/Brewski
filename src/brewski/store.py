@@ -1,12 +1,25 @@
-"""SQLite storage for settings, runs, and the sample log."""
+"""SQLite storage for settings, runs, the sample log, and the timeline."""
 
 from __future__ import annotations
 
 import json
 import sqlite3
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
+
+from brewski.program import (
+    DEFAULT_DURATION_SECONDS,
+    DEFAULT_MAX_PROGRAM_HOURS,
+    HOLD_MODE,
+    parse_max_program_hours,
+    parse_program_continuous,
+    parse_program_duration,
+    parse_program_mode,
+)
+from brewski.timeline import GAP_AFTER_MS, iso_to_ms
 
 TARGET_MIN_F = 90.0
 TARGET_MAX_F = 240.0
@@ -29,11 +42,8 @@ HEATER_MIN_ON_DEFAULT_SECONDS = 1.0
 HEATER_MIN_OFF_DEFAULT_SECONDS = 1.0
 HEATER_DWELL_FLOOR_SECONDS = 0.5
 HEATER_DWELL_CEILING_SECONDS = 60.0
-# Degrees before the setpoint at which the element is turned off. The sheath
-# stays hot after the SSR opens and keeps heating the liquid, and the probe
-# lags the bulk, so waiting for the setpoint overshoots. 3°F (about 1.7°C)
-# is a starting point for a typical small still; 0 waits for the setpoint.
-EARLY_CUTOFF_DEFAULT_F = 3.0
+# Clamp on a measured or volume-scaled coast. Older databases still have an
+# early_cutoff_f column. It is left in place and is not read or written.
 EARLY_CUTOFF_MIN_F = 0.0
 EARLY_CUTOFF_MAX_F = 20.0
 # Gallons of liquid in the pot for a calibration. The coast scales with this.
@@ -67,7 +77,7 @@ CREATE TABLE IF NOT EXISTS settings (
     target_temp_f REAL NOT NULL,
     heater_min_on_seconds REAL NOT NULL DEFAULT 1,
     heater_min_off_seconds REAL NOT NULL DEFAULT 1,
-    early_cutoff_f REAL NOT NULL DEFAULT 3,
+    early_cutoff_f REAL NOT NULL DEFAULT 3, -- legacy, unused
     cabinet_limit_f REAL NOT NULL DEFAULT 170,
     learned_coast_f REAL,
     learned_coast_seconds REAL,
@@ -77,7 +87,12 @@ CREATE TABLE IF NOT EXISTS settings (
     sensors TEXT,
     setup_complete INTEGER NOT NULL DEFAULT 0,
     gpio TEXT,
-    update_source TEXT NOT NULL DEFAULT 'main'
+    update_source TEXT NOT NULL DEFAULT 'main',
+    thermal_model TEXT,
+    max_program_hours INTEGER NOT NULL DEFAULT 24,
+    program_mode TEXT NOT NULL DEFAULT 'hold',
+    program_continuous INTEGER NOT NULL DEFAULT 1,
+    program_duration_seconds INTEGER NOT NULL DEFAULT 3600
 );
 
 CREATE TABLE IF NOT EXISTS runs (
@@ -103,8 +118,46 @@ CREATE TABLE IF NOT EXISTS runs (
     cooldown_seconds REAL,
     cooldown_baseline_f REAL,
     cooldown_sensor_index INTEGER,
-    cooldown_ended_at TEXT
+    cooldown_ended_at TEXT,
+    thermal_model TEXT,
+    analysis TEXT,
+    program_mode TEXT,
+    program_continuous INTEGER,
+    program_duration_seconds INTEGER,
+    program_end TEXT
 );
+
+CREATE TABLE IF NOT EXISTS run_marks (
+    id INTEGER PRIMARY KEY,
+    run_id INTEGER NOT NULL REFERENCES runs(id),
+    name TEXT NOT NULL,
+    elapsed_seconds REAL NOT NULL,
+    recorded_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS run_marks_run_id ON run_marks(run_id, id);
+
+CREATE TABLE IF NOT EXISTS run_logs (
+    id INTEGER PRIMARY KEY,
+    run_id INTEGER NOT NULL REFERENCES runs(id),
+    recorded_at TEXT NOT NULL,
+    elapsed_seconds REAL NOT NULL,
+    event TEXT NOT NULL,
+    message TEXT NOT NULL,
+    detail TEXT
+);
+
+CREATE INDEX IF NOT EXISTS run_logs_run_id ON run_logs(run_id, id);
+CREATE INDEX IF NOT EXISTS run_logs_run_elapsed ON run_logs(run_id, elapsed_seconds, id);
+
+CREATE TABLE IF NOT EXISTS console_logs (
+    id INTEGER PRIMARY KEY,
+    run_id INTEGER NOT NULL REFERENCES runs(id),
+    recorded_at TEXT NOT NULL,
+    line TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS console_logs_run_id ON console_logs(run_id, id);
 
 CREATE TABLE IF NOT EXISTS samples (
     id INTEGER PRIMARY KEY,
@@ -118,6 +171,23 @@ CREATE TABLE IF NOT EXISTS samples (
 );
 
 CREATE INDEX IF NOT EXISTS samples_run_id ON samples(run_id, elapsed_seconds);
+
+CREATE TABLE IF NOT EXISTS timeline (
+    id INTEGER PRIMARY KEY,
+    recorded_ms INTEGER NOT NULL,
+    temps_f TEXT NOT NULL,
+    target_temp_f REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS timeline_recorded_ms ON timeline(recorded_ms);
+
+CREATE TABLE IF NOT EXISTS timeline_gaps (
+    id INTEGER PRIMARY KEY,
+    started_ms INTEGER NOT NULL,
+    ended_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS timeline_gaps_started ON timeline_gaps(started_ms);
 
 CREATE TABLE IF NOT EXISTS heater_meters (
     slot INTEGER PRIMARY KEY,
@@ -253,7 +323,6 @@ class Settings:
     target_temp_f: int
     heater_min_on_seconds: float = HEATER_MIN_ON_DEFAULT_SECONDS
     heater_min_off_seconds: float = HEATER_MIN_OFF_DEFAULT_SECONDS
-    early_cutoff_f: float = EARLY_CUTOFF_DEFAULT_F
     cabinet_limit_f: int = CABINET_LIMIT_DEFAULT_F
     learned_coast_f: float | None = None
     learned_coast_seconds: float | None = None
@@ -262,6 +331,11 @@ class Settings:
     setup_complete: bool = False
     gpio: GpioConfig | None = None
     update_source: str = DEFAULT_UPDATE_SOURCE
+    thermal_model: dict | None = None
+    max_program_hours: int = DEFAULT_MAX_PROGRAM_HOURS
+    program_mode: str = HOLD_MODE
+    program_continuous: bool = True
+    program_duration_seconds: int = DEFAULT_DURATION_SECONDS
 
     @property
     def heater_count(self) -> int:
@@ -292,7 +366,6 @@ class Settings:
             "target_temp_f": self.target_temp_f,
             "heater_min_on_seconds": self.heater_min_on_seconds,
             "heater_min_off_seconds": self.heater_min_off_seconds,
-            "early_cutoff_f": self.early_cutoff_f,
             "cabinet_limit_f": self.cabinet_limit_f,
             "learned_coast_f": self.learned_coast_f,
             "learned_coast_seconds": self.learned_coast_seconds,
@@ -307,6 +380,11 @@ class Settings:
             "sensor_count": self.sensor_count,
             "heater_names": self.heater_names,
             "sensor_names": self.sensor_names,
+            "thermal_model": self.thermal_model,
+            "max_program_hours": self.max_program_hours,
+            "program_mode": self.program_mode,
+            "program_continuous": self.program_continuous,
+            "program_duration_seconds": self.program_duration_seconds,
         }
 
 
@@ -324,7 +402,6 @@ def default_settings() -> Settings:
         target_temp_f=165,
         heater_min_on_seconds=HEATER_MIN_ON_DEFAULT_SECONDS,
         heater_min_off_seconds=HEATER_MIN_OFF_DEFAULT_SECONDS,
-        early_cutoff_f=EARLY_CUTOFF_DEFAULT_F,
     )
 
 
@@ -341,7 +418,6 @@ def merge_settings(current: Settings, patch: dict) -> Settings:
         "target_temp_f",
         "heater_min_on_seconds",
         "heater_min_off_seconds",
-        "early_cutoff_f",
         "cabinet_limit_f",
         "learned_coast_f",
         "learned_coast_seconds",
@@ -350,6 +426,10 @@ def merge_settings(current: Settings, patch: dict) -> Settings:
         "setup_complete",
         "gpio",
         "update_source",
+        "max_program_hours",
+        "program_mode",
+        "program_continuous",
+        "program_duration_seconds",
     }
     unknown = sorted(set(patch) - allowed)
     if unknown:
@@ -378,7 +458,6 @@ def parse_settings(data: dict) -> Settings:
             "heater_min_off_seconds",
             HEATER_MIN_OFF_DEFAULT_SECONDS,
         ),
-        early_cutoff_f=_early_cutoff(data.get("early_cutoff_f")),
         cabinet_limit_f=_cabinet_limit(data.get("cabinet_limit_f")),
         learned_coast_f=_optional_setting(
             data.get("learned_coast_f"), "learned_coast_f", EARLY_CUTOFF_MIN_F, EARLY_CUTOFF_MAX_F
@@ -396,6 +475,11 @@ def parse_settings(data: dict) -> Settings:
         setup_complete=_flag(data.get("setup_complete")),
         gpio=gpio,
         update_source=_update_source(data.get("update_source")),
+        thermal_model=_thermal_document(data.get("thermal_model")),
+        max_program_hours=_max_program_hours(data.get("max_program_hours")),
+        program_mode=_program_mode(data.get("program_mode")),
+        program_continuous=_program_continuous(data.get("program_continuous")),
+        program_duration_seconds=_program_duration(data.get("program_duration_seconds")),
     )
 
 
@@ -427,6 +511,8 @@ class Store:
             row = connection.execute("SELECT id FROM settings WHERE id = 1").fetchone()
             if row is None:
                 self._insert_settings(connection, default_settings())
+        self._backfill_timeline()
+        self.compact_timeline()
 
     def get_settings(self) -> Settings:
         with self._connect() as connection:
@@ -443,8 +529,13 @@ class Store:
         """
 
         with self._connect() as connection:
+            connection.execute("DELETE FROM run_logs")
+            connection.execute("DELETE FROM console_logs")
+            connection.execute("DELETE FROM run_marks")
             connection.execute("DELETE FROM samples")
             connection.execute("DELETE FROM runs")
+            connection.execute("DELETE FROM timeline_gaps")
+            connection.execute("DELETE FROM timeline")
             connection.execute("DELETE FROM settings")
             self._insert_settings(connection, default_settings())
 
@@ -499,11 +590,13 @@ class Store:
                 UPDATE settings
                 SET heater_count = ?, sensor_count = ?, heater_names = ?,
                     sensor_names = ?, target_temp_f = ?, heater_min_on_seconds = ?,
-                    heater_min_off_seconds = ?, early_cutoff_f = ?, cabinet_limit_f = ?,
+                    heater_min_off_seconds = ?, cabinet_limit_f = ?,
                     learned_coast_f = ?, learned_coast_seconds = ?, learned_cooldown_f_per_min = ?,
                     charge_gallons = ?,
                     heaters = ?, sensors = ?, setup_complete = ?, gpio = ?,
-                    update_source = ?
+                    update_source = ?, thermal_model = ?,
+                    max_program_hours = ?, program_mode = ?,
+                    program_continuous = ?, program_duration_seconds = ?
                 WHERE id = 1
                 """,
                 _settings_values(settings),
@@ -515,15 +608,20 @@ class Store:
         *,
         kind: str = "run",
         charge_gallons: float | None = None,
+        program: object | None = None,
     ) -> dict:
+        mode = None if program is None else program.mode
+        continuous = None if program is None else (1 if program.continuous else 0)
+        duration = None if program is None else program.duration_seconds
         with self._connect() as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO runs (
                     started_at, status, target_temp_f, heater_count, sensor_count,
                     heater_names, sensor_names, elapsed_seconds, heaters, sensors,
-                    kind, charge_gallons
-                ) VALUES (?, 'running', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+                    kind, charge_gallons, program_mode, program_continuous,
+                    program_duration_seconds
+                ) VALUES (?, 'running', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     utc_now(),
@@ -536,6 +634,9 @@ class Store:
                     json.dumps([channel.to_dict() for channel in settings.sensors]),
                     kind,
                     charge_gallons,
+                    mode,
+                    continuous,
+                    duration,
                 ),
             )
             run_id = int(cursor.lastrowid)
@@ -559,6 +660,9 @@ class Store:
             "coast_seconds",
             "cooldown_f_per_min",
             "calibration_settled",
+            "thermal_model",
+            "analysis",
+            "program_end",
         )
         keys = [key for key in allowed if key in fields]
         if not keys:
@@ -598,24 +702,358 @@ class Store:
                 ),
             )
 
-    def get_run(self, run_id: int) -> dict | None:
+    def add_timeline_point(
+        self,
+        temps_f: list[float | None],
+        target_temp_f: float,
+        recorded_ms: int | None = None,
+    ) -> None:
+        """Append one controller reading. A hole longer than 30 seconds is kept.
+
+        The chart collapses holes longer than 30 minutes. Those are the
+        stretches where this process was not running.
+        """
+
+        recorded_ms = int(time.time() * 1000) if recorded_ms is None else int(recorded_ms)
+        payload = json.dumps(
+            [None if value is None else round(float(value), 2) for value in temps_f]
+        )
+        with self._connect() as connection:
+            last = connection.execute("SELECT MAX(recorded_ms) AS at FROM timeline").fetchone()
+            previous = None if last is None or last["at"] is None else int(last["at"])
+            if previous is not None and recorded_ms - previous > GAP_AFTER_MS:
+                connection.execute(
+                    "INSERT INTO timeline_gaps (started_ms, ended_ms) VALUES (?, ?)",
+                    (previous, recorded_ms),
+                )
+            connection.execute(
+                """
+                INSERT INTO timeline (recorded_ms, temps_f, target_temp_f)
+                VALUES (?, ?, ?)
+                """,
+                (recorded_ms, payload, round(float(target_temp_f), 2)),
+            )
+
+    def timeline(self, start_ms: int, end_ms: int, max_points: int) -> dict:
+        """Readings in a real-time range, thinned to ``max_points`` when dense.
+
+        Gaps are every recorded hole, not only those inside the range. The
+        chart needs the whole list to place a window that crosses an outage.
+        """
+
+        max_points = max(1, int(max_points))
+        start_ms = int(start_ms)
+        end_ms = int(end_ms)
+        with self._connect() as connection:
+            bounds = connection.execute(
+                "SELECT MIN(recorded_ms) AS earliest, MAX(recorded_ms) AS latest FROM timeline"
+            ).fetchone()
+            gap_rows = connection.execute(
+                "SELECT started_ms, ended_ms FROM timeline_gaps ORDER BY started_ms, id"
+            ).fetchall()
+            count = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) AS n FROM timeline
+                    WHERE recorded_ms >= ? AND recorded_ms <= ?
+                    """,
+                    (start_ms, end_ms),
+                ).fetchone()["n"]
+            )
+            if count <= max_points:
+                rows = connection.execute(
+                    """
+                    SELECT id, recorded_ms, temps_f, target_temp_f
+                    FROM timeline
+                    WHERE recorded_ms >= ? AND recorded_ms <= ?
+                    ORDER BY recorded_ms, id
+                    """,
+                    (start_ms, end_ms),
+                ).fetchall()
+                decimated = False
+            else:
+                stride = max(1, (count + max_points - 1) // max_points)
+                rows = list(
+                    connection.execute(
+                        """
+                        WITH numbered AS (
+                            SELECT id, recorded_ms, temps_f, target_temp_f,
+                                   ROW_NUMBER() OVER (ORDER BY recorded_ms, id) AS n
+                            FROM timeline
+                            WHERE recorded_ms >= ? AND recorded_ms <= ?
+                        )
+                        SELECT id, recorded_ms, temps_f, target_temp_f
+                        FROM numbered
+                        WHERE n = 1 OR n = ? OR (n % ?) = 1
+                        ORDER BY recorded_ms, id
+                        """,
+                        (start_ms, end_ms, count, stride),
+                    ).fetchall()
+                )
+                decimated = True
+                have = {int(row["recorded_ms"]) for row in rows}
+                for gap in gap_rows:
+                    for edge in (int(gap["started_ms"]), int(gap["ended_ms"])):
+                        if edge < start_ms or edge > end_ms or edge in have:
+                            continue
+                        nearest = _nearest_timeline_row(connection, edge, start_ms, end_ms)
+                        if nearest is None or int(nearest["recorded_ms"]) in have:
+                            continue
+                        rows.append(nearest)
+                        have.add(int(nearest["recorded_ms"]))
+                rows.sort(key=lambda row: (int(row["recorded_ms"]), int(row["id"])))
+        settings = self.get_settings()
+        indexes = settings.enabled_sensor_indexes()
+        gaps = [
+            {"from": int(row["started_ms"]), "to": int(row["ended_ms"])} for row in gap_rows
+        ]
+        points = []
+        for row in rows:
+            stored = json.loads(row["temps_f"])
+            temps = []
+            for index in indexes:
+                value = stored[index] if index < len(stored) else None
+                temps.append(None if value is None else round(float(value), 2))
+            points.append(
+                {
+                    "at": int(row["recorded_ms"]),
+                    "temps_f": temps,
+                    "target_temp_f": row["target_temp_f"],
+                }
+            )
+        return {
+            "earliest": None if bounds["earliest"] is None else int(bounds["earliest"]),
+            "latest": None if bounds["latest"] is None else int(bounds["latest"]),
+            "gaps": gaps,
+            "points": points,
+            "decimated": decimated,
+        }
+
+    def compact_timeline(self, now_ms: int | None = None) -> None:
+        """Thin old readings. The last two days stay at the recorded rate.
+
+        A point that opens or closes a hole is kept, and so are the first and
+        last readings. Compaction does not invent holes.
+        """
+
+        now_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+        day = 24 * 60 * 60 * 1000
+        bands = (
+            (2 * day, 14 * day, 60 * 1000),
+            (14 * day, 180 * day, 5 * 60 * 1000),
+            (180 * day, None, 30 * 60 * 1000),
+        )
+        with self._connect() as connection:
+            for min_age, max_age, bucket in bands:
+                clauses = ["recorded_ms < ?"]
+                params: list[int] = [now_ms - min_age]
+                if max_age is not None:
+                    clauses.append("recorded_ms >= ?")
+                    params.append(now_ms - max_age)
+                where = " AND ".join(clauses)
+                connection.execute(
+                    f"""
+                    DELETE FROM timeline
+                    WHERE {where}
+                    AND recorded_ms != (SELECT MIN(recorded_ms) FROM timeline)
+                    AND recorded_ms != (SELECT MAX(recorded_ms) FROM timeline)
+                    AND recorded_ms NOT IN (
+                        SELECT started_ms FROM timeline_gaps
+                        UNION
+                        SELECT ended_ms FROM timeline_gaps
+                    )
+                    AND id NOT IN (
+                        SELECT MIN(id) FROM timeline
+                        WHERE {where}
+                        GROUP BY recorded_ms / ?
+                    )
+                    """,
+                    (*params, *params, bucket),
+                )
+
+    def _backfill_timeline(self) -> None:
+        """Copy an existing sample log once, so older runs still scroll."""
+
+        with self._connect() as connection:
+            if not _table_exists(connection, "timeline") or not _table_exists(connection, "samples"):
+                return
+            count = connection.execute("SELECT COUNT(*) AS n FROM timeline").fetchone()
+            if count is not None and int(count["n"]):
+                return
+            rows = connection.execute(
+                """
+                SELECT recorded_at, temps_f, target_temp_f
+                FROM samples
+                ORDER BY recorded_at, id
+                """
+            ).fetchall()
+            previous: int | None = None
+            for row in rows:
+                recorded_ms = iso_to_ms(row["recorded_at"])
+                if previous is not None and recorded_ms - previous > GAP_AFTER_MS:
+                    connection.execute(
+                        "INSERT INTO timeline_gaps (started_ms, ended_ms) VALUES (?, ?)",
+                        (previous, recorded_ms),
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO timeline (recorded_ms, temps_f, target_temp_f)
+                    VALUES (?, ?, ?)
+                    """,
+                    (recorded_ms, row["temps_f"], row["target_temp_f"]),
+                )
+                previous = recorded_ms
+
+    def get_run(
+        self,
+        run_id: int,
+        *,
+        include_logs: bool = True,
+        include_samples: bool = True,
+    ) -> dict | None:
         with self._connect() as connection:
             row = connection.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
             if row is None:
                 return None
-            samples = connection.execute(
-                """
-                SELECT * FROM samples
-                WHERE run_id = ?
-                ORDER BY recorded_at, id
-                """,
-                (run_id,),
-            ).fetchall()
+            samples = None
+            if include_samples:
+                samples = connection.execute(
+                    """
+                    SELECT * FROM samples
+                    WHERE run_id = ?
+                    ORDER BY recorded_at, id
+                    """,
+                    (run_id,),
+                ).fetchall()
+            else:
+                on_seconds = _heater_on_seconds(connection, run_id, float(row["elapsed_seconds"]))
         run = _run_dict(row)
-        sample_dicts = [_sample_dict(sample) for sample in samples]
-        run["heater_on_seconds"] = heater_on_seconds(sample_dicts, run["elapsed_seconds"])
-        run["samples"] = sample_dicts
+        if include_samples:
+            sample_dicts = [_sample_dict(sample) for sample in samples or []]
+            run["heater_on_seconds"] = heater_on_seconds(sample_dicts, run["elapsed_seconds"])
+            run["samples"] = sample_dicts
+        else:
+            run["heater_on_seconds"] = on_seconds
+        run["marks"] = self._marks_for(run_id)
+        if include_logs:
+            run["logs"] = self._logs_for(run_id)
         return run
+
+    def heater_on_seconds_for(self, run_id: int, elapsed_seconds: float) -> list[float]:
+        """Heater time for one run without copying its sample log into Python."""
+
+        with self._connect() as connection:
+            return _heater_on_seconds(connection, run_id, elapsed_seconds)
+
+    def chart_samples(self, run_id: int, after_id: int = 0) -> list[dict] | None:
+        """Readings for the run chart, newer than ``after_id``.
+
+        Cooldown uses its own clock, so those rows stay off this series.
+        None when the run does not exist.
+        """
+
+        with self._connect() as connection:
+            found = connection.execute("SELECT 1 FROM runs WHERE id = ?", (run_id,)).fetchone()
+            if found is None:
+                return None
+            rows = connection.execute(
+                """
+                SELECT id, elapsed_seconds, temps_f, target_temp_f, phase
+                FROM samples
+                WHERE run_id = ? AND id > ? AND phase != 'cooldown'
+                ORDER BY id
+                """,
+                (run_id, max(0, int(after_id))),
+            ).fetchall()
+        return [_chart_sample(row) for row in rows]
+
+    def review_window(
+        self,
+        run_id: int,
+        *,
+        limit: int,
+        log_offset: int = 0,
+        sample_offset: int = 0,
+        from_elapsed: float | None = None,
+        to_elapsed: float | None = None,
+        clock: str = "run",
+        events: list[str] | None = None,
+        phases: list[str] | None = None,
+        tail: bool = False,
+    ) -> dict | None:
+        """One page of the control log and the samples in the same stretch.
+
+        With no ``from_elapsed``, the page of control-log rows chooses the
+        stretch. With both ends set, that range is the stretch and both logs
+        are paged inside it. None when the run does not exist.
+        """
+
+        custom = from_elapsed is not None and to_elapsed is not None
+        with self._connect() as connection:
+            found = connection.execute("SELECT 1 FROM runs WHERE id = ?", (run_id,)).fetchone()
+            if found is None:
+                return None
+            bounds = _review_bounds(connection, run_id)
+            where, params = _log_where(
+                run_id,
+                events or [],
+                phases or [],
+                from_elapsed if custom else None,
+                to_elapsed if custom else None,
+                clock if custom else None,
+            )
+            total = int(
+                connection.execute(
+                    f"SELECT COUNT(*) AS n FROM run_logs WHERE {where}",
+                    params,
+                ).fetchone()["n"]
+            )
+            offset = _page_offset(total, limit, log_offset, tail)
+            rows = connection.execute(
+                f"""
+                SELECT id, recorded_at, elapsed_seconds, event, message, detail
+                FROM run_logs
+                WHERE {where}
+                ORDER BY id
+                LIMIT ? OFFSET ?
+                """,
+                (*params, limit, offset),
+            ).fetchall()
+            logs = [_log_dict(row) for row in rows]
+            if custom:
+                window = _custom_window(float(from_elapsed), float(to_elapsed), clock)
+            else:
+                window = _window_from_logs(logs)
+            sample_where, sample_params = _sample_where(run_id, window)
+            sample_total = int(
+                connection.execute(
+                    f"SELECT COUNT(*) AS n FROM samples WHERE {sample_where}",
+                    sample_params,
+                ).fetchone()["n"]
+            )
+            samples_offset = _page_offset(sample_total, limit, sample_offset, False)
+            sample_rows = connection.execute(
+                f"""
+                SELECT *
+                FROM samples
+                WHERE {sample_where}
+                ORDER BY CASE WHEN phase = 'cooldown' THEN 1 ELSE 0 END, elapsed_seconds, id
+                LIMIT ? OFFSET ?
+                """,
+                (*sample_params, limit, samples_offset),
+            ).fetchall()
+        return {
+            "mode": "custom" if custom else "page",
+            "limit": int(limit),
+            "bounds": bounds,
+            "window": window,
+            "logs": {"rows": logs, "total": total, "offset": offset},
+            "samples": {
+                "rows": [_sample_dict(row) for row in sample_rows],
+                "total": sample_total,
+                "offset": samples_offset,
+            },
+        }
 
     def claim_open_cooldown(self) -> dict | None:
         """Return the cooldown still in progress, and drop any older ones."""
@@ -638,6 +1076,164 @@ class Store:
                 )
         return self.get_run(keep_id)
 
+    def add_mark(self, run_id: int, name: str, elapsed_seconds: float) -> None:
+        """Record one named chart line. A second write of the same name is ignored."""
+
+        with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT 1 FROM run_marks WHERE run_id = ? AND name = ?",
+                (run_id, name),
+            ).fetchone()
+            if existing is not None:
+                return
+            connection.execute(
+                """
+                INSERT INTO run_marks (run_id, name, elapsed_seconds, recorded_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (run_id, name, round(float(elapsed_seconds), 2), utc_now()),
+            )
+
+    def add_run_log(
+        self,
+        run_id: int,
+        elapsed_seconds: float | None,
+        event: str,
+        message: str,
+        detail: dict | None = None,
+    ) -> None:
+        """Attach one diagnostic line to a run.
+
+        ``elapsed_seconds`` is the run clock, or the cooldown clock once the
+        pot is cooling. A line written after the run has closed, such as a
+        late analysis, uses the elapsed time already stored on the run.
+        """
+
+        with self._connect() as connection:
+            if elapsed_seconds is None:
+                row = connection.execute(
+                    "SELECT elapsed_seconds FROM runs WHERE id = ?",
+                    (run_id,),
+                ).fetchone()
+                if row is None:
+                    return
+                elapsed_seconds = float(row["elapsed_seconds"])
+            connection.execute(
+                """
+                INSERT INTO run_logs (
+                    run_id, recorded_at, elapsed_seconds, event, message, detail
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    utc_now(),
+                    round(float(elapsed_seconds), 2),
+                    event,
+                    message,
+                    json.dumps(detail or {}),
+                ),
+            )
+
+    def run_kind(self, run_id: int) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT kind FROM runs WHERE id = ?", (run_id,)).fetchone()
+        if row is None:
+            return None
+        return row["kind"] or "run"
+
+    def run_logs(self, run_id: int, after_id: int = 0) -> list[dict] | None:
+        """Control-log lines with an id above ``after_id``. None if the run is missing."""
+
+        with self._connect() as connection:
+            found = connection.execute("SELECT 1 FROM runs WHERE id = ?", (run_id,)).fetchone()
+            if found is None:
+                return None
+            rows = connection.execute(
+                """
+                SELECT id, recorded_at, elapsed_seconds, event, message, detail
+                FROM run_logs
+                WHERE run_id = ? AND id > ?
+                ORDER BY id
+                """,
+                (run_id, max(0, int(after_id))),
+            ).fetchall()
+        return [_log_dict(row) for row in rows]
+
+    def add_console_line(self, run_id: int, line: str) -> None:
+        """Attach one console line to a run. A missing run is ignored."""
+
+        with self._connect() as connection:
+            found = connection.execute("SELECT 1 FROM runs WHERE id = ?", (run_id,)).fetchone()
+            if found is None:
+                return
+            connection.execute(
+                """
+                INSERT INTO console_logs (run_id, recorded_at, line)
+                VALUES (?, ?, ?)
+                """,
+                (run_id, utc_now(), line),
+            )
+
+    def console_lines(self, run_id: int) -> list[str] | None:
+        """Console lines for a run, in the order they were written. None if it is missing."""
+
+        with self._connect() as connection:
+            found = connection.execute("SELECT 1 FROM runs WHERE id = ?", (run_id,)).fetchone()
+            if found is None:
+                return None
+            rows = connection.execute(
+                """
+                SELECT line FROM console_logs
+                WHERE run_id = ?
+                ORDER BY id
+                """,
+                (run_id,),
+            ).fetchall()
+        return [row["line"] for row in rows]
+
+    def _logs_for(self, run_id: int) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, recorded_at, elapsed_seconds, event, message, detail
+                FROM run_logs
+                WHERE run_id = ?
+                ORDER BY id
+                """,
+                (run_id,),
+            ).fetchall()
+        return [_log_dict(row) for row in rows]
+
+    def append_analysis(self, run_id: int, entry: dict) -> None:
+        """Append one Grok comparison. The local fit is kept when Grok is absent."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT analysis FROM runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                return
+            items = _json_list(row["analysis"])
+            items.append(entry)
+            connection.execute(
+                "UPDATE runs SET analysis = ? WHERE id = ?",
+                (json.dumps(items), run_id),
+            )
+
+    def _marks_for(self, run_id: int) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT name, elapsed_seconds, recorded_at
+                FROM run_marks
+                WHERE run_id = ?
+                ORDER BY id
+                """,
+                (run_id,),
+            ).fetchall()
+        return [_mark_dict(row) for row in rows]
+
     def list_runs(
         self,
         live_run: dict | None = None,
@@ -647,35 +1243,96 @@ class Store:
             run_rows = connection.execute(
                 "SELECT * FROM runs ORDER BY started_at DESC, id DESC"
             ).fetchall()
-            sample_rows = connection.execute(
-                "SELECT * FROM samples ORDER BY run_id, elapsed_seconds, id"
+            # Heater time is the gap between samples. Summing it here keeps the
+            # dashboard from copying every reading into Python once a second.
+            on_rows = connection.execute(
+                """
+                WITH ordered AS (
+                    SELECT run_id, elapsed_seconds, heaters_on,
+                           LEAD(elapsed_seconds) OVER (
+                               PARTITION BY run_id ORDER BY elapsed_seconds, id
+                           ) AS next_elapsed
+                    FROM samples
+                    WHERE phase != 'cooldown'
+                )
+                SELECT run_id,
+                       SUM(
+                           CASE
+                               WHEN json_extract(heaters_on, '$[0]') = 1 AND next_elapsed IS NOT NULL
+                               THEN max(0, next_elapsed - elapsed_seconds)
+                               ELSE 0
+                           END
+                       ) AS on0,
+                       SUM(
+                           CASE
+                               WHEN json_extract(heaters_on, '$[1]') = 1 AND next_elapsed IS NOT NULL
+                               THEN max(0, next_elapsed - elapsed_seconds)
+                               ELSE 0
+                           END
+                       ) AS on1
+                FROM ordered
+                GROUP BY run_id
+                """
+            ).fetchall()
+            tail_rows = connection.execute(
+                """
+                SELECT run_id, elapsed_seconds, heaters_on
+                FROM (
+                    SELECT run_id, elapsed_seconds, heaters_on,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY run_id ORDER BY elapsed_seconds DESC, id DESC
+                           ) AS n
+                    FROM samples
+                    WHERE phase != 'cooldown'
+                )
+                WHERE n = 1
+                """
+            ).fetchall()
+            mark_rows = connection.execute(
+                """
+                SELECT run_id, name, elapsed_seconds, recorded_at
+                FROM run_marks
+                ORDER BY run_id, id
+                """
             ).fetchall()
 
-        samples_by_run: dict[int, list[dict]] = {}
-        for row in sample_rows:
-            samples_by_run.setdefault(int(row["run_id"]), []).append(_sample_dict(row))
+        on_by_run = {
+            int(row["run_id"]): [float(row["on0"] or 0.0), float(row["on1"] or 0.0)]
+            for row in on_rows
+        }
+        tail_by_run = {int(row["run_id"]): row for row in tail_rows}
+        marks_by_run: dict[int, list[dict]] = {}
+        for row in mark_rows:
+            marks_by_run.setdefault(int(row["run_id"]), []).append(_mark_dict(row))
 
         runs = []
         for row in run_rows:
             run = _run_dict(row)
+            run["marks"] = marks_by_run.get(run["id"], [])
             if live_run is not None and live_run["id"] == run["id"]:
                 run["elapsed_seconds"] = round(float(live_run["elapsed_seconds"]), 2)
                 run["status"] = live_run["status"]
             if live_cooldown is not None and live_cooldown["id"] == run["id"]:
                 run["cooldown_seconds"] = round(float(live_cooldown["cooldown_seconds"]), 2)
                 run["cooldown_status"] = live_cooldown["cooldown_status"]
-            samples = samples_by_run.get(run["id"], [])
-            run["heater_on_seconds"] = heater_on_seconds(samples, run["elapsed_seconds"])
+            totals = list(on_by_run.get(run["id"], [0.0, 0.0]))
+            tail = tail_by_run.get(run["id"])
+            if tail is not None:
+                dt = max(0.0, float(run["elapsed_seconds"]) - float(tail["elapsed_seconds"]))
+                _add_on_time(totals, json.loads(tail["heaters_on"]), dt)
+            run["heater_on_seconds"] = totals
             runs.append(run)
 
-        production = [run for run in runs if run["kind"] != "calibration"]
+        production = [run for run in runs if run["kind"] == "run"]
+        calibration_count = sum(1 for run in runs if run["kind"] == "calibration")
         finished = [run for run in production if run["status"] == "stopped"]
         average = 0.0
         if finished:
             average = sum(run["elapsed_seconds"] for run in finished) / len(finished)
+        # Every finished cooldown, including a calibration.
         completed_cooldowns = [
             float(run["cooldown_seconds"])
-            for run in production
+            for run in runs
             if run["cooldown_status"] == "complete" and run["cooldown_seconds"] is not None
         ]
         average_cooldown = None
@@ -688,7 +1345,7 @@ class Store:
         return {
             "stats": {
                 "total_runs": len(production),
-                "calibration_runs": len(runs) - len(production),
+                "calibration_runs": calibration_count,
                 "average_duration_seconds": average,
                 "average_cooldown_seconds": average_cooldown,
                 "heater_on_seconds": heater_totals,
@@ -710,11 +1367,23 @@ class Store:
                 (utc_now(),),
             )
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path)
+    @contextmanager
+    def _connect(self):
+        """One short transaction. The file stays in WAL so a chart read does not block a sample write."""
+
+        connection = sqlite3.connect(self.path, timeout=5.0)
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+        try:
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute("PRAGMA synchronous = NORMAL")
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def _insert_settings(self, connection: sqlite3.Connection, settings: Settings) -> None:
         connection.execute(
@@ -722,13 +1391,49 @@ class Store:
             INSERT INTO settings (
                 id, heater_count, sensor_count, heater_names, sensor_names,
                 target_temp_f, heater_min_on_seconds, heater_min_off_seconds,
-                early_cutoff_f, cabinet_limit_f, learned_coast_f, learned_coast_seconds,
+                cabinet_limit_f, learned_coast_f, learned_coast_seconds,
                 learned_cooldown_f_per_min, charge_gallons, heaters, sensors, setup_complete, gpio,
-                update_source
-            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                update_source, thermal_model, max_program_hours, program_mode,
+                program_continuous, program_duration_seconds
+            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             _settings_values(settings),
         )
+
+
+def _nearest_timeline_row(
+    connection: sqlite3.Connection,
+    moment: int,
+    start_ms: int,
+    end_ms: int,
+) -> sqlite3.Row | None:
+    after = connection.execute(
+        """
+        SELECT id, recorded_ms, temps_f, target_temp_f
+        FROM timeline
+        WHERE recorded_ms >= ? AND recorded_ms <= ?
+        ORDER BY recorded_ms, id
+        LIMIT 1
+        """,
+        (moment, end_ms),
+    ).fetchone()
+    before = connection.execute(
+        """
+        SELECT id, recorded_ms, temps_f, target_temp_f
+        FROM timeline
+        WHERE recorded_ms <= ? AND recorded_ms >= ?
+        ORDER BY recorded_ms DESC, id DESC
+        LIMIT 1
+        """,
+        (moment, start_ms),
+    ).fetchone()
+    if after is None:
+        return before
+    if before is None:
+        return after
+    if abs(int(after["recorded_ms"]) - moment) < abs(int(before["recorded_ms"]) - moment):
+        return after
+    return before
 
 
 def heater_on_seconds(samples: list[dict], elapsed_seconds: float) -> list[float]:
@@ -784,6 +1489,229 @@ def _run_dict(row: sqlite3.Row) -> dict:
         "calibration_settled": bool(row["calibration_settled"])
         if "calibration_settled" in row.keys() and row["calibration_settled"]
         else False,
+        "thermal_model": _json_object(row["thermal_model"]) if "thermal_model" in row.keys() else None,
+        "analysis": _json_list(row["analysis"]) if "analysis" in row.keys() else [],
+        "program_mode": row["program_mode"]
+        if "program_mode" in row.keys() and row["program_mode"]
+        else None,
+        "program_continuous": _optional_bool(row, "program_continuous"),
+        "program_duration_seconds": _optional_int(row, "program_duration_seconds"),
+        "program_end": row["program_end"] if "program_end" in row.keys() and row["program_end"] else None,
+        "marks": [],
+    }
+
+
+def _heater_on_seconds(connection: sqlite3.Connection, run_id: int, elapsed_seconds: float) -> list[float]:
+    """Same estimate as :func:`heater_on_seconds`, summed in SQLite."""
+
+    row = connection.execute(
+        """
+        WITH ordered AS (
+            SELECT elapsed_seconds, heaters_on,
+                   LEAD(elapsed_seconds) OVER (
+                       ORDER BY elapsed_seconds, id
+                   ) AS next_elapsed
+            FROM samples
+            WHERE run_id = ? AND phase != 'cooldown'
+        )
+        SELECT
+            COALESCE(SUM(
+                CASE
+                    WHEN json_extract(heaters_on, '$[0]') = 1 AND next_elapsed IS NOT NULL
+                    THEN max(0, next_elapsed - elapsed_seconds)
+                    ELSE 0
+                END
+            ), 0) AS on0,
+            COALESCE(SUM(
+                CASE
+                    WHEN json_extract(heaters_on, '$[1]') = 1 AND next_elapsed IS NOT NULL
+                    THEN max(0, next_elapsed - elapsed_seconds)
+                    ELSE 0
+                END
+            ), 0) AS on1
+        FROM ordered
+        """,
+        (run_id,),
+    ).fetchone()
+    totals = [float(row["on0"] or 0), float(row["on1"] or 0)]
+    tail = connection.execute(
+        """
+        SELECT elapsed_seconds, heaters_on
+        FROM samples
+        WHERE run_id = ? AND phase != 'cooldown'
+        ORDER BY elapsed_seconds DESC, id DESC
+        LIMIT 1
+        """,
+        (run_id,),
+    ).fetchone()
+    if tail is None:
+        return [0.0, 0.0]
+    gap = max(0.0, float(elapsed_seconds) - float(tail["elapsed_seconds"]))
+    _add_on_time(totals, json.loads(tail["heaters_on"]), gap)
+    return totals
+
+
+def _chart_sample(row: sqlite3.Row) -> dict:
+    return {
+        "id": int(row["id"]),
+        "elapsed_seconds": round(float(row["elapsed_seconds"]), 2),
+        "temps_f": json.loads(row["temps_f"]),
+        "target_temp_f": _stored_target(row["target_temp_f"]),
+        "phase": row["phase"] if row["phase"] else "run",
+    }
+
+
+def _review_bounds(connection: sqlite3.Connection, run_id: int) -> dict:
+    row = connection.execute(
+        """
+        SELECT
+            MIN(CASE WHEN phase != 'cooldown' THEN elapsed_seconds END) AS run_from,
+            MAX(CASE WHEN phase != 'cooldown' THEN elapsed_seconds END) AS run_to,
+            MIN(CASE WHEN phase = 'cooldown' THEN elapsed_seconds END) AS cooldown_from,
+            MAX(CASE WHEN phase = 'cooldown' THEN elapsed_seconds END) AS cooldown_to
+        FROM samples
+        WHERE run_id = ?
+        """,
+        (run_id,),
+    ).fetchone()
+    bounds = {
+        "from": _optional_round(row["run_from"]),
+        "to": _optional_round(row["run_to"]),
+        "cooldown_from": _optional_round(row["cooldown_from"]),
+        "cooldown_to": _optional_round(row["cooldown_to"]),
+    }
+    if bounds["from"] is None and bounds["cooldown_from"] is None:
+        logs = connection.execute(
+            """
+            SELECT MIN(elapsed_seconds) AS start_at, MAX(elapsed_seconds) AS end_at
+            FROM run_logs
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        bounds["from"] = _optional_round(logs["start_at"])
+        bounds["to"] = _optional_round(logs["end_at"])
+    return bounds
+
+
+def _optional_round(value: object) -> float | None:
+    if value is None:
+        return None
+    return round(float(value), 2)
+
+
+def _page_offset(total: int, limit: int, offset: int, tail: bool) -> int:
+    if total <= 0 or limit <= 0:
+        return 0
+    last = ((int(total) - 1) // int(limit)) * int(limit)
+    if tail:
+        return last
+    if offset < 0:
+        return 0
+    if offset > last:
+        return last
+    return int(offset)
+
+
+_COOLDOWN_LOG = (
+    "(json_extract(detail, '$.path') = 'cooldown' "
+    "OR json_extract(detail, '$.phase') = 'cooldown')"
+)
+
+
+def _log_where(
+    run_id: int,
+    events: list[str],
+    phases: list[str],
+    from_elapsed: float | None,
+    to_elapsed: float | None,
+    clock: str | None,
+) -> tuple[str, list[object]]:
+    clauses = ["run_id = ?"]
+    params: list[object] = [run_id]
+    if events:
+        marks = ", ".join("?" for _ in events)
+        clauses.append(f"event IN ({marks})")
+        params.extend(events)
+    if phases:
+        marks = ", ".join("?" for _ in phases)
+        clauses.append(
+            "COALESCE(json_extract(detail, '$.path'), json_extract(detail, '$.phase'), '') "
+            f"IN ({marks})"
+        )
+        params.extend(phases)
+    if from_elapsed is not None and to_elapsed is not None:
+        clauses.append("elapsed_seconds >= ? AND elapsed_seconds <= ?")
+        params.extend([from_elapsed, to_elapsed])
+    if clock == "run":
+        clauses.append(f"NOT {_COOLDOWN_LOG}")
+    elif clock == "cooldown":
+        clauses.append(_COOLDOWN_LOG)
+    return " AND ".join(clauses), params
+
+
+def _is_cooldown_log(detail: dict) -> bool:
+    return detail.get("path") == "cooldown" or detail.get("phase") == "cooldown"
+
+
+def _window_from_logs(logs: list[dict]) -> dict:
+    run_times = []
+    cool_times = []
+    for item in logs:
+        elapsed = round(float(item["elapsed_seconds"]), 2)
+        if _is_cooldown_log(item.get("detail") or {}):
+            cool_times.append(elapsed)
+        else:
+            run_times.append(elapsed)
+    return {
+        "from": min(run_times) if run_times else None,
+        "to": max(run_times) if run_times else None,
+        "cooldown_from": min(cool_times) if cool_times else None,
+        "cooldown_to": max(cool_times) if cool_times else None,
+    }
+
+
+def _custom_window(start: float, end: float, clock: str) -> dict:
+    window = {"from": None, "to": None, "cooldown_from": None, "cooldown_to": None}
+    span = (round(float(start), 2), round(float(end), 2))
+    if clock in {"run", "both"}:
+        window["from"], window["to"] = span
+    if clock in {"cooldown", "both"}:
+        window["cooldown_from"], window["cooldown_to"] = span
+    return window
+
+
+def _sample_where(run_id: int, window: dict) -> tuple[str, list[object]]:
+    parts = []
+    params: list[object] = [run_id]
+    if window["from"] is not None and window["to"] is not None:
+        parts.append("(phase != 'cooldown' AND elapsed_seconds >= ? AND elapsed_seconds <= ?)")
+        params.extend([window["from"], window["to"]])
+    if window["cooldown_from"] is not None and window["cooldown_to"] is not None:
+        parts.append("(phase = 'cooldown' AND elapsed_seconds >= ? AND elapsed_seconds <= ?)")
+        params.extend([window["cooldown_from"], window["cooldown_to"]])
+    if not parts:
+        return "run_id = ? AND 0", params
+    return f"run_id = ? AND ({' OR '.join(parts)})", params
+
+
+def _log_dict(row: sqlite3.Row) -> dict:
+    detail: dict = {}
+    raw = row["detail"]
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            parsed = None
+        if isinstance(parsed, dict):
+            detail = parsed
+    return {
+        "id": int(row["id"]),
+        "recorded_at": row["recorded_at"],
+        "elapsed_seconds": round(float(row["elapsed_seconds"]), 2),
+        "event": row["event"],
+        "message": row["message"],
+        "detail": detail,
     }
 
 
@@ -824,6 +1752,9 @@ def _migrate(connection: sqlite3.Connection) -> None:
     _add_column(connection, "runs", "coast_seconds", "REAL")
     _add_column(connection, "runs", "cooldown_f_per_min", "REAL")
     _add_column(connection, "runs", "calibration_settled", "INTEGER")
+    _add_column(connection, "settings", "thermal_model")
+    _add_column(connection, "runs", "thermal_model")
+    _add_column(connection, "runs", "analysis")
     if _table_exists(connection, "samples"):
         _add_column(connection, "samples", "phase")
     settings_columns = {row[1] for row in connection.execute("PRAGMA table_info(settings)")}
@@ -831,6 +1762,19 @@ def _migrate(connection: sqlite3.Connection) -> None:
     _add_column(connection, "settings", "setup_complete", "INTEGER NOT NULL DEFAULT 0")
     _add_column(connection, "settings", "gpio")
     _add_column(connection, "settings", "update_source", "TEXT NOT NULL DEFAULT 'main'")
+    _add_column(connection, "settings", "max_program_hours", "INTEGER NOT NULL DEFAULT 24")
+    _add_column(connection, "settings", "program_mode", "TEXT NOT NULL DEFAULT 'hold'")
+    _add_column(connection, "settings", "program_continuous", "INTEGER NOT NULL DEFAULT 1")
+    _add_column(
+        connection,
+        "settings",
+        "program_duration_seconds",
+        "INTEGER NOT NULL DEFAULT 3600",
+    )
+    _add_column(connection, "runs", "program_mode")
+    _add_column(connection, "runs", "program_continuous", "INTEGER")
+    _add_column(connection, "runs", "program_duration_seconds", "INTEGER")
+    _add_column(connection, "runs", "program_end")
     _swap_documented_led_pins(connection)
     if not adding_setup or not _table_exists(connection, "runs"):
         return
@@ -926,6 +1870,48 @@ def _add_column(
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
 
 
+def _mark_dict(row: sqlite3.Row) -> dict:
+    return {
+        "name": row["name"],
+        "elapsed_seconds": round(float(row["elapsed_seconds"]), 2),
+        "recorded_at": row["recorded_at"],
+    }
+
+
+def _json_object(value: object) -> dict | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
+
+
+def _json_list(value: object) -> list:
+    if isinstance(value, list):
+        return list(value)
+    if not isinstance(value, str) or not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return parsed
+
+
+def _thermal_document(value: object) -> dict | None:
+    return _json_object(value)
+
+
 def _optional_float(row: sqlite3.Row, column: str) -> float | None:
     if column not in row.keys() or row[column] is None:
         return None
@@ -938,6 +1924,12 @@ def _optional_int(row: sqlite3.Row, column: str) -> int | None:
     return int(row[column])
 
 
+def _optional_bool(row: sqlite3.Row, column: str) -> bool | None:
+    if column not in row.keys() or row[column] is None:
+        return None
+    return bool(row[column])
+
+
 def _settings_values(settings: Settings) -> tuple:
     return (
         settings.heater_count,
@@ -947,7 +1939,6 @@ def _settings_values(settings: Settings) -> tuple:
         settings.target_temp_f,
         settings.heater_min_on_seconds,
         settings.heater_min_off_seconds,
-        settings.early_cutoff_f,
         settings.cabinet_limit_f,
         settings.learned_coast_f,
         settings.learned_coast_seconds,
@@ -958,6 +1949,11 @@ def _settings_values(settings: Settings) -> tuple:
         1 if settings.setup_complete else 0,
         json.dumps((settings.gpio or default_gpio()).to_dict()),
         settings.update_source,
+        None if settings.thermal_model is None else json.dumps(settings.thermal_model),
+        settings.max_program_hours,
+        settings.program_mode,
+        1 if settings.program_continuous else 0,
+        settings.program_duration_seconds,
     )
 
 
@@ -979,7 +1975,6 @@ def _settings_from_row(row: sqlite3.Row) -> Settings:
         heater_min_off_seconds=_stored_float(
             row, "heater_min_off_seconds", HEATER_MIN_OFF_DEFAULT_SECONDS
         ),
-        early_cutoff_f=_stored_float(row, "early_cutoff_f", EARLY_CUTOFF_DEFAULT_F),
         cabinet_limit_f=_stored_cabinet_limit(row),
         learned_coast_f=_optional_float(row, "learned_coast_f"),
         learned_coast_seconds=_optional_float(row, "learned_coast_seconds"),
@@ -988,6 +1983,11 @@ def _settings_from_row(row: sqlite3.Row) -> Settings:
         setup_complete=_stored_flag(row, "setup_complete"),
         gpio=gpio,
         update_source=_stored_update_source(row),
+        thermal_model=_json_object(row["thermal_model"]) if "thermal_model" in row.keys() else None,
+        max_program_hours=_stored_max_program_hours(row),
+        program_mode=_stored_program_mode(row),
+        program_continuous=_stored_program_continuous(row),
+        program_duration_seconds=_stored_program_duration(row),
     )
 
 
@@ -1322,6 +2322,64 @@ def _stored_update_source(row: sqlite3.Row) -> str:
     return source
 
 
+def _program_value(parse, value: object, default: object) -> object:
+    if value is None:
+        return default
+    try:
+        return parse(value)
+    except ValueError as exc:
+        raise SettingsError(str(exc)) from exc
+
+
+def _max_program_hours(value: object) -> int:
+    return _program_value(parse_max_program_hours, value, DEFAULT_MAX_PROGRAM_HOURS)
+
+
+def _program_mode(value: object) -> str:
+    return _program_value(parse_program_mode, value, HOLD_MODE)
+
+
+def _program_continuous(value: object) -> bool:
+    return _program_value(parse_program_continuous, value, True)
+
+
+def _program_duration(value: object) -> int:
+    return _program_value(parse_program_duration, value, DEFAULT_DURATION_SECONDS)
+
+
+def _stored_max_program_hours(row: sqlite3.Row) -> int:
+    if "max_program_hours" not in row.keys() or row["max_program_hours"] is None:
+        return DEFAULT_MAX_PROGRAM_HOURS
+    try:
+        return parse_max_program_hours(int(row["max_program_hours"]))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_PROGRAM_HOURS
+
+
+def _stored_program_mode(row: sqlite3.Row) -> str:
+    if "program_mode" not in row.keys() or not row["program_mode"]:
+        return HOLD_MODE
+    try:
+        return parse_program_mode(str(row["program_mode"]))
+    except ValueError:
+        return HOLD_MODE
+
+
+def _stored_program_continuous(row: sqlite3.Row) -> bool:
+    if "program_continuous" not in row.keys() or row["program_continuous"] is None:
+        return True
+    return bool(row["program_continuous"])
+
+
+def _stored_program_duration(row: sqlite3.Row) -> int:
+    if "program_duration_seconds" not in row.keys() or row["program_duration_seconds"] is None:
+        return DEFAULT_DURATION_SECONDS
+    try:
+        return parse_program_duration(int(row["program_duration_seconds"]))
+    except (TypeError, ValueError):
+        return DEFAULT_DURATION_SECONDS
+
+
 def _flag(value: object) -> bool:
     if value is None:
         return False
@@ -1416,19 +2474,6 @@ def _optional_setting(value: object, field: str, low: float, high: float) -> flo
     if number < low or number > high:
         raise SettingsError(f"{field} must be between {low:g} and {high:g}")
     return number
-
-
-def _early_cutoff(value: object) -> float:
-    if value is None:
-        return EARLY_CUTOFF_DEFAULT_F
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise SettingsError("early_cutoff_f must be a number of degrees")
-    degrees = round(float(value), 2)
-    if degrees < EARLY_CUTOFF_MIN_F or degrees > EARLY_CUTOFF_MAX_F:
-        raise SettingsError(
-            f"early_cutoff_f must be between {EARLY_CUTOFF_MIN_F:g} and {EARLY_CUTOFF_MAX_F:g}"
-        )
-    return degrees
 
 
 def _stored_target(value: object) -> int:

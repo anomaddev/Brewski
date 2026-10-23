@@ -135,14 +135,19 @@ def run_dev() -> None:
 
 
 def _build_runtime(dev: bool) -> tuple[Controller, object]:
+    from brewski.lcd import NullDisplay, open_display, startup_lines
+
     store = Store(data_directory(dev))
     if dev:
         source = DummySource()
+        display = NullDisplay()
     else:
         from brewski.sources.pi import PiSource
 
-        source = PiSource(store)
-    controller = Controller(store, source)
+        display = open_display(store.get_settings())
+        display.write(startup_lines("Starting"))
+        source = PiSource(store, status=lambda step: display.write(startup_lines(step)))
+    controller = Controller(store, source, display=display)
     return controller, create_app(controller)
 
 

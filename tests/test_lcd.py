@@ -14,7 +14,10 @@ from brewski.lcd import (
     open_display,
     progress_lines,
     prompt_lines,
+    startup_lines,
     status_lines,
+    suite_result_lines,
+    suite_run_lines,
 )
 from brewski.sources.dummy import DummySource
 from brewski.store import I2cDevice, default_settings
@@ -66,6 +69,16 @@ def test_two_probe_line_and_heater_padding():
     assert len(fault[2]) == COLUMNS
 
 
+def test_an_eta_shares_the_target_line():
+    heating = _screen(eta_seconds=12 * 60 + 40, eta_kind="target")
+    assert heating[1] == "165 F           ~12m"
+    assert len(heating[1]) == COLUMNS
+    cooling = _screen(mode="cooling", eta_seconds=8 * 60, eta_kind="cool", probes=[("Boiler", 150.0)])
+    assert cooling[1] == "165 F        cool 8m"
+    assert len(cooling[1]) == COLUMNS
+    assert _screen()[1] == "Target:        165 F"
+
+
 def test_shorter_target_keeps_the_degree_flush_right():
     lines = _screen(target_f=90, probes=[("Boiler", 90.0)])
     assert lines[1] == "Target:         90 F"
@@ -100,7 +113,7 @@ def test_calibration_steps_name_the_climb_the_fall_and_the_result():
         calibration_rise_f=12.4,
         elapsed_seconds=90,
     )
-    assert coasting[0] == "Coasting:   00:01:30"
+    assert coasting[0] == "Coast:      00:01:30"
     assert coasting[1] == "Rise:        +12.4 F"
     assert coasting[2] == "Boiler:      168.5 F"
     assert all(len(line) == COLUMNS for line in coasting)
@@ -111,7 +124,7 @@ def test_calibration_steps_name_the_climb_the_fall_and_the_result():
         calibration_peak_f=15.1,
         elapsed_seconds=100,
     )
-    assert falling[0] == "Falling:    00:01:40"
+    assert falling[0] == "Momentum:   00:01:40"
     assert falling[1] == "Peak:        +15.1 F"
     rated = _screen(
         calibrating=True,
@@ -124,7 +137,7 @@ def test_calibration_steps_name_the_climb_the_fall_and_the_result():
 
     paused = _screen(mode="paused", calibrating=True, calibration_step="coasting", elapsed_seconds=90)
     assert paused[0] == "Paused:     00:01:30"
-    assert paused[1] == "Step:       Coasting"
+    assert paused[1] == "Step:          Coast"
     assert all(len(line) == COLUMNS for line in paused)
 
     saved = _screen(mode="cooling", calibration_peak_f=15.1, calibration_rate_f=2.4, elapsed_seconds=12)
@@ -138,9 +151,49 @@ def test_calibration_steps_name_the_climb_the_fall_and_the_result():
     assert len(coast_only[1]) == COLUMNS
 
 
+def test_initial_heating_names_the_phase_and_holds_the_slope():
+    settle = suite_run_lines("settle", 2, [("Boiler", 70.0)], [(True, False), (True, False)])
+    assert settle == [
+        "Settle:     00:00:02",
+        "Heaters off",
+        "Boiler:       70.0 F",
+        "H1: OFF      H2: OFF",
+    ]
+    assert all(len(line) <= COLUMNS for line in settle)
+
+    heating = suite_run_lines("heating", 12, [("Boiler", 74.2)], [(True, True), (True, False)])
+    assert heating[0] == "Heat on:    00:00:12"
+    assert heating[1] == "On for 3:00"
+    assert heating[3] == "H1: ON       H2: OFF"
+    assert all(len(line) <= COLUMNS for line in heating)
+
+    coasting = suite_run_lines("coast", 40, [("Boiler", 90.0)], [(True, False), (True, False)])
+    assert coasting[0] == "Heat off:   00:00:40"
+    assert coasting[1] == "Off for 3:00"
+    assert all(len(line) <= COLUMNS for line in coasting)
+
+    done = suite_result_lines({"found": True, "on_seconds": 180, "off_seconds": 180})
+    assert done == [
+        "Recording saved",
+        "On:             3:00",
+        "Off:            3:00",
+        "STOP end",
+    ]
+    assert all(len(line) <= COLUMNS for line in done)
+
+    missed = suite_result_lines({"found": False, "stopped": True, "on_seconds": 24})
+    assert missed[0] == "Stopped early"
+    assert missed[1] == "On:             0:24"
+    assert missed[3] == "STOP end"
+
+    early = suite_result_lines({"found": False, "stopped": True})
+    assert early[0] == "Stopped early"
+    assert early[3] == "STOP end"
+
+
 def test_idle_paused_and_cooling():
-    idle = _screen(mode="idle")
-    assert idle[0] == "Idle:"
+    idle = _screen(mode="idle", program_mode="hold")
+    assert idle[0] == "Hold:"
     assert idle[1] == "Target:        165 F"
     assert idle[3] == "H1: OFF      H2: OFF"
 
@@ -151,6 +204,21 @@ def test_idle_paused_and_cooling():
     cooling = _screen(mode="cooling", elapsed_seconds=5, probes=[("Boiler", 150.0)])
     assert cooling[0] == "Cooling:    00:00:05"
     assert len(cooling[0]) == COLUMNS
+
+    holding = _screen(mode="running", hold_remaining_seconds=125, target_f=165)
+    assert holding[1].endswith("hold 2m")
+    assert "165 F" in holding[1]
+    assert all(len(line) <= COLUMNS for line in holding)
+
+    # A lowered setpoint replaces the hold clock until the probe gets there.
+    step_down = _screen(
+        mode="running",
+        hold_remaining_seconds=125,
+        eta_seconds=8 * 60,
+        eta_kind="cool",
+        target_f=150,
+    )
+    assert step_down[1] == "150 F        cool 8m"
 
 
 def test_emergency_screens():
@@ -207,6 +275,29 @@ def test_prompt_and_progress_screens():
     assert done[0] == "Update complete"
     assert done[1] == "0.3.0"
     _lines_fit(done)
+
+
+def test_startup_lines_name_the_step_and_fit_the_panel():
+    lines = startup_lines("Checking for updates")
+    assert lines[0] == "Brewski"
+    assert lines[1] == "Checking for updates"
+    assert lines[2:] == ["", ""]
+    _lines_fit(lines)
+    _lines_fit(startup_lines("Waiting for network"))
+
+
+def test_closing_without_clear_leaves_the_glass():
+    class _Lcd:
+        def __init__(self) -> None:
+            self.cleared: bool | None = None
+
+        def close(self, clear: bool = True) -> None:
+            self.cleared = clear
+
+    lcd = _Lcd()
+    display = HardwareDisplay(lcd)
+    display.close(clear=False)
+    assert lcd.cleared is False
 
 
 def test_display_stays_closed_until_setup_saves_the_pins():
@@ -288,6 +379,28 @@ def test_controller_opens_the_saved_pins_after_setup(store, source, monkeypatch)
     assert controller._display.lines[0] == "Calibrate:     START"
 
 
+def test_controller_reuses_a_display_opened_before_startup(store, source, monkeypatch):
+    from brewski.store import merge_settings
+
+    store.save_settings(merge_settings(store.get_settings(), {"setup_complete": True}))
+    panel = NullDisplay()
+
+    def explode(_settings):
+        raise AssertionError("the startup display was opened again")
+
+    def open_panel(_settings):
+        assert panel.lines[1] == "Opening panel"
+        return None
+
+    monkeypatch.setattr("brewski.controller.open_display", explode)
+    monkeypatch.setattr("brewski.controller.open_panel", open_panel)
+    controller = Controller(store, source, display=panel)
+    assert panel.lines[0] == "Brewski"
+    assert panel.lines[1] == "Reading sensors"
+    controller._refresh_display()
+    assert controller._display is panel
+
+
 def test_lgpio_is_imported_from_a_writable_directory(tmp_path, monkeypatch):
     from brewski import lcd
 
@@ -303,6 +416,113 @@ def test_lgpio_is_imported_from_a_writable_directory(tmp_path, monkeypatch):
     assert lcd._ensure_lgpio() is True
     assert Path(seen["cwd"]) == tmp_path
     assert os.getcwd() == before
+
+
+def test_a_line_that_ends_early_still_paints_the_rows_under_it():
+    """RPLCD 1.3 raises once the cursor steps past the last column.
+
+    The result screen is shorter than the width on every row. Without
+    catching that, the title is sent and the slope never is, so the
+    heating text stays on the glass.
+    """
+
+    class _Lcd:
+        def __init__(self) -> None:
+            self._pos = (0, 0)
+            self.writes: list[tuple[tuple[int, int], str]] = []
+
+        @property
+        def cursor_pos(self) -> tuple[int, int]:
+            return self._pos
+
+        @cursor_pos.setter
+        def cursor_pos(self, value: tuple[int, int]) -> None:
+            if value[1] >= COLUMNS:
+                raise ValueError(f"Cursor position {value} invalid on a 4x20 LCD.")
+            self._pos = value
+
+        def write_string(self, text: str) -> None:
+            self.writes.append((self._pos, text))
+            if self._pos[1] + len(text) >= COLUMNS:
+                raise ValueError("Cursor position (0, 20) invalid on a 4x20 LCD.")
+
+    lcd = _Lcd()
+    display = HardwareDisplay(lcd)
+    display.write(
+        [
+            "Recording saved",
+            "On:             3:00",
+            "Off:            3:00",
+            "STOP end",
+        ]
+    )
+    painted = [""] * 4
+    for pos, text in lcd.writes:
+        painted[pos[0]] = (painted[pos[0]] + (" " * pos[1]))[: pos[1]] + text
+    assert [line.strip() for line in painted] == [
+        "Recording saved",
+        "On:             3:00",
+        "Off:            3:00",
+        "STOP end",
+    ]
+    assert lcd.cursor_pos == (3, COLUMNS - 1)
+
+
+def test_a_full_line_leaves_the_cursor_on_that_row():
+    """Column 20 of a 20x4 is the first cell of another row.
+
+    RPLCD steps there after the last character and does not raise when
+    automatic line breaks are off. The next reading is then drawn on the
+    wrong line.
+    """
+
+    # DDRAM: row 0 is 0x00, row 1 is 0x40, row 2 is 0x14, row 3 is 0x54.
+    offsets = (0x00, 0x40, COLUMNS, 0x40 + COLUMNS)
+
+    class _Lcd:
+        def __init__(self) -> None:
+            self.grid = [[" "] * COLUMNS for _ in range(4)]
+            self._pos = (0, 0)
+
+        @property
+        def cursor_pos(self) -> tuple[int, int]:
+            return self._pos
+
+        @cursor_pos.setter
+        def cursor_pos(self, value: tuple[int, int]) -> None:
+            row, col = value
+            if not 0 <= row < 4:
+                raise ValueError(f"Cursor position {value} invalid on a 4x20 LCD.")
+            address = offsets[row] + col
+            self._pos = _cell_at(address)
+
+        def write_string(self, text: str) -> None:
+            for char in text:
+                row, col = self._pos
+                if 0 <= row < 4 and 0 <= col < COLUMNS:
+                    self.grid[row][col] = char
+                self.cursor_pos = (row, col + 1)
+
+    lcd = _Lcd()
+    display = HardwareDisplay(lcd)
+    lines = ["Idle", "Target 165 F", "Boiler 76.4 F", "Heaters off"]
+    display.write(lines)
+    assert ["".join(row).rstrip() for row in lcd.grid] == lines
+    assert lcd.cursor_pos == (3, COLUMNS - 1)
+    lcd.grid[2][0] = "X"
+    display.write(["Idle", "Target 170 F", "Boiler 76.4 F", "Heaters off"])
+    assert lcd.grid[2][0] == "X"
+    assert "".join(lcd.grid[1]).rstrip() == "Target 170 F"
+
+
+def _cell_at(address: int) -> tuple[int, int]:
+    """Visual cell for one DDRAM address of a 20x4 module."""
+
+    spans = ((0, 0x00), (2, 0x14), (1, 0x40), (3, 0x54))
+    for row, start in spans:
+        if start <= address < start + COLUMNS:
+            return (row, address - start)
+    return (-1, address)
 
 
 def test_a_target_change_rewrites_only_that_row():
@@ -321,9 +541,9 @@ def test_a_target_change_rewrites_only_that_row():
     display.write(first)
     lcd.writes.clear()
     display.write(second)
-    assert len(lcd.writes) == 1
+    assert {pos[0] for pos, _text in lcd.writes} == {1}
     assert lcd.writes[0][0] == (1, 0)
-    assert "170 F" in lcd.writes[0][1]
+    assert "170 F" in "".join(text for _pos, text in lcd.writes)
 
 
 def test_a_broken_lgpio_import_does_not_stop_startup(tmp_path, monkeypatch):

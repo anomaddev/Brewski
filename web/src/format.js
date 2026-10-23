@@ -21,6 +21,13 @@ export function formatHours(totalSeconds) {
   return `${hours.toFixed(2)} h`
 }
 
+export function formatRate(perMin) {
+  if (perMin == null || !Number.isFinite(Number(perMin))) return '—'
+  const rounded = Math.round(Number(perMin) * 10) / 10
+  if (rounded === 0) return '0.0°F/min'
+  return `${rounded > 0 ? '+' : ''}${rounded.toFixed(1)}°F/min`
+}
+
 export function formatTemp(value) {
   if (value == null || Number.isNaN(Number(value))) return '—'
   return `${Number(value).toFixed(1)}°F`
@@ -47,17 +54,109 @@ export function formatWhen(iso) {
   }
 }
 
+export function kindBadge(kind) {
+  if (kind === 'calibration') {
+    return '<span class="status-badge status-calibration">Calibration</span> '
+  }
+  if (kind === 'test') {
+    return '<span class="status-badge status-test">Test</span> '
+  }
+  return ''
+}
+
+export function programBadge(run) {
+  if (!run || run.program_mode !== 'hold') return ''
+  return '<span class="status-badge status-hold">Hold</span> '
+}
+
+export function programSummary(run) {
+  if (!run || run.program_mode !== 'hold') return null
+  if (run.program_continuous) return 'Hold, continuous'
+  if (run.program_duration_seconds == null) return 'Hold'
+  return `Hold, ${formatDuration(run.program_duration_seconds)}`
+}
+
+export function programEndLabel(run) {
+  if (!run) return null
+  if (run.program_end === 'duration') return 'Hold timer'
+  if (run.program_end === 'max') return 'Program limit'
+  return null
+}
+
+function phaseClock(test) {
+  const elapsed = Math.max(0, Math.round(Number(test.phase_seconds) || 0))
+  const limit = Math.max(0, Math.round(Number(test.phase_limit) || 0))
+  const show = (value) => {
+    const minutes = Math.floor(value / 60)
+    const seconds = value % 60
+    return `${minutes}:${String(seconds).padStart(2, '0')}`
+  }
+  if (!limit) return show(elapsed)
+  return `${show(elapsed)} of ${show(limit)}`
+}
+
+function recordedClock(seconds) {
+  if (seconds == null || !Number.isFinite(Number(seconds))) return null
+  const total = Math.max(0, Math.round(Number(seconds)))
+  const minutes = Math.floor(total / 60)
+  const remain = total % 60
+  return `${minutes}:${String(remain).padStart(2, '0')}`
+}
+
+export function testSummary(test) {
+  if (!test) return ''
+  if (!test.review) {
+    const clock = phaseClock(test)
+    if (test.phase === 'settle') return `Initial Heating. Settling ${clock} with the elements off.`
+    if (test.phase === 'heating') return `Initial Heating. Heaters on, ${clock}.`
+    if (test.phase === 'coast') return `Initial Heating. Heaters off, ${clock}.`
+    return 'Initial Heating.'
+  }
+  const on = recordedClock(test.on_seconds)
+  const off = recordedClock(test.off_seconds)
+  if (!on) {
+    return test.stopped
+      ? 'Initial Heating stopped before the heaters came on.'
+      : 'Initial Heating ended before the heaters came on.'
+  }
+  const span = off ? `${on} on and ${off} off` : `${on} on`
+  if (test.stopped) return `Stopped early, after ${span}. The curve so far is in this run.`
+  if (!test.found) return `Initial Heating ended early, after ${span}. The curve so far is in this run.`
+  return `Recorded ${span}. The curve is in this run.`
+}
+
 export function statusLabel(status) {
   if (status === 'running') return 'Running'
   if (status === 'paused') return 'Paused'
   if (status === 'cooling') return 'Cooling'
+  if (status === 'complete') return 'Complete'
   if (status === 'stopped') return 'Stopped'
   return 'Idle'
 }
 
+export function runStatus(run) {
+  if (!run) return 'idle'
+  if (run.status === 'complete') return 'complete'
+  if (run.kind === 'calibration' && run.status === 'stopped' && calibrationFinished(run)) return 'complete'
+  return run.status
+}
+
+function calibrationFinished(run) {
+  const marks = Array.isArray(run.marks) ? run.marks : []
+  return marks.some((mark) => mark && mark.name === 'Cooldown')
+}
+
+export function runStatusLabel(run) {
+  return statusLabel(runStatus(run))
+}
+
+export function runStatusClass(run) {
+  return statusClass(runStatus(run))
+}
+
 export function formatCooldown(status, seconds) {
   if (status === 'complete' || status === 'open') return formatDuration(seconds)
-  if (status === 'abandoned') return 'Incomplete'
+  if (status === 'abandoned' || status === 'interrupted') return 'Incomplete'
   return '—'
 }
 
@@ -85,6 +184,7 @@ export function statusClass(status) {
   if (status === 'running') return 'status-running'
   if (status === 'paused') return 'status-paused'
   if (status === 'cooling') return 'status-cooling'
+  if (status === 'complete') return 'status-complete'
   if (status === 'stopped') return 'status-stopped'
   return 'status-idle'
 }

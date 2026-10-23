@@ -1,7 +1,7 @@
 [Unit]
 Description=Brewski still controller
-After=network-online.target brewski-update.service
-Wants=network-online.target brewski-update.service
+After=brewski-update.service
+Wants=brewski-update.service
 
 [Service]
 Type=simple

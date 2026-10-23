@@ -1,96 +1,146 @@
 import { api } from '../api.js'
+import { numberStepper } from '../controls.js'
 import { openPath } from '../router.js'
 import { createTempChart, setChartPoints } from '../chart.js'
 import {
-  activeSlots,
+  CONDENSE_AFTER_MS,
+  DEFAULT_SPAN_INDEX,
+  GAP_AFTER_MS,
+  TIMELINE_SPANS,
+  bindTimelinePan,
+  clampEnd,
+  FORECAST_MS,
+  formatOff,
+  mergeGaps,
+  toDisplay,
+  toReal,
+} from '../timeline.js'
+import {
   aboveBoiling,
   escapeHtml,
   formatDuration,
   formatHours,
+  formatRate,
   formatTarget,
   formatWhen,
+  kindBadge,
+  programBadge,
+  runStatusClass,
+  runStatusLabel,
   statusClass,
   statusLabel,
+  testSummary,
 } from '../format.js'
 import { setAppVersion, setSourceBadge } from '../layout.js'
 
-const CHART_WINDOW_MS = 2 * 60 * 60 * 1000
+function forecastText(status) {
+  const parts = []
+  if (status.seconds_to_target != null) {
+    parts.push(`About ${formatDuration(status.seconds_to_target)} to the target.`)
+  }
+  if (status.seconds_to_cooldown != null) {
+    parts.push(`About ${formatDuration(status.seconds_to_cooldown)} to cool.`)
+  }
+  return parts.join(' ')
+}
 
 function coastText(status) {
-  const cutoff = Number(status.early_cutoff_f)
-  const cutoffLabel = Number.isFinite(cutoff) ? `${cutoff}°F` : '—'
+  const eta = forecastText(status)
+  const withEta = (text) => (eta ? `${text} ${eta}` : text)
+  if (status.test && !status.test.review) return testSummary(status.test)
   if (status.run_kind === 'calibration' && (status.mode === 'running' || status.mode === 'paused')) {
-    if (status.calibration_step === 'coasting') {
-      return 'Elements are off. Watching the climb until it crests.'
+    const crest =
+      status.predicted_crest_f == null ? '' : ` Predicted crest ${Number(status.predicted_crest_f).toFixed(1)}°F.`
+    const steps = {
+      settle: 'Settling with the elements off.',
+      initial: 'Initial heating. Learning the exponential soak.',
+      cold_start: 'Initial heating. Learning the exponential soak.',
+      linear: 'Linear heating. The elements are soaked.',
+      coast: 'Coasting under 140°F with the heaters off.',
+      adjust: 'Scoring the coast against 140°F.',
+      pulse: 'One predicted pulse toward 160°F.',
+      pulses: 'One predicted pulse toward 160°F.',
+      hold: 'Holding 160°F.',
     }
-    if (status.calibration_step === 'falling') {
-      return 'Peak saved. Measuring how fast the pot cools.'
+    const line = steps[status.calibration_step] || 'Calibrating. Learning under 140°F, then holding 160°F.'
+    return withEta(`${line}${crest}`)
+  }
+  if (
+    status.run_step &&
+    status.run_kind !== 'calibration' &&
+    (status.mode === 'running' || status.mode === 'paused')
+  ) {
+    const crest =
+      status.predicted_crest_f == null ? '' : ` Predicted crest ${Number(status.predicted_crest_f).toFixed(1)}°F.`
+    const target = Math.round(Number(status.target_temp_f))
+    const steps = {
+      climb: 'Heating toward the target on the predicted crest.',
+      coast: 'Coasting. The projected rise is still on its way to the target.',
+      hold: `Holding ${target}°F.`,
     }
-    return 'Heating a little past the target. Then Brewski watches the climb to its peak and how fast the pot cools.'
+    const cooling = status.seconds_to_cooldown != null
+    const line = cooling
+      ? `Cooling toward ${target}°F.`
+      : steps[status.run_step] || 'Heating toward the target.'
+    return withEta(cooling ? line : `${line}${crest}`)
   }
   if (status.learned_coast_f == null) {
-    return 'Calibrate with water in the pot. Runs stay locked until that measurement is saved.'
+    return withEta('Calibrate with water in the pot. Runs stay locked until that measurement is saved.')
   }
   const learned = `${Number(status.learned_coast_f).toFixed(1)}°F`
   const gallons = status.charge_gallons == null ? '' : ` at ${Number(status.charge_gallons)} gal`
   if (status.learned_cooldown_f_per_min == null) {
-    return `Learned coast ${learned}${gallons}. Cutoff is ${cutoffLabel}. Calibrate again to measure how fast the pot cools.`
+    return withEta(`Learned coast ${learned}${gallons}. Another calibration fine-tunes this model.`)
   }
   const rate = `${Number(status.learned_cooldown_f_per_min).toFixed(1)}°F/min`
-  return `Learned coast ${learned}${gallons}. Cutoff is ${cutoffLabel}. Cooling is ${rate}, so the element pulses back on about 1°F under the target.`
+  const count = Number(status.calibration_count)
+  const tuned = count > 1 ? ` Tuned across ${count} calibrations.` : ''
+  return withEta(
+    `Learned coast ${learned}${gallons}. Cooling is ${rate}.${tuned} Another calibration fine-tunes this model.`,
+  )
 }
 
 function runBadge(run) {
-  const status = `<span class="status-badge ${statusClass(run.status)}">${statusLabel(run.status)}</span>`
-  if (run.kind !== 'calibration') return status
-  return `<span class="status-badge status-calibration">Calibration</span> ${status}`
+  const status = `<span class="status-badge ${runStatusClass(run)}">${runStatusLabel(run)}</span>`
+  return `${kindBadge(run.kind)}${programBadge(run)}${status}`
 }
 
-function clockLabel(at) {
-  return new Date(at).toLocaleTimeString('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-    second: '2-digit',
-  })
-}
-
-function runsInWindow(runs, now, cutoff) {
+function runsInWindow(runs, windowStart, windowEnd, now) {
   const visible = []
+  const wall = now ?? Date.now()
   for (const run of runs) {
     const start = Date.parse(run.started_at)
+    if (!Number.isFinite(start)) continue
     const cooling = run.cooldown_status === 'open'
     const finishedAt = run.cooldown_ended_at
       ? Date.parse(run.cooldown_ended_at)
       : run.ended_at
         ? Date.parse(run.ended_at)
-        : now
-    const last = cooling || !run.ended_at ? now : finishedAt
-    if (last < cutoff) break
-    if (start <= now) visible.push(run)
+        : wall
+    const last = cooling || !run.ended_at ? wall : finishedAt
+    if (last < windowStart) break
+    if (start <= windowEnd) visible.push(run)
   }
   return visible
 }
 
-function markersFor(runs, cutoff, now) {
+function markersFor(runs, windowStart, windowEnd) {
   const markers = []
   for (const run of runs) {
     const start = Date.parse(run.started_at)
-    if (start >= cutoff && start <= now) markers.push({ at: start, kind: 'start' })
-    if (!run.ended_at) continue
+    if (start >= windowStart && start <= windowEnd) markers.push({ at: start, kind: 'start', label: 'Start' })
+    const named = Array.isArray(run.marks) ? run.marks : []
+    const hasCooldown = named.some((mark) => mark.name === 'Cooldown')
+    for (const mark of named) {
+      if (mark.name === 'Start') continue
+      const at = start + Number(mark.elapsed_seconds) * 1000
+      if (at >= windowStart && at <= windowEnd) markers.push({ at, kind: 'mark', label: mark.name })
+    }
+    if (!run.ended_at || hasCooldown) continue
     const end = Date.parse(run.ended_at)
-    if (end >= cutoff && end <= now) markers.push({ at: end, kind: 'stop' })
+    if (end >= windowStart && end <= windowEnd) markers.push({ at: end, kind: 'stop', label: 'Stop' })
   }
   return markers
-}
-
-function tempsFor(sample, run, sensorNames) {
-  const slots = activeSlots(run, 'sensors')
-  return sensorNames.map((name) => {
-    const slot = slots.find((item) => item.name === name)
-    if (!slot) return null
-    const value = sample.temps_f[slot.index]
-    return value == null || Number.isNaN(Number(value)) ? null : Number(value)
-  })
 }
 
 export function mountDashboard(root) {
@@ -100,6 +150,43 @@ export function mountDashboard(root) {
       <div class="stage" id="stage" data-probes="1" data-heaters="2" data-cabinet="on">
       <section class="probe-grid" id="temp-rows" aria-label="Temperatures"></section>
       <section class="dashboard-card console">
+        <div class="program-panel" id="program-panel">
+          <div class="program-editor">
+            <div class="program-field" id="mode-field">
+              <span class="eyebrow" id="mode-label">Mode</span>
+              <div class="mode-choice source-choice" id="mode-choice" role="radiogroup" aria-labelledby="mode-label">
+                <label>Hold
+                  <input type="radio" name="program_mode" value="hold" checked />
+                </label>
+              </div>
+            </div>
+            <div class="hold-fields" id="hold-fields">
+              <div class="program-field" id="hold-time-field">
+                <span class="eyebrow">Hold time</span>
+                <div class="hold-clock">
+                  <label class="clock-part">Hours
+                    ${numberStepper('<input id="hold-hours" type="number" min="0" max="72" step="1" inputmode="numeric" value="1" />')}
+                  </label>
+                  <span class="clock-colon" aria-hidden="true">:</span>
+                  <label class="clock-part">Minutes
+                    ${numberStepper('<input id="hold-minutes" type="number" min="0" max="59" step="1" inputmode="numeric" value="0" />')}
+                  </label>
+                  <span class="clock-colon" aria-hidden="true">:</span>
+                  <label class="clock-part">Seconds
+                    ${numberStepper('<input id="hold-seconds" type="number" min="0" max="59" step="1" inputmode="numeric" value="0" />')}
+                  </label>
+                </div>
+              </div>
+              <label class="switch continuous-field">
+                <input id="hold-continuous" type="checkbox" checked />
+                <span class="switch-track" aria-hidden="true"></span>
+                <span class="switch-text">Continuous</span>
+              </label>
+            </div>
+          </div>
+          <p class="program-readout" id="program-readout" hidden></p>
+          <p class="program-cap" id="program-cap" hidden></p>
+        </div>
         <div class="console-main">
           <div class="run-identity">
             <span class="status-badge status-idle" id="system-mode">Idle</span>
@@ -110,7 +197,11 @@ export function mountDashboard(root) {
             </div>
           </div>
           <p class="coast-readout" id="coast-readout"></p>
+          <div class="test-review" id="test-review" hidden>
+            <p id="test-review-copy"></p>
+          </div>
           <div class="console-launch">
+            <div class="launch-row">
             <div class="status-actions" id="actions"></div>
             <div class="run-setup" id="run-setup">
               <label class="gallons-field" for="charge-gallons" title="The still size from setup. Change it when this calibration is for a different size.">
@@ -120,6 +211,7 @@ export function mountDashboard(root) {
                   <span>gal</span>
                 </span>
               </label>
+            </div>
             </div>
           </div>
           <p class="form-error" id="action-error" hidden></p>
@@ -169,8 +261,16 @@ export function mountDashboard(root) {
       <section class="dashboard-card chart-card">
         <div class="card-title-with-timer">
           <h2 class="card-title">Temperature over time</h2>
+          <div class="chart-toolbar" role="group" aria-label="Chart time range">
+            <button type="button" class="chart-tool" id="chart-earlier" aria-label="Earlier">‹</button>
+            <button type="button" class="chart-tool" id="chart-later" aria-label="Later">›</button>
+            <button type="button" class="chart-tool" id="chart-shorter" aria-label="Show a shorter time span">−</button>
+            <span class="chart-span" id="chart-span">20 min</span>
+            <button type="button" class="chart-tool" id="chart-longer" aria-label="Show a longer time span">+</button>
+            <button type="button" class="chart-now" id="chart-now" hidden>Now</button>
+          </div>
         </div>
-        <div class="chart-container">
+        <div class="chart-container chart-timeline">
           <canvas id="temp-chart"></canvas>
         </div>
       </section>
@@ -203,9 +303,17 @@ export function mountDashboard(root) {
   `
 
   const chart = createTempChart(document.getElementById('temp-chart'), { timed: true })
-  const points = []
-  const seenSamples = new Set()
-  const settledRuns = new Set()
+  let spanIndex = DEFAULT_SPAN_INDEX
+  let follow = true
+  let viewEndReal = Date.now()
+  let listedRuns = []
+  let lastStatus = null
+  let timelineMeta = { earliest: null, latest: null, gaps: [] }
+  let timelineCache = null
+  let loadToken = 0
+  let loadTimer = null
+  let lastTimelineFetch = 0
+  let lastRunsFetch = 0
   let renderedMode = null
   let calibrated = false
   let busy = false
@@ -250,15 +358,148 @@ export function mountDashboard(root) {
     targetInput.dispatchEvent(new Event('change'))
   })
 
+  const MAX_HOLD_SECONDS = 72 * 3600
+  let fillingProgram = false
+
+  function durationSeconds() {
+    const hours = Math.round(Number(document.getElementById('hold-hours').value) || 0)
+    const minutes = Math.round(Number(document.getElementById('hold-minutes').value) || 0)
+    const seconds = Math.round(Number(document.getElementById('hold-seconds').value) || 0)
+    return hours * 3600 + minutes * 60 + seconds
+  }
+
+  function selectedProgramMode() {
+    const chosen = document.querySelector('#mode-choice input:checked')
+    return chosen ? chosen.value : 'hold'
+  }
+
+  function syncDurationEnabled() {
+    const continuous = document.getElementById('hold-continuous').checked
+    for (const id of ['hold-hours', 'hold-minutes', 'hold-seconds']) {
+      document.getElementById(id).disabled = continuous
+    }
+  }
+
+  function programFocused() {
+    const active = document.activeElement
+    return Boolean(active && active.closest && active.closest('#hold-fields, #mode-choice'))
+  }
+
+  function programInvalid(continuous, seconds) {
+    if (continuous) return ''
+    if (seconds < 1) return 'Hold time has to be at least one second.'
+    if (seconds > MAX_HOLD_SECONDS) return 'Hold time has to be 72 hours or less.'
+    return ''
+  }
+
+  function fillProgram(program) {
+    if (programFocused()) return
+    fillingProgram = true
+    document.getElementById('hold-continuous').checked = program.continuous !== false
+    const total = Math.max(0, Math.round(Number(program.duration_seconds) || 3600))
+    document.getElementById('hold-hours').value = String(Math.floor(total / 3600))
+    document.getElementById('hold-minutes').value = String(Math.floor((total % 3600) / 60))
+    document.getElementById('hold-seconds').value = String(total % 60)
+    const mode = document.querySelector(`#mode-choice input[value="${program.mode || 'hold'}"]`)
+    if (mode) mode.checked = true
+    syncDurationEnabled()
+    fillingProgram = false
+  }
+
+  async function saveProgram() {
+    if (fillingProgram) return
+    syncDurationEnabled()
+    const continuous = document.getElementById('hold-continuous').checked
+    const seconds = durationSeconds()
+    const invalid = programInvalid(continuous, seconds)
+    if (invalid) {
+      showError(invalid)
+      return
+    }
+    try {
+      await api.saveSettings({
+        program_mode: selectedProgramMode(),
+        program_continuous: continuous,
+        program_duration_seconds: seconds,
+      })
+      clearError()
+    } catch (error) {
+      showError(error.message)
+    }
+  }
+
+  document.getElementById('program-panel').addEventListener('change', (event) => {
+    if (event.target.closest('#hold-fields, #mode-choice')) saveProgram()
+  })
+
+  function holdReadout(program) {
+    const badge = programBadge({ program_mode: 'hold' })
+    if (program.continuous) return `${badge}<span class="program-detail">Continuous</span>`
+    const remaining = program.remaining_seconds != null
+    const clock = escapeHtml(formatDuration(remaining ? program.remaining_seconds : program.duration_seconds))
+    const detail = remaining ? 'left' : 'once it is holding'
+    return `${badge}<span class="timer-display">${clock}</span><span class="program-detail">${detail}</span>`
+  }
+
+  function renderProgram(status) {
+    const live = status.mode === 'running' || status.mode === 'paused'
+    const program = status.program || {}
+    const holdRun = live && status.run_kind !== 'calibration' && status.run_kind !== 'test'
+    document.getElementById('mode-field').hidden = live
+    document.getElementById('hold-fields').hidden = live || selectedProgramMode() !== 'hold'
+    const readout = document.getElementById('program-readout')
+    readout.hidden = !holdRun
+    if (holdRun) readout.innerHTML = holdReadout(program)
+    const cap = document.getElementById('program-cap')
+    if (live && status.max_program_remaining_seconds != null) {
+      cap.hidden = false
+      const hours = escapeHtml(String(status.max_program_hours))
+      const left = escapeHtml(formatDuration(status.max_program_remaining_seconds))
+      cap.innerHTML = `${hours} hour limit <span class="cap-left">${left} left</span>`
+    } else {
+      cap.hidden = true
+    }
+    if (!live) fillProgram(program)
+  }
+
   function targetValue() {
     return Math.round(Number(document.getElementById('target-input').value))
   }
 
   async function onStart() {
     if (busy) return
+    const continuous = document.getElementById('hold-continuous').checked
+    const invalid = programInvalid(continuous, durationSeconds())
+    if (invalid) {
+      showError(invalid)
+      return
+    }
     busy = true
     try {
-      await api.start({ target_temp_f: targetValue() })
+      await api.start({
+        target_temp_f: targetValue(),
+        program_mode: selectedProgramMode(),
+        program_continuous: document.getElementById('hold-continuous').checked,
+        program_duration_seconds: durationSeconds(),
+      })
+      clearError()
+      await refresh()
+    } catch (error) {
+      showError(error.message)
+    } finally {
+      busy = false
+    }
+  }
+
+  async function onCleanCalibration() {
+    if (busy) return
+    const confirmed = window.confirm(
+      'Clear the learned calibration? The heating model is erased and the next calibration starts from scratch. Past runs stay in the history.',
+    )
+    if (!confirmed) return
+    busy = true
+    try {
+      await api.cleanCalibration()
       clearError()
       await refresh()
     } catch (error) {
@@ -272,7 +513,7 @@ export function mountDashboard(root) {
     if (busy) return
     busy = true
     try {
-      const body = { target_temp_f: targetValue(), kind: 'calibration' }
+      const body = { kind: 'calibration' }
       const raw = document.getElementById('charge-gallons').value.trim()
       if (raw !== '') body.charge_gallons = Number(raw)
       await api.start(body)
@@ -313,9 +554,27 @@ export function mountDashboard(root) {
     }
   }
 
+  async function onEndTest() {
+    if (busy) return
+    busy = true
+    try {
+      await api.endTest()
+      clearError()
+      await refresh()
+    } catch (error) {
+      showError(error.message)
+    } finally {
+      busy = false
+    }
+  }
+
   async function onStop() {
     if (busy) return
-    if (!window.confirm('Stop this run? Heaters turn off and the run is saved.')) return
+    const testing = lastStatus && lastStatus.run_kind === 'test'
+    const message = testing
+      ? 'Stop this test? Heaters turn off and the result stays on screen until End.'
+      : 'Stop this run? Heaters turn off and the run is saved.'
+    if (!window.confirm(message)) return
     busy = true
     try {
       await api.stop()
@@ -344,10 +603,24 @@ export function mountDashboard(root) {
     banner.textContent = codes.map((item) => `${item.code}: ${item.summary}`).join(' ')
   }
 
-  function renderActions(mode, ready, emergency) {
+  function renderActions(status) {
     const host = document.getElementById('actions')
+    const mode = status.mode
+    const ready = status.learned_coast_f != null
+    const emergency = (status.emergency || []).length > 0
+    const review = Boolean(status.test && status.test.review)
     if (emergency) {
       host.innerHTML = ''
+      return
+    }
+    if (review && mode !== 'running' && mode !== 'paused') {
+      host.innerHTML = `<button class="action-btn stop-btn" type="button" id="end-test">End</button>`
+      host.querySelector('#end-test').addEventListener('click', onEndTest)
+      return
+    }
+    if (mode === 'running' && status.run_kind === 'test') {
+      host.innerHTML = `<button class="action-btn stop-btn" type="button" id="stop-btn">Stop</button>`
+      host.querySelector('#stop-btn').addEventListener('click', onStop)
       return
     }
     if (mode === 'running') {
@@ -361,13 +634,15 @@ export function mountDashboard(root) {
     } else if (ready) {
       host.innerHTML = `
         <button class="action-btn start-btn" type="button" id="start-btn">Start</button>
-        <button class="action-btn calibrate-btn" type="button" id="calibrate-btn">Calibrate</button>`
+        <button class="action-btn calibrate-btn" type="button" id="calibrate-btn">Calibrate</button>
+        <button class="action-btn clean-btn" type="button" id="clean-btn">Clean Calibration</button>`
     } else {
       host.innerHTML = `
         <button class="action-btn start-btn" type="button" id="calibrate-btn">Calibrate</button>`
     }
     host.querySelector('#start-btn')?.addEventListener('click', onStart)
     host.querySelector('#calibrate-btn')?.addEventListener('click', onCalibrate)
+    host.querySelector('#clean-btn')?.addEventListener('click', onCleanCalibration)
     host.querySelector('#pause-btn')?.addEventListener('click', onPause)
     host.querySelector('#resume-btn')?.addEventListener('click', onResume)
     host.querySelector('#stop-btn')?.addEventListener('click', onStop)
@@ -416,6 +691,7 @@ export function mountDashboard(root) {
             <article class="probe ${index === 0 ? 'probe-primary' : ''}" data-probe="${index}">
               <span class="probe-kicker">${escapeHtml(name)}${index === 0 ? ' · control' : ''}</span>
               <p class="probe-readout" data-temp="${index}"><span class="probe-num">—</span></p>
+              <p class="probe-rate" data-rate="${index}" hidden></p>
               <p class="probe-delta" data-delta="${index}"></p>
               <p class="boil-warning" data-boil="${index}" hidden>Above water's boiling point (212°F).</p>
             </article>`,
@@ -427,6 +703,16 @@ export function mountDashboard(root) {
       const text = value == null || Number.isNaN(Number(value)) ? '—' : Number(value).toFixed(1)
       host.querySelector(`[data-temp="${index}"]`).innerHTML =
         `<span class="probe-num">${text}</span><span class="probe-unit">°F</span>`
+      const rate = host.querySelector(`[data-rate="${index}"]`)
+      if (index === 0) {
+        const perMin = status.rate_f_per_min
+        rate.hidden = false
+        rate.textContent = formatRate(perMin)
+        rate.classList.toggle('is-rising', Number(perMin) > 0.05)
+        rate.classList.toggle('is-falling', Number(perMin) < -0.05)
+      } else {
+        rate.hidden = true
+      }
       const delta = host.querySelector(`[data-delta="${index}"]`)
       const target = Number(status.target_temp_f)
       const gap = Number(value) - target
@@ -475,7 +761,7 @@ export function mountDashboard(root) {
     if (stopped) return
     const status = await api.status()
     setSourceBadge(status.source)
-    setAppVersion(status.version)
+    setAppVersion(status)
     document.getElementById('elapsed').textContent = formatDuration(status.elapsed_seconds)
     const mode = document.getElementById('system-mode')
     mode.textContent = statusLabel(status.mode)
@@ -494,30 +780,42 @@ export function mountDashboard(root) {
       cabinetOn ? 'Cabinet and heaters' : 'Heaters',
     )
     const target = document.getElementById('target-input')
-    if (document.activeElement !== target) target.value = String(Math.round(Number(status.target_temp_f)))
+    // Status reports 140°F, then 160°F, while calibrating. That is the aim, not the setpoint.
+    if (status.run_kind !== 'calibration' && document.activeElement !== target) {
+      target.value = String(Math.round(Number(status.target_temp_f)))
+    }
     syncTargetWarning()
     calibrated = status.learned_coast_f != null
     const emergency = (status.emergency || []).map((item) => item.code).join(',')
-    const actionKey = `${status.mode}:${calibrated ? 'ready' : 'raw'}:${emergency}`
+    const review = Boolean(status.test && status.test.review)
+    const actionKey = `${status.mode}:${calibrated ? 'ready' : 'raw'}:${emergency}:${status.run_kind || ''}:${review ? 'review' : ''}`
     if (renderedMode !== actionKey) {
       renderedMode = actionKey
-      renderActions(status.mode, calibrated, Boolean(emergency))
+      renderActions(status)
     }
+    renderProgram(status)
     const charge = document.getElementById('charge-gallons')
     if (!charge.dataset.ready && status.charge_gallons != null && document.activeElement !== charge) {
       charge.value = String(status.charge_gallons)
       charge.dataset.ready = '1'
     }
-    const calibrating = status.run_kind === 'calibration'
-    document.getElementById('run-kind').hidden = !calibrating
+    const kindBadgeEl = document.getElementById('run-kind')
+    if (status.run_kind === 'calibration') {
+      kindBadgeEl.hidden = false
+      kindBadgeEl.textContent = 'Calibration'
+      kindBadgeEl.className = 'status-badge status-calibration'
+    } else if (status.run_kind === 'test' || review) {
+      kindBadgeEl.hidden = false
+      kindBadgeEl.textContent = 'Test'
+      kindBadgeEl.className = 'status-badge status-test'
+    } else {
+      kindBadgeEl.hidden = true
+    }
     document.getElementById('run-setup').hidden = status.mode === 'running' || status.mode === 'paused'
-    document.getElementById('coast-readout').textContent = coastText(status)
-
-    const history = await api.runs()
-    renderRuns(history.runs.slice(0, 8))
-    const average = history.stats.average_cooldown_seconds
-    document.querySelector('#avg-cooldown strong').textContent =
-      average == null ? '—' : formatDuration(average)
+    const result = document.getElementById('test-review')
+    result.hidden = !review
+    if (review) document.getElementById('test-review-copy').textContent = testSummary(status.test)
+    document.getElementById('coast-readout').textContent = review ? '' : coastText(status)
     const caption = document.getElementById('timer-caption')
     caption.textContent =
       status.mode === 'cooling'
@@ -525,59 +823,236 @@ export function mountDashboard(root) {
         : status.mode === 'running' || status.mode === 'paused'
           ? status.run_kind === 'calibration'
             ? 'Calibration'
-            : 'Run'
+            : status.run_kind === 'test'
+              ? 'Test'
+              : status.program && status.program.mode === 'hold'
+                ? 'Hold'
+                : 'Run'
           : ''
 
-    const now = Date.now()
-    const cutoff = now - CHART_WINDOW_MS
-    const visible = runsInWindow(history.runs, now, cutoff)
-    for (const summary of visible) {
-      const live = summary.id === status.run_id || summary.id === status.cooldown_run_id
-      if (!live && settledRuns.has(summary.id)) continue
-      const run = await api.run(summary.id)
-      mergeSamples(run, status.sensor_names)
-      const stillOpen = run.status === 'running' || run.status === 'paused' || run.cooldown_status === 'open'
-      if (!live && !stillOpen) settledRuns.add(summary.id)
+    lastStatus = status
+    paintChart()
+    if (Date.now() - lastRunsFetch > 5000) {
+      const history = await api.runs()
+      if (stopped) return
+      lastRunsFetch = Date.now()
+      renderRuns(history.runs.slice(0, 8))
+      const average = history.stats.average_cooldown_seconds
+      document.querySelector('#avg-cooldown strong').textContent =
+        average == null ? '—' : formatDuration(average)
+      listedRuns = history.runs
+      paintChart()
     }
-    addPoint({
-      at: now,
-      label: clockLabel(now),
-      temps: status.temps_f.slice(),
-      target: status.target_temp_f,
-    })
-    while (points.length && points[0].at < cutoff) points.shift()
-    setChartPoints(chart, points, status.sensor_names, markersFor(visible, cutoff, now))
+    const refreshMs = TIMELINE_SPANS[spanIndex].ms > 6 * 60 * 60 * 1000 ? 30000 : 5000
+    if (follow && Date.now() - lastTimelineFetch > refreshMs) scheduleTimeline()
   }
 
-  function addPoint(point) {
-    if (!Number.isFinite(point.at)) return
-    let lo = 0
-    let hi = points.length
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1
-      if (points[mid].at < point.at) lo = mid + 1
-      else hi = mid
-    }
-    const prev = points[lo - 1]
-    const next = points[lo]
-    if (prev && point.at - prev.at < 750) return
-    if (next && next.at - point.at < 750) return
-    points.splice(lo, 0, point)
+  function controllerNow() {
+    const stamp = Number(lastStatus?.now_ms)
+    return Number.isFinite(stamp) ? stamp : Date.now()
   }
 
-  function mergeSamples(run, sensorNames) {
-    for (const sample of run.samples) {
-      if (seenSamples.has(sample.id)) continue
-      seenSamples.add(sample.id)
-      const at = Date.parse(sample.recorded_at)
-      addPoint({
+  function axisGaps(now) {
+    const gaps = (timelineMeta.gaps || []).map((gap) => ({ from: gap.from, to: gap.to }))
+    // A running controller is not "Off" just because the browser clock is ahead
+    // of the last saved sample. That gap was covering the live trace.
+    const live = ['running', 'paused', 'cooling'].includes(lastStatus?.mode)
+    if (!live && timelineMeta.latest != null && now - timelineMeta.latest > GAP_AFTER_MS) {
+      gaps.push({ from: timelineMeta.latest, to: now })
+    }
+    return mergeGaps(gaps)
+  }
+
+  function neededRange(now) {
+    const span = TIMELINE_SPANS[spanIndex].ms
+    const gaps = axisGaps(now)
+    const end = follow ? now : viewEndReal
+    const endDisplay = toDisplay(end, gaps)
+    const earliest = timelineMeta.earliest
+    const lo = earliest == null ? end - span * 4 : Math.min(earliest, end)
+    const from = toReal(endDisplay - span * 2, gaps, lo - span, now)
+    const to = Math.min(now, toReal(endDisplay + span, gaps, lo, now))
+    return { from, to, span }
+  }
+
+  function cacheCovers(range) {
+    if (!timelineCache) return false
+    if (timelineCache.from > range.from + 500) return false
+    if (timelineCache.to < range.to - 500) return false
+    if (timelineCache.span > range.span) return false
+    return true
+  }
+
+  function scheduleTimeline() {
+    clearTimeout(loadTimer)
+    loadTimer = setTimeout(() => {
+      loadTimeline().catch((error) => showError(error.message))
+    }, 160)
+  }
+
+  async function loadTimeline() {
+    if (stopped) return
+    const token = ++loadToken
+    const first = neededRange(controllerNow())
+    const cacheFresh = timelineCache && Date.now() - timelineCache.fetchedAt < 5000
+    const coversLiveEdge = first.to >= controllerNow() - 10000
+    if (cacheCovers(first) && (!coversLiveEdge || cacheFresh)) {
+      lastTimelineFetch = Date.now()
+      return
+    }
+    let from = first.from
+    let to = Math.max(first.to, from + 1)
+    let data = await api.timeline(Math.floor(from), Math.ceil(to))
+    if (token !== loadToken || stopped) return
+    timelineMeta = {
+      earliest: data.earliest,
+      latest: data.latest,
+      gaps: data.gaps || [],
+    }
+    const again = neededRange(controllerNow())
+    if (again.from < from - 1000) {
+      from = again.from
+      to = Math.max(again.to, from + 1)
+      data = await api.timeline(Math.floor(from), Math.ceil(to))
+      if (token !== loadToken || stopped) return
+      timelineMeta = {
+        earliest: data.earliest,
+        latest: data.latest,
+        gaps: data.gaps || [],
+      }
+    }
+    timelineCache = {
+      from,
+      to,
+      span: TIMELINE_SPANS[spanIndex].ms,
+      decimated: Boolean(data.decimated),
+      points: data.points || [],
+      fetchedAt: Date.now(),
+    }
+    lastTimelineFetch = Date.now()
+    paintChart()
+  }
+
+  function moveDisplay(displayDelta) {
+    const now = controllerNow()
+    const horizon = now + FORECAST_MS
+    if (follow) viewEndReal = horizon
+    const gaps = axisGaps(now)
+    const span = TIMELINE_SPANS[spanIndex].ms
+    const nextDisplay = toDisplay(viewEndReal, gaps) + displayDelta
+    const lo = timelineMeta.earliest == null ? now - span : Math.min(timelineMeta.earliest, now)
+    let nextReal = toReal(nextDisplay, gaps, lo - span, horizon)
+    nextReal = clampEnd(nextReal, span, gaps, timelineMeta.earliest, now, horizon)
+    if (horizon - nextReal <= 1500) {
+      follow = true
+      viewEndReal = horizon
+    } else {
+      follow = false
+      viewEndReal = nextReal
+    }
+    paintChart()
+    scheduleTimeline()
+  }
+
+  function setSpan(index) {
+    spanIndex = Math.max(0, Math.min(TIMELINE_SPANS.length - 1, index))
+    paintChart()
+    scheduleTimeline()
+  }
+
+  function paintChart() {
+    if (!lastStatus) return
+    const now = controllerNow()
+    const span = TIMELINE_SPANS[spanIndex].ms
+    const horizon = now + FORECAST_MS
+    if (follow) viewEndReal = horizon
+    const gaps = axisGaps(now)
+    viewEndReal = clampEnd(viewEndReal, span, gaps, timelineMeta.earliest, now, horizon)
+    const endDisplay = toDisplay(viewEndReal, gaps)
+    const startDisplay = endDisplay - span
+    const lo = timelineMeta.earliest == null ? viewEndReal - span : Math.min(timelineMeta.earliest, viewEndReal)
+    const startReal = toReal(startDisplay, gaps, lo - span, viewEndReal)
+    const points = []
+    for (const point of timelineCache?.points || []) {
+      const at = toDisplay(point.at, gaps)
+      if (at < startDisplay - 1000 || at > endDisplay + 1000) continue
+      points.push({
         at,
-        label: clockLabel(at),
-        temps: tempsFor(sample, run, sensorNames),
-        target: sample.target_temp_f,
+        temps: point.temps_f,
+        target: point.target_temp_f,
       })
     }
+    if (viewEndReal >= now - 2000) {
+      const liveAt = toDisplay(now, gaps)
+      const previous = points[points.length - 1]
+      if (!previous || liveAt > previous.at + 750) {
+        points.push({
+          at: liveAt,
+          temps: lastStatus.temps_f.slice(),
+          target: lastStatus.target_temp_f,
+        })
+      }
+    }
+    points.sort((left, right) => left.at - right.at)
+    const offSpans = gaps
+      .filter((gap) => gap.to > startReal && gap.from < viewEndReal && gap.to - gap.from > GAP_AFTER_MS)
+      .map((gap) => ({
+        from: toDisplay(Math.max(gap.from, startReal), gaps),
+        to: toDisplay(Math.min(gap.to, viewEndReal), gaps),
+        label: gap.to - gap.from > CONDENSE_AFTER_MS ? formatOff(gap.to - gap.from) : 'Off',
+      }))
+    const markers = markersFor(runsInWindow(listedRuns, startReal, viewEndReal, now), startReal, viewEndReal).map(
+      (marker) => ({ ...marker, at: toDisplay(marker.at, gaps) }),
+    )
+    const projection = (lastStatus.projection || [])
+      .map((point) => ({
+        at: toDisplay(now + point.offset_s * 1000, gaps),
+        temp: point.temp_f,
+      }))
+      .filter((point) => point.at >= startDisplay && point.at <= endDisplay + 1000)
+    setChartPoints(chart, points, lastStatus.sensor_names, markers, {
+      min: startDisplay,
+      max: endDisplay,
+      spans: offSpans,
+      spanMs: span,
+      connect: true,
+      projection,
+      toReal: (display) => toReal(display, gaps, lo - span, horizon),
+      hideTick: (real) =>
+        gaps.some((gap) => gap.to - gap.from > CONDENSE_AFTER_MS && real > gap.from && real < gap.to),
+    })
+    const spanLabel = document.getElementById('chart-span')
+    if (spanLabel) spanLabel.textContent = TIMELINE_SPANS[spanIndex].label
+    const nowButton = document.getElementById('chart-now')
+    if (nowButton) nowButton.hidden = follow
+    const later = document.getElementById('chart-later')
+    if (later) later.disabled = follow
+    const shorter = document.getElementById('chart-shorter')
+    const longer = document.getElementById('chart-longer')
+    if (shorter) shorter.disabled = spanIndex === 0
+    if (longer) longer.disabled = spanIndex === TIMELINE_SPANS.length - 1
   }
+
+  document.getElementById('chart-earlier').addEventListener('click', () => {
+    moveDisplay(-TIMELINE_SPANS[spanIndex].ms / 2)
+  })
+  document.getElementById('chart-later').addEventListener('click', () => {
+    moveDisplay(TIMELINE_SPANS[spanIndex].ms / 2)
+  })
+  document.getElementById('chart-shorter').addEventListener('click', () => setSpan(spanIndex - 1))
+  document.getElementById('chart-longer').addEventListener('click', () => setSpan(spanIndex + 1))
+  document.getElementById('chart-now').addEventListener('click', () => {
+    follow = true
+    viewEndReal = controllerNow()
+    paintChart()
+    scheduleTimeline()
+  })
+  const unbindPan = bindTimelinePan(chart.canvas, (pixels) => {
+    const area = chart.chartArea
+    const width = area ? area.right - area.left : chart.canvas.clientWidth
+    if (!width) return
+    moveDisplay((-pixels / width) * TIMELINE_SPANS[spanIndex].ms)
+  })
 
   const timer = setInterval(() => {
     refresh().catch((error) => showError(error.message))
@@ -591,7 +1066,9 @@ export function mountDashboard(root) {
   return () => {
     stopped = true
     clearInterval(timer)
+    clearTimeout(loadTimer)
     window.removeEventListener('brewski-refresh', onSetup)
+    unbindPan()
     chart.destroy()
   }
 }

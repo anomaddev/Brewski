@@ -32,7 +32,6 @@ def test_default_settings_are_two_heaters_and_two_sensors(store):
     assert settings.cabinet_limit_f == 170
     assert settings.heater_min_on_seconds == 1.0
     assert settings.heater_min_off_seconds == 1.0
-    assert settings.early_cutoff_f == 3.0
     assert settings.update_source == "main"
     assert settings.learned_coast_f is None
     assert settings.learned_cooldown_f_per_min is None
@@ -163,12 +162,8 @@ def test_settings_validation_rejects_bad_values(store):
     with pytest.raises(SettingsError, match="heater_min_off_seconds must be between 0.5 and 60"):
         merge_settings(current, {"heater_min_off_seconds": 0.49})
     assert merge_settings(current, {"heater_min_off_seconds": 2}).heater_min_off_seconds == 2.0
-    with pytest.raises(SettingsError, match="early_cutoff_f must be between 0 and 20"):
-        merge_settings(current, {"early_cutoff_f": -0.1})
-    with pytest.raises(SettingsError, match="early_cutoff_f must be between 0 and 20"):
-        merge_settings(current, {"early_cutoff_f": 20.01})
-    assert merge_settings(current, {"early_cutoff_f": 0}).early_cutoff_f == 0.0
-    assert merge_settings(current, {"early_cutoff_f": 2.5}).early_cutoff_f == 2.5
+    with pytest.raises(SettingsError, match="Unknown settings: early_cutoff_f"):
+        merge_settings(current, {"early_cutoff_f": 2.5})
 
 
 def test_probe_fields_default_to_a_two_wire_pt100(store):
@@ -266,16 +261,58 @@ def test_older_databases_keep_counts_and_gain_default_pins(tmp_path):
     assert settings.target_temp_f == 165
     assert settings.heater_min_on_seconds == 1.0
     assert settings.heater_min_off_seconds == 1.0
-    assert settings.early_cutoff_f == 3.0
     assert settings.update_source == "main"
+    assert settings.max_program_hours == 24
+    assert settings.program_mode == "hold"
+    assert settings.program_continuous is True
+    assert settings.program_duration_seconds == 3600
     assert settings.learned_coast_f is None
     assert settings.learned_cooldown_f_per_min is None
     assert settings.setup_complete is True
     run = store.get_run(1)
     assert run["kind"] == "run"
+    assert run["program_mode"] is None
+    assert run["program_end"] is None
     assert run["heaters"][0]["enabled"] is True
     assert run["heaters"][1]["enabled"] is False
     assert run["heaters"][0]["gpio"] is None
+
+
+def test_a_control_log_is_attached_to_its_run_and_cleared_with_it(store):
+    run = store.create_run(store.get_settings())
+    store.add_run_log(
+        run["id"],
+        1.5,
+        "heat",
+        "Run. 162.0°F. Heaters off.",
+        {"temp_f": 162.0, "heaters_on": [False, False], "shutoff_coast_f": 3},
+    )
+    store.add_run_log(run["id"], None, "analysis", "Late analysis.", {"accepted": False})
+    detail = store.get_run(run["id"])
+    assert [item["event"] for item in detail["logs"]] == ["heat", "analysis"]
+    assert detail["logs"][0]["elapsed_seconds"] == 1.5
+    assert detail["logs"][0]["detail"]["temp_f"] == 162
+    assert detail["logs"][0]["detail"]["heaters_on"] == [False, False]
+    assert detail["logs"][1]["elapsed_seconds"] == 0
+    assert "logs" not in store.list_runs()["runs"][0]
+    assert "logs" not in store.get_run(run["id"], include_logs=False)
+    first = detail["logs"][0]["id"]
+    assert [item["event"] for item in store.run_logs(run["id"], first)] == ["analysis"]
+    assert store.run_logs(999) is None
+    store.reset()
+    assert store.get_run(run["id"]) is None
+
+
+def test_console_lines_follow_a_run_and_clear_with_it(store):
+    run = store.create_run(store.get_settings())
+    store.add_console_line(run["id"], "2026-01-01T00:00:00+00:00 INFO brewski: probe glitch")
+    store.add_console_line(999, "missing")
+    assert store.console_lines(run["id"]) == [
+        "2026-01-01T00:00:00+00:00 INFO brewski: probe glitch"
+    ]
+    assert store.console_lines(999) is None
+    store.reset()
+    assert store.console_lines(run["id"]) is None
 
 
 def test_heater_on_time_uses_the_gap_between_samples(store):
@@ -292,9 +329,55 @@ def test_heater_on_time_uses_the_gap_between_samples(store):
     assert listed["stats"]["average_duration_seconds"] == pytest.approx(10)
     assert listed["stats"]["heater_on_seconds"] == pytest.approx([10, 0])
 
+    cooling = store.create_run(settings)
+    store.add_sample(cooling["id"], 0, [70, 62], [True, False], 165)
+    store.add_sample(cooling["id"], 4, [68, 62], [False, False], 165, phase="cooldown")
+    store.add_sample(cooling["id"], 10, [80, 70], [False, True], 165)
+    store.update_run(cooling["id"], status="stopped", elapsed_seconds=12, ended_at=utc_now())
+    saved_tail = next(item for item in store.list_runs()["runs"] if item["id"] == cooling["id"])
+    assert saved_tail["heater_on_seconds"] == pytest.approx([10, 2])
+
     detail = store.get_run(run["id"])
     assert len(detail["samples"]) == 2
     assert detail["sensor_names"] == ["Boiler", "Column"]
+
+
+def test_a_finished_calibration_cooldown_counts_toward_the_average(store):
+    settings = store.get_settings()
+    calibration = store.create_run(settings, kind="calibration", charge_gallons=5)
+    store.update_run(
+        calibration["id"],
+        status="complete",
+        elapsed_seconds=600,
+        ended_at=utc_now(),
+        cooldown_status="complete",
+        cooldown_seconds=240,
+    )
+    interrupted = store.create_run(settings, kind="calibration", charge_gallons=5)
+    store.update_run(
+        interrupted["id"],
+        status="stopped",
+        elapsed_seconds=30,
+        ended_at=utc_now(),
+        cooldown_status="interrupted",
+        cooldown_seconds=12,
+    )
+    production = store.create_run(settings)
+    store.update_run(
+        production["id"],
+        status="stopped",
+        elapsed_seconds=100,
+        ended_at=utc_now(),
+        cooldown_status="complete",
+        cooldown_seconds=120,
+    )
+
+    stats = store.list_runs()["stats"]
+    assert stats["total_runs"] == 1
+    assert stats["calibration_runs"] == 2
+    assert stats["average_duration_seconds"] == pytest.approx(100)
+    assert stats["average_cooldown_seconds"] == pytest.approx(180)
+    assert stats["heater_on_seconds"] == pytest.approx([0, 0])
 
 
 def test_open_runs_are_closed_on_the_next_startup(store):
@@ -405,3 +488,82 @@ def test_heater_math_adds_the_tail_after_the_last_sample():
         8,
     )
     assert totals == pytest.approx([5, 8])
+
+
+def test_a_run_can_be_loaded_without_copying_every_sample(store):
+    run = store.create_run(store.get_settings())
+    store.add_sample(run["id"], 0, [70, 62], [True, False], 165)
+    store.add_sample(run["id"], 10, [80, 70], [True, False], 165)
+    store.update_run(run["id"], elapsed_seconds=12)
+    slim = store.get_run(run["id"], include_logs=False, include_samples=False)
+    assert "samples" not in slim
+    assert "logs" not in slim
+    assert slim["heater_on_seconds"] == pytest.approx(
+        store.get_run(run["id"])["heater_on_seconds"]
+    )
+    assert store.chart_samples(run["id"])[0]["elapsed_seconds"] == 0
+    assert store.chart_samples(run["id"], store.chart_samples(run["id"])[-1]["id"]) == []
+    assert store.chart_samples(999) is None
+
+
+def test_review_pages_share_one_window_and_a_custom_range_narrows_both_logs(store):
+    run = store.create_run(store.get_settings())
+    run_id = run["id"]
+    for index in range(12):
+        store.add_run_log(
+            run_id,
+            float(index),
+            "sample",
+            "reading",
+            {"path": "linear", "phase": "linear", "temp_f": 100 + index, "heaters_on": [True, False]},
+        )
+    store.add_run_log(
+        run_id,
+        10.5,
+        "heat",
+        "Heaters off.",
+        {"path": "coast", "phase": "coast", "temp_f": 140, "heaters_on": [False, False]},
+    )
+    store.add_sample(run_id, 0, [100, 90], [True, False], 165)
+    store.add_sample(run_id, 5, [110, 90], [True, False], 165)
+    store.add_sample(run_id, 10, [120, 90], [False, False], 165)
+    store.add_run_log(
+        run_id,
+        3,
+        "sample",
+        "cooling",
+        {"path": "cooldown", "phase": "cooldown", "temp_f": 90, "heaters_on": [False, False]},
+    )
+    store.add_sample(run_id, 3, [90, 80], [False, False], 165, phase="cooldown")
+
+    page = store.review_window(run_id, limit=10)
+    assert page["mode"] == "page"
+    assert page["logs"]["total"] == 14
+    assert len(page["logs"]["rows"]) == 10
+    assert page["window"]["from"] == 0
+    assert page["window"]["to"] == 9
+    assert page["window"]["cooldown_from"] is None
+    assert [sample["elapsed_seconds"] for sample in page["samples"]["rows"]] == [0, 5]
+
+    later = store.review_window(run_id, limit=10, log_offset=10)
+    assert later["logs"]["offset"] == 10
+    assert later["window"]["from"] == 10
+    assert later["window"]["to"] == 11
+    assert later["window"]["cooldown_from"] == 3
+    assert [sample["elapsed_seconds"] for sample in later["samples"]["rows"]] == [10, 3]
+    assert later["samples"]["rows"][-1]["phase"] == "cooldown"
+
+    assert store.review_window(run_id, limit=10, tail=True)["logs"]["offset"] == 10
+
+    custom = store.review_window(run_id, limit=10, from_elapsed=2, to_elapsed=8, clock="run")
+    assert custom["mode"] == "custom"
+    assert custom["window"] == {"from": 2, "to": 8, "cooldown_from": None, "cooldown_to": None}
+    assert [row["elapsed_seconds"] for row in custom["logs"]["rows"]] == [2, 3, 4, 5, 6, 7, 8]
+    assert [sample["elapsed_seconds"] for sample in custom["samples"]["rows"]] == [5]
+
+    heat = store.review_window(run_id, limit=10, events=["heat"])
+    assert [row["event"] for row in heat["logs"]["rows"]] == ["heat"]
+    assert heat["logs"]["total"] == 1
+    coast = store.review_window(run_id, limit=25, phases=["coast"])
+    assert [row["event"] for row in coast["logs"]["rows"]] == ["heat"]
+    assert store.review_window(999, limit=10) is None

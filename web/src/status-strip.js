@@ -1,5 +1,5 @@
 import { api } from './api.js'
-import { aboveBoiling, escapeHtml, formatDuration, formatHours, formatTarget, statusClass, statusLabel } from './format.js'
+import { aboveBoiling, escapeHtml, formatDuration, formatHours, formatRate, formatTarget, statusClass, statusLabel } from './format.js'
 import { setAppVersion, setSourceBadge } from './layout.js'
 
 export function mountStatusStrip(host) {
@@ -13,6 +13,10 @@ export function mountStatusStrip(host) {
           <span class="status-strip-timer" data-strip="timer" hidden>00:00:00</span>
         </span>
         <span class="status-strip-temps" data-strip="temps"></span>
+        <span class="status-strip-stat" data-strip="rate-stat">
+          <span class="status-strip-kicker">Rate</span>
+          <strong data-strip="rate">—</strong>
+        </span>
         <span class="status-strip-emergency" data-strip="emergency" hidden></span>
         <span class="status-strip-side">
           <span class="status-strip-climate" data-strip="climate">
@@ -65,6 +69,12 @@ export function mountStatusStrip(host) {
       stat.classList.toggle('is-hot', aboveBoiling(value))
       stat.querySelector(`[data-temp="${index}"]`).textContent = missing ? '—' : `${Number(value).toFixed(1)}°F`
     })
+    const perMin = status.rate_f_per_min
+    const rateStat = host.querySelector('[data-strip="rate-stat"]')
+    const rate = host.querySelector('[data-strip="rate"]')
+    rate.textContent = formatRate(perMin)
+    rateStat.classList.toggle('is-rising', Number(perMin) > 0.05)
+    rateStat.classList.toggle('is-falling', Number(perMin) < -0.05)
   }
 
   function renderHeaters(status) {
@@ -96,12 +106,24 @@ export function mountStatusStrip(host) {
 
   function render(status) {
     setSourceBadge(status.source)
-    setAppVersion(status.version)
+    setAppVersion(status)
     strip.dataset.mode = status.mode || 'idle'
     const mode = host.querySelector('[data-strip="mode"]')
     mode.textContent = statusLabel(status.mode)
     mode.className = `status-badge ${statusClass(status.mode)}`
-    host.querySelector('[data-strip="kind"]').hidden = status.run_kind !== 'calibration'
+    const kind = host.querySelector('[data-strip="kind"]')
+    const testing = status.run_kind === 'test' || Boolean(status.test && status.test.review)
+    if (status.run_kind === 'calibration') {
+      kind.hidden = false
+      kind.textContent = 'Calibration'
+      kind.className = 'status-badge status-calibration'
+    } else if (testing) {
+      kind.hidden = false
+      kind.textContent = 'Test'
+      kind.className = 'status-badge status-test'
+    } else {
+      kind.hidden = true
+    }
     const active = status.mode === 'running' || status.mode === 'paused' || status.mode === 'cooling'
     const timer = host.querySelector('[data-strip="timer"]')
     timer.hidden = !active

@@ -414,29 +414,40 @@ button { cursor: pointer; }
   grid-template-columns: minmax(0, 1fr) auto;
   grid-template-areas:
     "program program"
-    "main target";
-  gap: 14px 32px;
+    "main target"
+    "coast coast";
+  gap: 14px 28px;
   align-items: center;
 }
-.console-main { grid-area: main; }
+.console-main {
+  grid-area: main;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 12px;
+  min-width: 0;
+}
 .console-target {
   grid-area: target;
   padding-left: 28px;
   border-left: 1px solid var(--line);
 }
 .coast-readout {
+  grid-area: coast;
   color: var(--muted);
   font-size: 0.95rem;
   line-height: 1.4;
-  margin-top: 12px;
-  max-width: 42rem;
+  margin: 0;
+  max-width: 52rem;
 }
+.coast-readout:empty { display: none; }
 .console-launch {
   display: flex;
   flex-direction: column;
-  align-items: stretch;
-  gap: 14px;
-  margin-top: 16px;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 0;
 }
 .launch-row {
   display: flex;
@@ -460,6 +471,10 @@ button { cursor: pointer; }
   gap: 12px 16px;
 }
 .program-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.program-field[hidden],
+.hold-fields[hidden],
+.program-editor[hidden],
+.program-panel[hidden] { display: none; }
 .program-panel .source-choice { margin-top: 0; }
 .program-panel .source-choice label { min-width: 0; padding: 9px 16px; }
 .hold-clock {
@@ -1731,7 +1746,8 @@ tr[data-href] { cursor: pointer; }
     grid-template-areas:
       "program"
       "target"
-      "main";
+      "main"
+      "coast";
   }
   .console-target {
     padding: 0 0 14px;
@@ -1918,47 +1934,62 @@ tr[data-href] { cursor: pointer; }
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(340px, 0.92fr);
   gap: 16px;
-  align-items: stretch;
+  align-items: start;
 }
 .stage .probe-grid,
 .stage .console,
 .stage .plant-card { min-width: 0; }
-.stage[data-probes="1"] .probe-grid { height: 100%; }
+.stage[data-probes="1"] {
+  grid-template-columns: minmax(260px, 0.78fr) minmax(400px, 1.22fr);
+}
+.stage[data-probes="1"] .probe-grid { height: auto; }
 .stage[data-probes="1"] .probe {
-  height: 100%;
+  height: auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  justify-content: flex-start;
+  padding: 18px 22px 16px;
 }
-.stage[data-probes="1"] .probe-readout { margin-top: 14px; }
+.stage[data-probes="1"] .probe-readout { margin-top: 10px; }
+.stage[data-probes="1"] .probe-num { font-size: clamp(3.1rem, 4.6vw, 4.4rem); }
+.stage[data-probes="1"] .probe-rate { margin-top: 8px; font-size: 1.05rem; }
+.stage[data-probes="1"] .probe-delta { margin-top: 6px; }
 .stage[data-probes="1"] .console {
-  grid-template-columns: 1fr;
+  grid-template-columns: auto minmax(0, 1fr);
   grid-template-areas:
-    "program"
-    "target"
-    "main";
+    "program program"
+    "target main"
+    "coast coast";
   align-items: stretch;
-  align-content: center;
-  gap: 14px;
+  align-content: start;
+  gap: 16px 20px;
+}
+.stage[data-probes="1"] .console-main {
+  justify-content: center;
 }
 .stage[data-probes="1"] .console-target {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px 16px;
-  padding: 0 0 14px;
+  align-content: center;
+  gap: 8px 14px;
+  padding: 0 20px 0 0;
   border-left: none;
-  border-bottom: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+  border-bottom: none;
 }
 .stage[data-probes="1"] .console-target .target-field { margin: 0; }
 .stage[data-probes="1"] .console-target .boil-warning {
   flex: 1 0 100%;
   margin-top: 0;
 }
-.stage[data-probes="1"] .target-card #target-input { font-size: 2.75rem; }
+.stage[data-probes="1"] .target-card #target-input { font-size: 2.5rem; }
 .stage[data-probes="1"] .console .status-actions { flex: 0 1 auto; width: auto; }
 .stage[data-probes="1"] .console .action-btn { min-width: 7.25rem; flex: 0 0 auto; }
-.stage[data-probes="1"] .coast-readout { margin-top: 8px; }
+.stage[data-probes="1"] .test-review,
+.stage[data-probes="1"] #action-error { flex: 1 0 100%; margin-top: 0; }
+.stage[data-probes="1"] .coast-readout { margin: 0; }
 
 .stage[data-probes="1"][data-cabinet="off"] .probe-grid { grid-column: 1; grid-row: 1 / span 2; }
 .stage[data-probes="1"][data-cabinet="off"] .console { grid-column: 2; grid-row: 1; }
@@ -2048,6 +2079,7 @@ tr[data-href] { cursor: pointer; }
 
 @media (max-width: 1100px) {
   .stage,
+  .stage[data-probes="1"],
   .stage[data-probes="2"] {
     grid-template-columns: 1fr;
   }
@@ -2070,20 +2102,27 @@ tr[data-href] { cursor: pointer; }
   .stage[data-probes="1"] .probe {
     height: auto;
     display: block;
+    padding: 18px 20px 16px;
   }
+  .stage[data-probes="1"] .probe-num { font-size: clamp(3rem, 8vw, 4.2rem); }
   .stage[data-probes="1"] .console {
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas:
       "program program"
-      "main target";
+      "main target"
+      "coast coast";
     align-items: center;
     gap: 14px 32px;
   }
+  .stage[data-probes="1"] .console-main {
+    flex-direction: column;
+    align-items: flex-start;
+  }
   .stage[data-probes="1"] .console-target {
     display: block;
-    padding-left: 28px;
-    padding-bottom: 0;
+    padding: 0 0 0 28px;
     border-left: 1px solid var(--line);
+    border-right: none;
     border-bottom: none;
   }
   .stage[data-probes="1"] .console-target .target-field { margin: 10px 0 8px; }
@@ -2093,19 +2132,32 @@ tr[data-href] { cursor: pointer; }
 }
 
 @media (max-width: 800px) {
+  .stage[data-probes="1"] .probe { padding: 16px 16px 14px; }
+  .stage[data-probes="1"] .probe-num { font-size: clamp(2.8rem, 14vw, 3.4rem); }
   .stage[data-probes="1"] .console {
     grid-template-columns: 1fr;
     grid-template-areas:
       "program"
       "target"
-      "main";
+      "main"
+      "coast";
     align-items: stretch;
     gap: 14px;
+  }
+  .stage[data-probes="1"] .console-main {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .launch-row {
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
   }
   .stage[data-probes="1"] .console-target {
     display: block;
     padding: 0 0 14px;
     border-left: none;
+    border-right: none;
     border-top: none;
     border-bottom: 1px solid var(--line);
   }

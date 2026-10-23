@@ -196,7 +196,6 @@ export function mountDashboard(root) {
               <div class="timer-display" id="elapsed">00:00:00</div>
             </div>
           </div>
-          <p class="coast-readout" id="coast-readout"></p>
           <div class="test-review" id="test-review" hidden>
             <p id="test-review-copy"></p>
           </div>
@@ -232,6 +231,7 @@ export function mountDashboard(root) {
           </div>
           <p class="boil-warning" id="target-warning" hidden>Above water's boiling point (212°F).</p>
         </div>
+        <p class="coast-readout" id="coast-readout"></p>
       </section>
         <section class="dashboard-card plant-card" id="plant-card" aria-label="Cabinet and heaters">
           <div class="plant-body">
@@ -445,8 +445,11 @@ export function mountDashboard(root) {
     const live = status.mode === 'running' || status.mode === 'paused'
     const program = status.program || {}
     const holdRun = live && status.run_kind !== 'calibration' && status.run_kind !== 'test'
-    document.getElementById('mode-field').hidden = live
-    document.getElementById('hold-fields').hidden = live || selectedProgramMode() !== 'hold'
+    const modeField = document.getElementById('mode-field')
+    const holdFields = document.getElementById('hold-fields')
+    modeField.hidden = live
+    holdFields.hidden = live || selectedProgramMode() !== 'hold'
+    document.querySelector('.program-editor').hidden = modeField.hidden && holdFields.hidden
     const readout = document.getElementById('program-readout')
     readout.hidden = !holdRun
     if (holdRun) readout.innerHTML = holdReadout(program)
@@ -459,6 +462,8 @@ export function mountDashboard(root) {
     } else {
       cap.hidden = true
     }
+    document.getElementById('program-panel').hidden =
+      document.querySelector('.program-editor').hidden && readout.hidden && cap.hidden
     if (!live) fillProgram(program)
   }
 
